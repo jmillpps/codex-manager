@@ -137,6 +137,33 @@ async function main() {
     const sessionId = createSession.body?.session?.sessionId;
     assert.equal(typeof sessionId, "string");
 
+    const sessionsAfterCreate = await request("/sessions?archived=false&limit=200");
+    assert.equal(sessionsAfterCreate.status, 200);
+    const activeCountAfterCreate = Array.isArray(sessionsAfterCreate.body?.data) ? sessionsAfterCreate.body.data.length : -1;
+    assert.ok(activeCountAfterCreate >= 1, "expected at least one active session after create");
+
+    const suggestedReplyWithDraft = await request(`/sessions/${encodeURIComponent(sessionId)}/suggested-reply`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ draft: "Please improve this sentence." })
+    });
+    assert.equal(suggestedReplyWithDraft.status, 200);
+    assert.equal(typeof suggestedReplyWithDraft.body?.suggestion, "string");
+    assert.ok(suggestedReplyWithDraft.body.suggestion.length > 0);
+
+    const suggestedReplyNoContext = await request(`/sessions/${encodeURIComponent(sessionId)}/suggested-reply`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    });
+    assert.equal(suggestedReplyNoContext.status, 409);
+    assert.equal(suggestedReplyNoContext.body?.status, "no_context");
+
+    const sessionsAfterSuggest = await request("/sessions?archived=false&limit=200");
+    assert.equal(sessionsAfterSuggest.status, 200);
+    const activeCountAfterSuggest = Array.isArray(sessionsAfterSuggest.body?.data) ? sessionsAfterSuggest.body.data.length : -1;
+    assert.equal(activeCountAfterSuggest, activeCountAfterCreate, "suggested-reply should not leak helper sessions into session list");
+
     const invalidRollback = await request(`/sessions/${encodeURIComponent(sessionId)}/rollback`, {
       method: "POST",
       headers: { "content-type": "application/json" },

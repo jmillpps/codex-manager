@@ -1757,6 +1757,54 @@
         }
       }
     },
+    "/api/sessions/{sessionId}/suggested-reply": {
+      "post": {
+        "summary": "Generate a suggested user reply for a session",
+        "operationId": "suggestSessionReply",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Session id"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  },
+                  "draft": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Suggested reply generated"
+          },
+          "409": {
+            "description": "No available context for suggestion"
+          },
+          "410": {
+            "description": "Session deleted"
+          }
+        }
+      }
+    },
     "/api/sessions/{sessionId}/project": {
       "post": {
         "summary": "Assign or unassign a session project",

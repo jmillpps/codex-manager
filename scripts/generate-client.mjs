@@ -425,8 +425,11 @@ export async function listProjects(baseUrl = "/api"): Promise<{ data: Array<Proj
   return requestJson<{ data: Array<ProjectSummary> }>(baseUrl + "/projects", {}, "list projects failed");
 }
 
-export async function createProject(name: string, baseUrl = "/api"): Promise<{ status: string; project: ProjectSummary }> {
-  return requestJson<{ status: string; project: ProjectSummary }>(
+export async function createProject(
+  name: string,
+  baseUrl = "/api"
+): Promise<{ status: string; project: ProjectSummary; orchestrationSession?: SessionSummary | null }> {
+  return requestJson<{ status: string; project: ProjectSummary; orchestrationSession?: SessionSummary | null }>(
     baseUrl + "/projects",
     {
       method: "POST",
@@ -741,6 +744,23 @@ export async function resumeSession(sessionId: string, baseUrl = "/api"): Promis
     },
     "resume session failed",
     [200, 410]
+  );
+}
+
+export async function suggestSessionReply(
+  sessionId: string,
+  body: { model?: string; draft?: string } = {},
+  baseUrl = "/api"
+): Promise<{ status: string; sessionId: string; suggestion: string }> {
+  return requestJson<{ status: string; sessionId: string; suggestion: string }>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/suggested-reply",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    },
+    "suggest session reply failed",
+    [200, 409, 410]
   );
 }
 

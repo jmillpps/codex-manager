@@ -37,6 +37,7 @@ Implemented now:
 
 - API process startup and Codex JSON-RPC handshake/supervision
 - API session lifecycle endpoints (`/api/sessions*`) including list/create/read/resume/rename/archive/unarchive/delete, plus turn actions (`messages`, `interrupt`)
+- API suggested-reply endpoint (`POST /api/sessions/:sessionId/suggested-reply`) with project-orchestrator routing, helper-thread fallback, non-materialized no-context handling (`status: "fallback"` when draft exists; HTTP `409 no_context` when neither draft nor transcript context exist), and helper-session cleanup so suggestion internals do not appear in session lists
 - API project endpoints (`/api/projects*`) including list/create/rename/delete (with empty-project enforcement), bulk project chat operations (`POST /api/projects/:projectId/chats/move-all`, `POST /api/projects/:projectId/chats/delete-all`), and session assignment (`POST /api/sessions/:sessionId/project`)
 - API capability endpoints (`/api/models`, `/api/mcp/servers`) for model discovery and MCP status visibility
 - API approval endpoints (`/api/sessions/:sessionId/approvals`, `/api/approvals/:approvalId/decision`)
@@ -45,6 +46,7 @@ Implemented now:
 - Archived sidebar filtering: in `Show archived` mode, only project groups containing archived chats are rendered; the `Projects` section is omitted when no project has archived chats, and `Your chats` is omitted when no unassigned archived chats exist.
 - System/tool/approval events rendered with grouped cards, status chips, details expansion, and transcript filters
 - Chat layout keeps left navigation and right chat surfaces independently scrollable, with the composer pinned at the bottom of the right pane.
+- Suggested-reply UI requests are session-aware and abort stale in-flight calls so delayed responses do not overwrite drafts after switching chats.
 - New sessions are exposed immediately in `/api/sessions` via loaded-thread merge, even before Codex rollout materialization.
 - Session summaries include `materialized` to indicate whether the thread has a persisted rollout (first user turn completed/started).
 - Non-materialized sessions come from `thread/loaded/list` (in-memory runtime state). They are not guaranteed to survive API/Codex process restart until a first message materializes a rollout.

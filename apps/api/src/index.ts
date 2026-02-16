@@ -162,6 +162,7 @@ type SessionMetadataStore = {
   projects: Record<string, ProjectRecord>;
   sessionProjectById: Record<string, string>;
   projectOrchestratorSessionById: Record<string, string>;
+  suggestionHelperSessionIds: Record<string, true>;
 };
 
 type DeletedSessionPayload = {
@@ -460,6 +461,7 @@ let capabilitiesLastUpdatedAt: string | null = null;
 let capabilitiesInitialized = false;
 let capabilitiesRefreshInFlight: Promise<void> | null = null;
 let projectOrchestratorsEnsureInFlight: Promise<void> | null = null;
+let suggestionHelpersCleanupInFlight: Promise<void> | null = null;
 
 const capabilityMethodProbes: Array<CapabilityMethodProbe> = [
   { method: "thread/fork", probeParams: {} },
@@ -516,6 +518,7 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
     const projects: Record<string, ProjectRecord> = {};
     const sessionProjectById: Record<string, string> = {};
     const projectOrchestratorSessionById: Record<string, string> = {};
+    const suggestionHelperSessionIds: Record<string, true> = {};
     const now = new Date().toISOString();
 
     if (isObjectRecord(parsed) && isObjectRecord(parsed.titles)) {
@@ -571,11 +574,20 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
       }
     }
 
+    if (isObjectRecord(parsed) && isObjectRecord(parsed.suggestionHelperSessionIds)) {
+      for (const [sessionId, enabled] of Object.entries(parsed.suggestionHelperSessionIds)) {
+        if (enabled === true) {
+          suggestionHelperSessionIds[sessionId] = true;
+        }
+      }
+    }
+
     return {
       titles,
       projects,
       sessionProjectById,
-      projectOrchestratorSessionById
+      projectOrchestratorSessionById,
+      suggestionHelperSessionIds
     };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -586,7 +598,8 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
       titles: {},
       projects: {},
       sessionProjectById: {},
-      projectOrchestratorSessionById: {}
+      projectOrchestratorSessionById: {},
+      suggestionHelperSessionIds: {}
     };
   }
 }
@@ -786,6 +799,58 @@ function clearProjectOrchestratorSessionForSession(sessionId: string): boolean {
     changed = true;
   }
   return changed;
+}
+
+function isSuggestionHelperSession(sessionId: string): boolean {
+  return sessionMetadata.suggestionHelperSessionIds[sessionId] === true;
+}
+
+function setSuggestionHelperSession(sessionId: string, enabled: boolean): boolean {
+  if (enabled) {
+    if (sessionMetadata.suggestionHelperSessionIds[sessionId] === true) {
+      return false;
+    }
+    sessionMetadata.suggestionHelperSessionIds[sessionId] = true;
+    return true;
+  }
+
+  if (sessionId in sessionMetadata.suggestionHelperSessionIds) {
+    delete sessionMetadata.suggestionHelperSessionIds[sessionId];
+    return true;
+  }
+
+  return false;
+}
+
+async function cleanupSuggestionHelperSessions(): Promise<void> {
+  if (suggestionHelpersCleanupInFlight) {
+    await suggestionHelpersCleanupInFlight;
+    return;
+  }
+
+  const helperSessionIds = Object.keys(sessionMetadata.suggestionHelperSessionIds);
+  if (helperSessionIds.length === 0) {
+    return;
+  }
+
+  suggestionHelpersCleanupInFlight = (async () => {
+    for (const sessionId of helperSessionIds) {
+      if (suggestionThreadIds.has(sessionId)) {
+        continue;
+      }
+      try {
+        await hardDeleteSession(sessionId);
+      } catch (error) {
+        app.log.warn({ error, sessionId }, "failed to clean up suggestion helper session");
+      }
+    }
+  })();
+
+  try {
+    await suggestionHelpersCleanupInFlight;
+  } finally {
+    suggestionHelpersCleanupInFlight = null;
+  }
 }
 
 function listSessionIdsForProject(projectId: string): Array<string> {
@@ -1090,7 +1155,7 @@ function buildFallbackSuggestedReply(contextEntries: Array<TranscriptEntry>, dra
 async function ensureSuggestionThread(sessionId: string, sourceThread: CodexThread, model?: string): Promise<string> {
   const previousThreadId = suggestionThreadBySession.get(sessionId);
   if (previousThreadId) {
-    suggestionThreadIds.delete(previousThreadId);
+    await cleanupSuggestionThread(sessionId, previousThreadId);
   }
 
   const created = await supervisor.call<{ thread: CodexThread }>("thread/start", {
@@ -1103,6 +1168,9 @@ async function ensureSuggestionThread(sessionId: string, sourceThread: CodexThre
   const helperThreadId = created.thread.id;
   suggestionThreadBySession.set(sessionId, helperThreadId);
   suggestionThreadIds.add(helperThreadId);
+  if (setSuggestionHelperSession(helperThreadId, true)) {
+    await persistSessionMetadata();
+  }
 
   try {
     await supervisor.call("thread/archive", {
@@ -1113,6 +1181,19 @@ async function ensureSuggestionThread(sessionId: string, sourceThread: CodexThre
   }
 
   return helperThreadId;
+}
+
+async function cleanupSuggestionThread(sessionId: string, helperThreadId: string): Promise<void> {
+  if (suggestionThreadBySession.get(sessionId) === helperThreadId) {
+    suggestionThreadBySession.delete(sessionId);
+  }
+  suggestionThreadIds.delete(helperThreadId);
+
+  try {
+    await hardDeleteSession(helperThreadId);
+  } catch (error) {
+    app.log.warn({ error, sessionId, helperThreadId }, "failed to cleanup suggestion helper thread");
+  }
 }
 
 async function waitForSuggestedReply(helperThreadId: string, turnId: string): Promise<string> {
@@ -1871,6 +1952,9 @@ async function classifyProjectSessionAssignments(sessionIds: Array<string>): Pro
 
 async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOutcome> {
   if (isSessionPurged(sessionId)) {
+    if (setSuggestionHelperSession(sessionId, false)) {
+      await persistSessionMetadata();
+    }
     return {
       status: "gone",
       payload: deletedSessionPayload(sessionId, sessionMetadata.titles[sessionId])
@@ -1920,6 +2004,13 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
     sessionReadSucceeded ||
     knownPath !== null;
   if (!existsInMemory && deletedPaths.length === 0) {
+    const titleMetadataChanged = setSessionTitleOverride(sessionId, null);
+    const projectMetadataChanged = setSessionProjectAssignment(sessionId, null);
+    const orchestratorMetadataChanged = clearProjectOrchestratorSessionForSession(sessionId);
+    const helperMetadataChanged = setSuggestionHelperSession(sessionId, false);
+    if (titleMetadataChanged || projectMetadataChanged || orchestratorMetadataChanged || helperMetadataChanged) {
+      await persistSessionMetadata();
+    }
     return {
       status: "not_found",
       sessionId
@@ -1943,7 +2034,8 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
   const titleMetadataChanged = setSessionTitleOverride(sessionId, null);
   const projectMetadataChanged = setSessionProjectAssignment(sessionId, null);
   const orchestratorMetadataChanged = clearProjectOrchestratorSessionForSession(sessionId);
-  if (titleMetadataChanged || projectMetadataChanged || orchestratorMetadataChanged) {
+  const helperMetadataChanged = setSuggestionHelperSession(sessionId, false);
+  if (titleMetadataChanged || projectMetadataChanged || orchestratorMetadataChanged || helperMetadataChanged) {
     await persistSessionMetadata();
   }
 
@@ -2189,7 +2281,7 @@ function clearPendingApprovalsForTurn(threadId: string, turnId: string): void {
 
 supervisor.on("notification", (notification: JsonRpcNotification) => {
   const threadId = extractThreadId(notification.params);
-  if (threadId && suggestionThreadIds.has(threadId)) {
+  if (threadId && (suggestionThreadIds.has(threadId) || isSuggestionHelperSession(threadId))) {
     return;
   }
   if (threadId && isSessionPurged(threadId)) {
@@ -2264,7 +2356,7 @@ supervisor.on("notification", (notification: JsonRpcNotification) => {
 
 supervisor.on("serverRequest", (serverRequest: JsonRpcServerRequest) => {
   const requestThreadId = extractThreadId(serverRequest.params);
-  if (requestThreadId && suggestionThreadIds.has(requestThreadId)) {
+  if (requestThreadId && (suggestionThreadIds.has(requestThreadId) || isSuggestionHelperSession(requestThreadId))) {
     const approval = createPendingApproval(serverRequest);
     if (approval) {
       const payload = approvalDecisionPayload(approval, "decline", "turn");
@@ -3157,6 +3249,7 @@ app.post("/api/projects/:projectId/chats/delete-all", async (request, reply) => 
 });
 
 app.get("/api/sessions", async (request) => {
+  await cleanupSuggestionHelperSessions();
   await ensureProjectOrchestrationSessions();
   const query = listSessionsQuerySchema.parse(request.query);
   const archived = query.archived === "true";
@@ -3169,7 +3262,7 @@ app.get("/api/sessions", async (request) => {
     cursor
   });
 
-  const threads = response.data.filter((thread) => !isSessionPurged(thread.id));
+  const threads = response.data.filter((thread) => !isSessionPurged(thread.id) && !isSuggestionHelperSession(thread.id));
   const materializedByThreadId = new Map<string, boolean>();
   for (const thread of threads) {
     materializedByThreadId.set(thread.id, true);
@@ -3179,7 +3272,9 @@ app.get("/api/sessions", async (request) => {
     try {
       const loaded = await supervisor.call<{ data: Array<string> }>("thread/loaded/list", {});
       const existingIds = new Set(threads.map((thread) => thread.id));
-      const missingThreadIds = loaded.data.filter((threadId) => !existingIds.has(threadId) && !isSessionPurged(threadId));
+      const missingThreadIds = loaded.data.filter(
+        (threadId) => !existingIds.has(threadId) && !isSessionPurged(threadId) && !isSuggestionHelperSession(threadId)
+      );
 
       if (missingThreadIds.length > 0) {
         const loadedThreads = await Promise.all(
@@ -3677,16 +3772,45 @@ app.post("/api/sessions/:sessionId/suggested-reply", async (request, reply) => {
   }
   const body = suggestedReplyBodySchema.parse(request.body);
 
-  const source = await supervisor.call<{ thread: CodexThread }>("thread/read", {
-    threadId: params.sessionId,
-    includeTurns: true
-  });
-  const transcript = turnsToTranscript(Array.isArray(source.thread.turns) ? source.thread.turns : []);
+  let sourceThread: CodexThread;
+  let transcript: Array<TranscriptEntry>;
+  try {
+    const source = await supervisor.call<{ thread: CodexThread }>("thread/read", {
+      threadId: params.sessionId,
+      includeTurns: true
+    });
+    sourceThread = source.thread;
+    transcript = turnsToTranscript(Array.isArray(source.thread.turns) ? source.thread.turns : []);
+  } catch (error) {
+    if (!isIncludeTurnsUnavailableError(error)) {
+      return sendMappedCodexError(reply, error, "failed to load suggestion context", {
+        method: "thread/read",
+        sessionId: params.sessionId
+      });
+    }
+
+    const source = await supervisor.call<{ thread: CodexThread }>("thread/read", {
+      threadId: params.sessionId,
+      includeTurns: false
+    });
+    sourceThread = source.thread;
+    transcript = [];
+  }
+
   const contextEntries = transcript
     .filter((entry) => (entry.role === "user" || entry.role === "assistant") && entry.content.trim().length > 0)
     .slice(-12);
 
   if (contextEntries.length === 0) {
+    const fallbackSuggestion = buildFallbackSuggestedReply(contextEntries, body?.draft);
+    if (fallbackSuggestion.trim().length > 0 && typeof body?.draft === "string" && body.draft.trim().length > 0) {
+      return {
+        status: "fallback",
+        sessionId: params.sessionId,
+        suggestion: fallbackSuggestion
+      };
+    }
+
     reply.code(409);
     return {
       status: "no_context",
@@ -3746,7 +3870,7 @@ app.post("/api/sessions/:sessionId/suggested-reply", async (request, reply) => {
       }
     }
 
-    helperThreadId = await ensureSuggestionThread(params.sessionId, source.thread, body?.model);
+    helperThreadId = await ensureSuggestionThread(params.sessionId, sourceThread, body?.model);
     targetThreadId = helperThreadId;
     try {
       const suggestion = await runSuggestionTurn(targetThreadId);
@@ -3761,7 +3885,7 @@ app.post("/api/sessions/:sessionId/suggested-reply", async (request, reply) => {
     }
 
     // One additional helper attempt handles transient thread/read races without immediately degrading to fallback text.
-    helperThreadId = await ensureSuggestionThread(params.sessionId, source.thread, body?.model);
+    helperThreadId = await ensureSuggestionThread(params.sessionId, sourceThread, body?.model);
     targetThreadId = helperThreadId;
     const suggestion = await runSuggestionTurn(targetThreadId);
     return {
@@ -3782,7 +3906,7 @@ app.post("/api/sessions/:sessionId/suggested-reply", async (request, reply) => {
     };
   } finally {
     if (helperThreadId) {
-      suggestionThreadIds.delete(helperThreadId);
+      await cleanupSuggestionThread(params.sessionId, helperThreadId);
     }
   }
 });
@@ -4008,6 +4132,7 @@ process.on("SIGTERM", () => {
 
 await supervisor.start();
 try {
+  await cleanupSuggestionHelperSessions();
   await ensureProjectOrchestrationSessions();
   await refreshCapabilities();
 } catch (error) {

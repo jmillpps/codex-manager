@@ -37,7 +37,7 @@ Use this with:
 - Messaging and turn control:
   - send message (`turn/start`) and interrupt.
   - new user-created chats are initialized with a short sticky default title (`New chat`) and remain renameable via existing rename flow.
-  - suggested reply endpoint (`POST /api/sessions/:sessionId/suggested-reply`) that uses the project orchestration chat when the source chat belongs to a project (falls back to helper thread for unassigned chats), sanitizes orchestration scaffolding from model output, and returns deterministic fallback text when generation fails.
+  - suggested reply endpoint (`POST /api/sessions/:sessionId/suggested-reply`) that uses the project orchestration chat when the source chat belongs to a project (falls back to helper thread for unassigned chats), sanitizes orchestration scaffolding from model output, supports non-materialized chats by returning draft-based fallback text (or `409 no_context` when no draft/context exists), and hard-cleans helper sessions so they do not leak into user-visible chat lists.
   - thread actions: fork, compact, rollback, background terminals clean, review start.
   - turn steering endpoint for active turns.
 - Approvals + tool user-input:
@@ -82,6 +82,7 @@ Use this with:
   - websocket reconnect/backoff.
   - streamed transcript rendering with filters (All/Chat/Tools/Approvals).
   - composer uses a single message input; `Suggest Reply` populates that same draft box and `Ctrl+Enter` sends.
+  - suggest-reply requests are race-guarded so late responses do not overwrite the draft after session switches or user edits.
   - pending approval cards and approval decisions.
   - tool-input request cards with answer submission.
   - active-turn controls (interrupt + steer).
@@ -96,7 +97,9 @@ Use this with:
 - OpenAPI generation now includes the expanded API surface for session controls, settings/account/integration APIs, and tool-input endpoints.
 - Generated API client includes helpers for:
   - project bulk operations,
+  - project creation with optional `orchestrationSession` response payload,
   - thread-control endpoints,
+  - suggested-reply endpoint (`suggestSessionReply`),
   - capability/settings/account/integration endpoints,
   - tool-input decision endpoint,
   - existing session/message/approval operations.

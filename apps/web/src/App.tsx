@@ -602,6 +602,12 @@ export function App() {
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const threadMenuRef = useRef<HTMLDivElement | null>(null);
   const threadMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const suggestedReplyAbortRef = useRef<AbortController | null>(null);
+  const suggestedReplyRequestIdRef = useRef(0);
+  const selectedSessionIdRef = useRef<string | null>(null);
+  const draftRef = useRef("");
+  selectedSessionIdRef.current = selectedSessionId;
+  draftRef.current = draft;
   const selectedSession = useMemo(
     () => sessions.find((session) => session.sessionId === selectedSessionId) ?? null,
     [sessions, selectedSessionId]
@@ -2104,22 +2110,31 @@ export function App() {
       return;
     }
 
+    const sessionIdAtStart = selectedSessionId;
+    const draftAtStart = draft.trim();
+    suggestedReplyAbortRef.current?.abort();
+    const controller = new AbortController();
+    suggestedReplyAbortRef.current = controller;
+    const requestId = suggestedReplyRequestIdRef.current + 1;
+    suggestedReplyRequestIdRef.current = requestId;
+
     setError(null);
     setLoadingSuggestedReply(true);
     try {
-      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(selectedSessionId)}/suggested-reply`, {
+      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(sessionIdAtStart)}/suggested-reply`, {
         method: "POST",
         headers: {
           "content-type": "application/json"
         },
         body: JSON.stringify({
           model: selectedModelId || undefined,
-          draft: draft.trim() || undefined
-        })
+          draft: draftAtStart || undefined
+        }),
+        signal: controller.signal
       });
 
       if (!response.ok) {
-        if (await handleDeletedSessionResponse(response, selectedSessionId)) {
+        if (await handleDeletedSessionResponse(response, sessionIdAtStart)) {
           return;
         }
         throw new Error(`failed to load suggested reply (${response.status})`);
@@ -2128,12 +2143,27 @@ export function App() {
       const payload = (await response.json()) as { suggestion?: string };
       const suggestion = typeof payload.suggestion === "string" ? payload.suggestion.trim() : "";
       if (suggestion) {
+        if (controller.signal.aborted || suggestedReplyRequestIdRef.current !== requestId) {
+          return;
+        }
+        if (selectedSessionIdRef.current !== sessionIdAtStart) {
+          return;
+        }
+        if (draftRef.current.trim() !== draftAtStart) {
+          return;
+        }
         setDraft(suggestion);
       }
     } catch (err) {
+      if (controller.signal.aborted) {
+        return;
+      }
       setError(err instanceof Error ? err.message : "failed to load suggested reply");
     } finally {
-      setLoadingSuggestedReply(false);
+      if (suggestedReplyRequestIdRef.current === requestId) {
+        setLoadingSuggestedReply(false);
+        suggestedReplyAbortRef.current = null;
+      }
     }
   };
 
@@ -2851,6 +2881,10 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    suggestedReplyAbortRef.current?.abort();
+    suggestedReplyAbortRef.current = null;
+    suggestedReplyRequestIdRef.current += 1;
+
     if (!selectedSessionId) {
       setMessages([]);
       setPendingApprovals([]);
@@ -2871,6 +2905,14 @@ export function App() {
     void loadSessionApprovals(selectedSessionId);
     void loadSessionToolInputs(selectedSessionId);
   }, [selectedSessionId]);
+
+  useEffect(() => {
+    return () => {
+      suggestedReplyAbortRef.current?.abort();
+      suggestedReplyAbortRef.current = null;
+      suggestedReplyRequestIdRef.current += 1;
+    };
+  }, []);
 
   useEffect(() => {
     if (!showSettings) {

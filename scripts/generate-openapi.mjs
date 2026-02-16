@@ -781,6 +781,28 @@ const openApiDocument = {
         ])
       }
     },
+    "/api/sessions/{sessionId}/suggested-reply": {
+      post: {
+        summary: "Generate a suggested user reply for a session",
+        operationId: "suggestSessionReply",
+        parameters: [pathParam("sessionId", "Session id")],
+        requestBody: requestBody(
+          {
+            type: "object",
+            properties: {
+              model: { type: "string" },
+              draft: { type: "string", minLength: 1, maxLength: 4000 }
+            }
+          },
+          false
+        ),
+        responses: responses([
+          [200, "Suggested reply generated"],
+          [409, "No available context for suggestion"],
+          [410, "Session deleted"]
+        ])
+      }
+    },
     "/api/sessions/{sessionId}/project": {
       post: {
         summary: "Assign or unassign a session project",
