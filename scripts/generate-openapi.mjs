@@ -1,0 +1,542 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+
+const root = process.cwd();
+const outputPath = path.join(root, "apps", "api", "openapi", "openapi.json");
+
+const openApiDocument = {
+  openapi: "3.1.0",
+  info: {
+    title: "Codex Manager API",
+    version: "0.9.0"
+  },
+  paths: {
+    "/api/health": {
+      get: {
+        summary: "Health check",
+        operationId: "getHealth",
+        responses: {
+          "200": {
+            description: "Service health",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["status", "service", "timestamp", "codex", "auth"],
+                  properties: {
+                    status: { type: "string" },
+                    service: { type: "string" },
+                    timestamp: { type: "string", format: "date-time" },
+                    codex: {
+                      type: "object",
+                      required: ["running", "pid", "initialized"],
+                      properties: {
+                        running: { type: "boolean" },
+                        pid: { type: ["integer", "null"] },
+                        initialized: { type: "boolean" }
+                      }
+                    },
+                    auth: {
+                      type: "object",
+                      required: ["hasOpenAiApiKey", "codexHomeAuthFile", "likelyUnauthenticated"],
+                      properties: {
+                        hasOpenAiApiKey: { type: "boolean" },
+                        codexHomeAuthFile: { type: "boolean" },
+                        likelyUnauthenticated: { type: "boolean" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions": {
+      get: {
+        summary: "List sessions",
+        operationId: "listSessions",
+        parameters: [
+          {
+            in: "query",
+            name: "archived",
+            required: false,
+            schema: { type: "boolean" },
+            description: "When true, return archived sessions instead of active sessions."
+          },
+          {
+            in: "query",
+            name: "cursor",
+            required: false,
+            schema: { type: "string" },
+            description: "Pagination cursor from a previous list response."
+          },
+          {
+            in: "query",
+            name: "limit",
+            required: false,
+            schema: { type: "integer", minimum: 1, maximum: 200 },
+            description: "Maximum sessions to return."
+          }
+        ],
+        responses: {
+          "200": {
+            description: "Session list"
+          }
+        }
+      },
+      post: {
+        summary: "Create a session",
+        operationId: "createSession",
+        responses: {
+          "200": {
+            description: "Created session"
+          }
+        }
+      }
+    },
+    "/api/models": {
+      get: {
+        summary: "List available models",
+        operationId: "listModels",
+        parameters: [
+          {
+            in: "query",
+            name: "cursor",
+            required: false,
+            schema: { type: "string" }
+          },
+          {
+            in: "query",
+            name: "limit",
+            required: false,
+            schema: { type: "integer", minimum: 1, maximum: 200 }
+          }
+        ],
+        responses: {
+          "200": {
+            description: "Model list"
+          }
+        }
+      }
+    },
+    "/api/mcp/servers": {
+      get: {
+        summary: "List MCP server statuses",
+        operationId: "listMcpServers",
+        parameters: [
+          {
+            in: "query",
+            name: "cursor",
+            required: false,
+            schema: { type: "string" }
+          },
+          {
+            in: "query",
+            name: "limit",
+            required: false,
+            schema: { type: "integer", minimum: 1, maximum: 200 }
+          }
+        ],
+        responses: {
+          "200": {
+            description: "MCP server statuses"
+          }
+        }
+      }
+    },
+    "/api/projects": {
+      get: {
+        summary: "List projects",
+        operationId: "listProjects",
+        responses: {
+          "200": {
+            description: "Project list"
+          }
+        }
+      },
+      post: {
+        summary: "Create a project",
+        operationId: "createProject",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["name"],
+                properties: {
+                  name: { type: "string", minLength: 1, maxLength: 120 }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Project created"
+          },
+          "409": {
+            description: "Duplicate project name"
+          }
+        }
+      }
+    },
+    "/api/projects/{projectId}/rename": {
+      post: {
+        summary: "Rename a project",
+        operationId: "renameProject",
+        parameters: [
+          {
+            in: "path",
+            name: "projectId",
+            required: true,
+            schema: { type: "string" }
+          }
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["name"],
+                properties: {
+                  name: { type: "string", minLength: 1, maxLength: 120 }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Project renamed"
+          },
+          "404": {
+            description: "Project not found"
+          },
+          "409": {
+            description: "Duplicate project name"
+          }
+        }
+      }
+    },
+    "/api/projects/{projectId}": {
+      delete: {
+        summary: "Delete a project",
+        operationId: "deleteProject",
+        parameters: [
+          {
+            in: "path",
+            name: "projectId",
+            required: true,
+            schema: { type: "string" }
+          }
+        ],
+        responses: {
+          "200": {
+            description: "Project deleted"
+          },
+          "404": {
+            description: "Project not found"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}": {
+      get: {
+        summary: "Read a session transcript",
+        operationId: "readSession",
+        parameters: [
+          {
+            in: "path",
+            name: "sessionId",
+            required: true,
+            schema: { type: "string" }
+          }
+        ],
+        responses: {
+          "200": {
+            description: "Session detail"
+          }
+        }
+      },
+      delete: {
+        summary: "Permanently delete a session",
+        operationId: "deleteSession",
+        parameters: [
+          {
+            in: "path",
+            name: "sessionId",
+            required: true,
+            schema: { type: "string" }
+          }
+        ],
+        responses: {
+          "200": {
+            description: "Session deleted"
+          },
+          "404": {
+            description: "Session not found"
+          },
+          "410": {
+            description: "Session was already deleted"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/rename": {
+      post: {
+        summary: "Rename a session",
+        operationId: "renameSession",
+        parameters: [
+          {
+            in: "path",
+            name: "sessionId",
+            required: true,
+            schema: { type: "string" }
+          }
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["title"],
+                properties: {
+                  title: { type: "string", minLength: 1, maxLength: 200 }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Session renamed"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/archive": {
+      post: {
+        summary: "Archive a session",
+        operationId: "archiveSession",
+        parameters: [
+          {
+            in: "path",
+            name: "sessionId",
+            required: true,
+            schema: { type: "string" }
+          }
+        ],
+        responses: {
+          "200": {
+            description: "Session archived"
+          },
+          "409": {
+            description: "Session is not materialized yet (send first message before archiving)"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/unarchive": {
+      post: {
+        summary: "Unarchive a session",
+        operationId: "unarchiveSession",
+        parameters: [
+          {
+            in: "path",
+            name: "sessionId",
+            required: true,
+            schema: { type: "string" }
+          }
+        ],
+        responses: {
+          "200": {
+            description: "Session unarchived"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/approvals": {
+      get: {
+        summary: "List pending approvals for a session",
+        operationId: "listSessionApprovals",
+        parameters: [
+          {
+            in: "path",
+            name: "sessionId",
+            required: true,
+            schema: { type: "string" }
+          }
+        ],
+        responses: {
+          "200": {
+            description: "Pending approvals"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/resume": {
+      post: {
+        summary: "Resume a session",
+        operationId: "resumeSession",
+        parameters: [
+          {
+            in: "path",
+            name: "sessionId",
+            required: true,
+            schema: { type: "string" }
+          }
+        ],
+        responses: {
+          "200": {
+            description: "Resumed session"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/project": {
+      post: {
+        summary: "Assign or unassign a session project",
+        operationId: "setSessionProject",
+        parameters: [
+          {
+            in: "path",
+            name: "sessionId",
+            required: true,
+            schema: { type: "string" }
+          }
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["projectId"],
+                properties: {
+                  projectId: {
+                    type: ["string", "null"],
+                    minLength: 1,
+                    maxLength: 200
+                  }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Session project updated"
+          },
+          "404": {
+            description: "Session or project not found"
+          },
+          "410": {
+            description: "Session was already deleted"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/messages": {
+      post: {
+        summary: "Start a turn in a session",
+        operationId: "sendSessionMessage",
+        parameters: [
+          {
+            in: "path",
+            name: "sessionId",
+            required: true,
+            schema: { type: "string" }
+          }
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["text"],
+                properties: {
+                  text: { type: "string" },
+                  model: { type: "string" }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "202": {
+            description: "Turn accepted"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/interrupt": {
+      post: {
+        summary: "Interrupt active turn",
+        operationId: "interruptSessionTurn",
+        parameters: [
+          {
+            in: "path",
+            name: "sessionId",
+            required: true,
+            schema: { type: "string" }
+          }
+        ],
+        responses: {
+          "200": {
+            description: "Turn interrupted"
+          },
+          "409": {
+            description: "No active turn"
+          }
+        }
+      }
+    },
+    "/api/approvals/{approvalId}/decision": {
+      post: {
+        summary: "Submit approval decision",
+        operationId: "decideApproval",
+        parameters: [
+          {
+            in: "path",
+            name: "approvalId",
+            required: true,
+            schema: { type: "string" }
+          }
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["decision"],
+                properties: {
+                  decision: { type: "string", enum: ["accept", "decline", "cancel"] },
+                  scope: { type: "string", enum: ["turn", "session"] }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": {
+            description: "Decision submitted"
+          },
+          "404": {
+            description: "Approval not found"
+          }
+        }
+      }
+    }
+  }
+};
+
+await mkdir(path.dirname(outputPath), { recursive: true });
+await writeFile(outputPath, `${JSON.stringify(openApiDocument, null, 2)}\n`, "utf8");
+console.log(`wrote ${path.relative(root, outputPath)}`);

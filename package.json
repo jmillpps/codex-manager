@@ -1,0 +1,27 @@
+{
+  "name": "codex-manager",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.29.3",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n api,web \"pnpm --filter @repo/api dev\" \"pnpm --filter @repo/web dev\"",
+    "dev:api": "pnpm --filter @repo/api dev",
+    "dev:web": "pnpm --filter @repo/web dev",
+    "openapi:gen": "node scripts/generate-openapi.mjs",
+    "client:gen": "node scripts/generate-client.mjs",
+    "gen": "pnpm openapi:gen && pnpm client:gen",
+    "codex:schema": "node scripts/generate-codex-schema.mjs",
+    "lint": "pnpm -r --if-present lint",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
+    "build": "pnpm -r --if-present build"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.3"
+  }
+}
