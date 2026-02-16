@@ -51,7 +51,7 @@ Implemented now:
 - Session summaries include `projectId` (`string | null`) so assigned chats render only under their project group; unassigned chats render under `Your chats`.
 - Archiving non-materialized sessions returns HTTP `409` with `status: "not_materialized"`; send the first message before archiving.
 - Deleting a session (`DELETE /api/sessions/:sessionId`) returns `status: "ok"` on success, purges session artifacts from disk, and subsequent session operations for that id return HTTP `410 Gone` with `status: "deleted"`.
-- Deleting a project (`DELETE /api/projects/:projectId`) returns HTTP `409` with `status: "project_not_empty"` when assigned chats remain; clear the project first via move-all/delete-all project chat endpoints.
+- Deleting a project (`DELETE /api/projects/:projectId`) returns HTTP `409` with `status: "project_not_empty"` when live assigned chats remain; stale assignment metadata that points to missing threads is pruned automatically during delete.
 - Bulk move-to-archive for project chats returns HTTP `409` with `status: "not_materialized_sessions"` when any assigned chat has no rollout yet (send a first message or move to `Your Chats` instead).
 - Per-chat project reassignment (`POST /api/sessions/:sessionId/project`) supports loaded non-materialized chats, so chats can be moved between projects before first message.
 - Session hard-delete is a backend harness extension (the upstream app-server surface provides archive/unarchive but no native `thread/delete` method in the verified CLI schema set).

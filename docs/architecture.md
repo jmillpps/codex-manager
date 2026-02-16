@@ -226,7 +226,7 @@ Projects are deleted only when empty.
 1. UI can call `POST /api/projects/:projectId/chats/move-all` (`destination: "unassigned"` or `"archive"`) to clear assignments in bulk
 2. UI can call `POST /api/projects/:projectId/chats/delete-all` to hard-delete all assigned chats in bulk
 3. Backend persists metadata updates and emits `session_project_updated` / `session_deleted` events for cross-client sync
-4. UI calls `DELETE /api/projects/:projectId` only after cleanup; backend returns `409 project_not_empty` if any chat is still assigned
+4. UI calls `DELETE /api/projects/:projectId` only after cleanup; backend returns `409 project_not_empty` if live assigned chats remain and prunes stale assignment metadata that no longer maps to any existing/loaded thread
 
 ---
 

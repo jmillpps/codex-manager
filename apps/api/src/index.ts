@@ -1822,6 +1822,53 @@ async function classifyProjectSessionsForArchive(sessionIds: Array<string>): Pro
   };
 }
 
+async function classifyProjectSessionAssignments(sessionIds: Array<string>): Promise<{
+  existingSessionIds: Array<string>;
+  staleSessionIds: Array<string>;
+}> {
+  if (sessionIds.length === 0) {
+    return {
+      existingSessionIds: [],
+      staleSessionIds: []
+    };
+  }
+
+  const [activeIds, archivedIds, loaded] = await Promise.all([
+    listThreadIdsByArchiveState(false),
+    listThreadIdsByArchiveState(true),
+    supervisor.call<{ data: Array<string> }>("thread/loaded/list", {})
+  ]);
+
+  const knownSessionIds = new Set<string>();
+  for (const sessionId of activeIds) {
+    knownSessionIds.add(sessionId);
+  }
+  for (const sessionId of archivedIds) {
+    knownSessionIds.add(sessionId);
+  }
+  for (const sessionId of loaded.data) {
+    if (!isSessionPurged(sessionId)) {
+      knownSessionIds.add(sessionId);
+    }
+  }
+
+  const existingSessionIds: Array<string> = [];
+  const staleSessionIds: Array<string> = [];
+
+  for (const sessionId of sessionIds) {
+    if (knownSessionIds.has(sessionId)) {
+      existingSessionIds.push(sessionId);
+      continue;
+    }
+    staleSessionIds.push(sessionId);
+  }
+
+  return {
+    existingSessionIds,
+    staleSessionIds
+  };
+}
+
 async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOutcome> {
   if (isSessionPurged(sessionId)) {
     return {
@@ -2901,11 +2948,31 @@ app.delete("/api/projects/:projectId", async (request, reply) => {
     };
   }
 
+  const assignedSessionIds = listSessionIdsForProject(params.projectId);
+  let existingSessionIds = assignedSessionIds;
+
+  if (assignedSessionIds.length > 0) {
+    const assignmentClassification = await classifyProjectSessionAssignments(assignedSessionIds);
+    existingSessionIds = assignmentClassification.existingSessionIds;
+
+    if (assignmentClassification.staleSessionIds.length > 0) {
+      let metadataChanged = false;
+      for (const sessionId of assignmentClassification.staleSessionIds) {
+        if (setSessionProjectAssignment(sessionId, null)) {
+          metadataChanged = true;
+        }
+      }
+
+      if (metadataChanged) {
+        await persistSessionMetadata();
+      }
+    }
+  }
+
   const orchestrationSessionId = sessionMetadata.projectOrchestratorSessionById[params.projectId] ?? null;
-  const projectSessionIds = listSessionIdsForProject(params.projectId);
   const blockingSessionIds = orchestrationSessionId
-    ? projectSessionIds.filter((sessionId) => sessionId !== orchestrationSessionId)
-    : projectSessionIds;
+    ? existingSessionIds.filter((sessionId) => sessionId !== orchestrationSessionId)
+    : existingSessionIds;
 
   if (blockingSessionIds.length > 0) {
     reply.code(409);
