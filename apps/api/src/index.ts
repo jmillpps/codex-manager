@@ -161,6 +161,7 @@ type SessionMetadataStore = {
   titles: Record<string, string>;
   projects: Record<string, ProjectRecord>;
   sessionProjectById: Record<string, string>;
+  projectOrchestratorSessionById: Record<string, string>;
 };
 
 type DeletedSessionPayload = {
@@ -199,6 +200,13 @@ const sendMessageBodySchema = z.object({
   text: z.string().trim().min(1),
   model: z.string().min(1).optional()
 });
+
+const suggestedReplyBodySchema = z
+  .object({
+    model: z.string().min(1).optional(),
+    draft: z.string().trim().min(1).max(4000).optional()
+  })
+  .optional();
 
 const listSessionsQuerySchema = z.object({
   archived: z.enum(["true", "false"]).optional(),
@@ -436,6 +444,8 @@ const supervisor = new CodexSupervisor({
 });
 
 const activeTurnByThread = new Map<string, string>();
+const suggestionThreadBySession = new Map<string, string>();
+const suggestionThreadIds = new Set<string>();
 const pendingApprovals = new Map<string, PendingApprovalRecord>();
 const pendingToolUserInputs = new Map<string, PendingToolUserInputRecord>();
 const purgedSessionIds = new Set<string>();
@@ -449,6 +459,7 @@ const capabilitiesByMethod = new Map<string, CapabilityEntry>();
 let capabilitiesLastUpdatedAt: string | null = null;
 let capabilitiesInitialized = false;
 let capabilitiesRefreshInFlight: Promise<void> | null = null;
+let projectOrchestratorsEnsureInFlight: Promise<void> | null = null;
 
 const capabilityMethodProbes: Array<CapabilityMethodProbe> = [
   { method: "thread/fork", probeParams: {} },
@@ -504,6 +515,7 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
     const titles: Record<string, string> = {};
     const projects: Record<string, ProjectRecord> = {};
     const sessionProjectById: Record<string, string> = {};
+    const projectOrchestratorSessionById: Record<string, string> = {};
     const now = new Date().toISOString();
 
     if (isObjectRecord(parsed) && isObjectRecord(parsed.titles)) {
@@ -550,10 +562,20 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
       }
     }
 
+    if (isObjectRecord(parsed) && isObjectRecord(parsed.projectOrchestratorSessionById)) {
+      for (const [projectId, sessionId] of Object.entries(parsed.projectOrchestratorSessionById)) {
+        if (typeof sessionId !== "string" || sessionId.trim().length === 0 || !(projectId in projects)) {
+          continue;
+        }
+        projectOrchestratorSessionById[projectId] = sessionId;
+      }
+    }
+
     return {
       titles,
       projects,
-      sessionProjectById
+      sessionProjectById,
+      projectOrchestratorSessionById
     };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -563,7 +585,8 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
     return {
       titles: {},
       projects: {},
-      sessionProjectById: {}
+      sessionProjectById: {},
+      projectOrchestratorSessionById: {}
     };
   }
 }
@@ -636,20 +659,133 @@ function resolveSessionProjectId(sessionId: string): string | null {
 
 function setSessionProjectAssignment(sessionId: string, nextProjectId: string | null): boolean {
   const currentProjectId = resolveSessionProjectId(sessionId);
+  let orchestratorMappingChanged = false;
+  for (const [projectId, mappedSessionId] of Object.entries(sessionMetadata.projectOrchestratorSessionById)) {
+    if (mappedSessionId !== sessionId) {
+      continue;
+    }
+    if (nextProjectId === projectId) {
+      continue;
+    }
+    delete sessionMetadata.projectOrchestratorSessionById[projectId];
+    orchestratorMappingChanged = true;
+  }
+
   if (nextProjectId === null) {
     if (sessionId in sessionMetadata.sessionProjectById) {
       delete sessionMetadata.sessionProjectById[sessionId];
       return true;
     }
-    return false;
+    return orchestratorMappingChanged;
   }
 
   if (currentProjectId === nextProjectId) {
-    return false;
+    return orchestratorMappingChanged;
   }
 
   sessionMetadata.sessionProjectById[sessionId] = nextProjectId;
   return true;
+}
+
+function defaultSessionTitle(): string {
+  return "New chat";
+}
+
+function buildProjectOrchestratorTitle(projectName: string): string {
+  const trimmed = projectName.trim();
+  if (!trimmed) {
+    return "Project Orchestrator";
+  }
+
+  const cappedName = trimmed.length > 140 ? `${trimmed.slice(0, 140).trim()}...` : trimmed;
+  return `${cappedName} Orchestrator`;
+}
+
+async function setSessionTitle(threadId: string, title: string): Promise<void> {
+  const normalized = title.trim();
+  if (!normalized) {
+    return;
+  }
+
+  try {
+    await supervisor.call("thread/name/set", {
+      threadId,
+      name: normalized
+    });
+  } catch (error) {
+    app.log.warn({ error, threadId }, "failed to set thread title");
+  }
+
+  if (setSessionTitleOverride(threadId, normalized)) {
+    await persistSessionMetadata();
+  }
+}
+
+async function createProjectOrchestrationSession(projectId: string, projectName: string): Promise<CodexThread> {
+  const startResponse = await supervisor.call<{ thread: CodexThread }>("thread/start", {
+    cwd: env.WORKSPACE_ROOT,
+    sandbox: env.DEFAULT_SANDBOX_MODE,
+    approvalPolicy: env.DEFAULT_APPROVAL_POLICY,
+    experimentalRawEvents: false
+  });
+  const orchestrationThread = startResponse.thread;
+  sessionMetadata.sessionProjectById[orchestrationThread.id] = projectId;
+  sessionMetadata.projectOrchestratorSessionById[projectId] = orchestrationThread.id;
+  await setSessionTitle(orchestrationThread.id, buildProjectOrchestratorTitle(projectName));
+  await persistSessionMetadata();
+  return orchestrationThread;
+}
+
+async function ensureProjectOrchestrationSessions(): Promise<void> {
+  if (projectOrchestratorsEnsureInFlight) {
+    await projectOrchestratorsEnsureInFlight;
+    return;
+  }
+
+  projectOrchestratorsEnsureInFlight = (async () => {
+    for (const [projectId, project] of Object.entries(sessionMetadata.projects)) {
+      const mappedSessionId = sessionMetadata.projectOrchestratorSessionById[projectId];
+      if (typeof mappedSessionId === "string" && mappedSessionId.trim().length > 0) {
+        const exists = await sessionExistsForProjectAssignment(mappedSessionId);
+        if (exists) {
+          continue;
+        }
+
+        setSessionProjectAssignment(mappedSessionId, null);
+        setSessionTitleOverride(mappedSessionId, null);
+        delete sessionMetadata.projectOrchestratorSessionById[projectId];
+      }
+
+      const created = await createProjectOrchestrationSession(projectId, project.name);
+      publishToSockets(
+        "session_project_updated",
+        {
+          sessionId: created.id,
+          projectId
+        },
+        created.id,
+        { broadcastToAll: true }
+      );
+    }
+  })();
+
+  try {
+    await projectOrchestratorsEnsureInFlight;
+  } finally {
+    projectOrchestratorsEnsureInFlight = null;
+  }
+}
+
+function clearProjectOrchestratorSessionForSession(sessionId: string): boolean {
+  let changed = false;
+  for (const [projectId, mappedSessionId] of Object.entries(sessionMetadata.projectOrchestratorSessionById)) {
+    if (mappedSessionId !== sessionId) {
+      continue;
+    }
+    delete sessionMetadata.projectOrchestratorSessionById[projectId];
+    changed = true;
+  }
+  return changed;
 }
 
 function listSessionIdsForProject(projectId: string): Array<string> {
@@ -663,6 +799,11 @@ function listSessionIdsForProject(projectId: string): Array<string> {
 }
 
 function resolveSessionTitle(thread: CodexThread): string {
+  const storedTitle = sessionMetadata.titles[thread.id];
+  if (typeof storedTitle === "string" && storedTitle.trim().length > 0) {
+    return storedTitle.trim();
+  }
+
   const maybeNamedThread = thread as CodexThread & { threadName?: unknown; name?: unknown };
   if (typeof maybeNamedThread.threadName === "string" && maybeNamedThread.threadName.trim().length > 0) {
     return maybeNamedThread.threadName.trim();
@@ -670,11 +811,6 @@ function resolveSessionTitle(thread: CodexThread): string {
 
   if (typeof maybeNamedThread.name === "string" && maybeNamedThread.name.trim().length > 0) {
     return maybeNamedThread.name.trim();
-  }
-
-  const storedTitle = sessionMetadata.titles[thread.id];
-  if (typeof storedTitle === "string" && storedTitle.trim().length > 0) {
-    return storedTitle.trim();
   }
 
   return thread.preview?.trim() || "New chat";
@@ -831,6 +967,188 @@ function turnsToTranscript(turns: Array<CodexTurn>): Array<TranscriptEntry> {
   }
 
   return entries;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function isTurnStillRunning(status: string): boolean {
+  return status === "in_progress" || status === "pending" || status === "running";
+}
+
+function latestAgentMessageFromTurn(turn: CodexTurn): string | null {
+  for (let index = turn.items.length - 1; index >= 0; index -= 1) {
+    const item = turn.items[index];
+    if (item?.type !== "agentMessage") {
+      continue;
+    }
+
+    const text = typeof item.text === "string" ? item.text.trim() : "";
+    if (text.length > 0) {
+      return text;
+    }
+  }
+
+  return null;
+}
+
+function buildSuggestionPrompt(contextEntries: Array<TranscriptEntry>, draft?: string): string {
+  const lines = contextEntries
+    .map((entry) => {
+      const cleaned = entry.content
+        .replace(/\s+/g, " ")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.startsWith("Documentation Impact Assessment:"))
+        .filter((line) => !line.includes("You are preparing a suggested next user reply for a chat conversation."))
+        .filter((line) => !line.includes("Conversation excerpt:"))
+        .filter((line) => !line.includes("Suggested reply:"))
+        .join(" ");
+      return cleaned.length > 0 ? `${entry.role.toUpperCase()}: ${cleaned}` : "";
+    })
+    .filter((line) => line.length > 0);
+  const cleanedDraft = typeof draft === "string" ? draft.trim() : "";
+
+  return [
+    "You are preparing a suggested next user reply for a chat conversation.",
+    "Return only the suggested message text that the user should send next.",
+    "Do not include role labels, markdown code fences, or any explanation.",
+    "Keep it concise, practical, and aligned with the latest user intent.",
+    "",
+    "Conversation excerpt:",
+    lines.join("\n"),
+    "",
+    cleanedDraft ? `Current user draft to refine:\n${cleanedDraft}\n` : "",
+    "Suggested reply:"
+  ]
+    .filter((part) => part.length > 0)
+    .join("\n");
+}
+
+function stripSuggestionScaffolding(text: string): string {
+  let next = text.trim();
+  if (!next) {
+    return "";
+  }
+
+  const suggestedReplyMarker = "Suggested reply:";
+  const markerIndex = next.lastIndexOf(suggestedReplyMarker);
+  if (markerIndex !== -1) {
+    next = next.slice(markerIndex + suggestedReplyMarker.length).trim();
+  }
+
+  if (next.startsWith("You are preparing a suggested next user reply")) {
+    return "";
+  }
+
+  next = next
+    .replace(/You are preparing a suggested next user reply for a chat conversation\./gi, "")
+    .replace(/Return only the suggested message text that the user should send next\./gi, "")
+    .replace(/Do not include role labels, markdown code fences, or any explanation\./gi, "")
+    .replace(/Keep it concise, practical, and aligned with the latest user intent\./gi, "")
+    .replace(/Conversation excerpt:/gi, "")
+    .replace(/Current user draft to refine:/gi, "")
+    .replace(/Suggested reply:/gi, "")
+    .replace(/\b(USER|ASSISTANT):/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => !line.startsWith("Conversation excerpt:"))
+    .filter((line) => !line.startsWith("Current user draft to refine:"))
+    .filter((line) => !line.startsWith("USER:"))
+    .filter((line) => !line.startsWith("ASSISTANT:"))
+    .join("\n")
+    .trim();
+
+  return next;
+}
+
+function buildFallbackSuggestedReply(contextEntries: Array<TranscriptEntry>, draft?: string): string {
+  const cleanedDraft = typeof draft === "string" ? draft.trim() : "";
+  if (cleanedDraft.length > 0) {
+    return cleanedDraft;
+  }
+
+  const lastUser = [...contextEntries].reverse().find((entry) => entry.role === "user" && entry.content.trim().length > 0);
+  if (lastUser) {
+    const request = lastUser.content.replace(/\s+/g, " ").trim().slice(0, 220);
+    return `Please continue from your last response and focus on this request: ${request}`;
+  }
+
+  const lastAssistant = [...contextEntries].reverse().find((entry) => entry.role === "assistant" && entry.content.trim().length > 0);
+  if (lastAssistant) {
+    const summarized = lastAssistant.content.replace(/\s+/g, " ").trim().slice(0, 260);
+    return `Please continue from your last response and focus on the concrete next step. (${summarized})`;
+  }
+
+  return "Please continue with the next concrete step and include exact commands or code changes.";
+}
+
+async function ensureSuggestionThread(sessionId: string, sourceThread: CodexThread, model?: string): Promise<string> {
+  const previousThreadId = suggestionThreadBySession.get(sessionId);
+  if (previousThreadId) {
+    suggestionThreadIds.delete(previousThreadId);
+  }
+
+  const created = await supervisor.call<{ thread: CodexThread }>("thread/start", {
+    cwd: sourceThread.cwd,
+    model: model || undefined,
+    sandbox: "read-only",
+    approvalPolicy: "never",
+    experimentalRawEvents: false
+  });
+  const helperThreadId = created.thread.id;
+  suggestionThreadBySession.set(sessionId, helperThreadId);
+  suggestionThreadIds.add(helperThreadId);
+
+  try {
+    await supervisor.call("thread/archive", {
+      threadId: helperThreadId
+    });
+  } catch (error) {
+    app.log.warn({ error, sessionId, helperThreadId }, "failed to archive suggestion helper thread");
+  }
+
+  return helperThreadId;
+}
+
+async function waitForSuggestedReply(helperThreadId: string, turnId: string): Promise<string> {
+  const startedAt = Date.now();
+  const timeoutMs = 30_000;
+  let sawCompletedTurnWithoutOutput = false;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const response = await supervisor.call<{ thread: CodexThread }>("thread/read", {
+      threadId: helperThreadId,
+      includeTurns: true
+    });
+    const turn = response.thread.turns.find((entry) => entry.id === turnId);
+    if (!turn) {
+      await delay(350);
+      continue;
+    }
+
+    const suggestion = latestAgentMessageFromTurn(turn);
+    if (!isTurnStillRunning(turn.status)) {
+      if (suggestion) {
+        return suggestion;
+      }
+      sawCompletedTurnWithoutOutput = true;
+      await delay(350);
+      continue;
+    }
+
+    await delay(350);
+  }
+
+  if (sawCompletedTurnWithoutOutput) {
+    throw new Error("suggestion turn completed but no assistant message was readable before timeout");
+  }
+
+  throw new Error("timed out waiting for suggested reply");
 }
 
 function extractThreadId(params: unknown): string | undefined {
@@ -1566,13 +1884,19 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
   }
 
   activeTurnByThread.delete(sessionId);
+  const helperThreadId = suggestionThreadBySession.get(sessionId);
+  suggestionThreadBySession.delete(sessionId);
+  if (helperThreadId) {
+    suggestionThreadIds.delete(helperThreadId);
+  }
   clearPendingApprovalsForThread(sessionId);
   clearPendingToolInputsForThread(sessionId);
   purgedSessionIds.add(sessionId);
 
   const titleMetadataChanged = setSessionTitleOverride(sessionId, null);
   const projectMetadataChanged = setSessionProjectAssignment(sessionId, null);
-  if (titleMetadataChanged || projectMetadataChanged) {
+  const orchestratorMetadataChanged = clearProjectOrchestratorSessionForSession(sessionId);
+  if (titleMetadataChanged || projectMetadataChanged || orchestratorMetadataChanged) {
     await persistSessionMetadata();
   }
 
@@ -1818,6 +2142,9 @@ function clearPendingApprovalsForTurn(threadId: string, turnId: string): void {
 
 supervisor.on("notification", (notification: JsonRpcNotification) => {
   const threadId = extractThreadId(notification.params);
+  if (threadId && suggestionThreadIds.has(threadId)) {
+    return;
+  }
   if (threadId && isSessionPurged(threadId)) {
     return;
   }
@@ -1825,7 +2152,8 @@ supervisor.on("notification", (notification: JsonRpcNotification) => {
   if (notification.method === "thread/name/updated") {
     const params = notification.params as { threadId?: unknown; threadName?: unknown } | undefined;
     if (typeof params?.threadId === "string") {
-      if (setSessionTitleOverride(params.threadId, typeof params.threadName === "string" ? params.threadName : null)) {
+      const hasTitleOverride = typeof sessionMetadata.titles[params.threadId] === "string";
+      if (!hasTitleOverride && setSessionTitleOverride(params.threadId, typeof params.threadName === "string" ? params.threadName : null)) {
         void persistSessionMetadata().catch((error) => {
           app.log.warn({ error, threadId: params.threadId }, "failed to persist session metadata after rename notification");
         });
@@ -1889,6 +2217,41 @@ supervisor.on("notification", (notification: JsonRpcNotification) => {
 
 supervisor.on("serverRequest", (serverRequest: JsonRpcServerRequest) => {
   const requestThreadId = extractThreadId(serverRequest.params);
+  if (requestThreadId && suggestionThreadIds.has(requestThreadId)) {
+    const approval = createPendingApproval(serverRequest);
+    if (approval) {
+      const payload = approvalDecisionPayload(approval, "decline", "turn");
+      void supervisor
+        .respond(serverRequest.id, payload)
+        .catch((error) => {
+          app.log.warn({ error, threadId: requestThreadId }, "failed to decline suggestion helper approval request");
+        });
+      return;
+    }
+
+    const toolInput = createPendingToolUserInput(serverRequest);
+    if (toolInput) {
+      const payload = toolUserInputResponsePayload({
+        decision: "cancel"
+      });
+      void supervisor
+        .respond(serverRequest.id, payload)
+        .catch((error) => {
+          app.log.warn({ error, threadId: requestThreadId }, "failed to cancel suggestion helper tool input request");
+        });
+      return;
+    }
+
+    void supervisor
+      .respondError(serverRequest.id, {
+        code: -32600,
+        message: "unsupported helper-thread server request"
+      })
+      .catch((error) => {
+        app.log.warn({ error, threadId: requestThreadId }, "failed to reject server request for suggestion helper thread");
+      });
+    return;
+  }
   if (requestThreadId && isSessionPurged(requestThreadId)) {
     void supervisor
       .respondError(serverRequest.id, {
@@ -2412,6 +2775,7 @@ app.get("/api/mcp/servers", async (request) => {
 });
 
 app.get("/api/projects", async () => {
+  await ensureProjectOrchestrationSessions();
   return {
     data: listProjectSummaries()
   };
@@ -2437,13 +2801,45 @@ app.post("/api/projects", async (request, reply) => {
     updatedAt: now
   };
   sessionMetadata.projects[projectId] = project;
-  await persistSessionMetadata();
+
+  let orchestrationThread: CodexThread | null = null;
+  try {
+    orchestrationThread = await createProjectOrchestrationSession(projectId, project.name);
+  } catch (error) {
+    delete sessionMetadata.projects[projectId];
+    delete sessionMetadata.projectOrchestratorSessionById[projectId];
+    if (orchestrationThread) {
+      delete sessionMetadata.sessionProjectById[orchestrationThread.id];
+      if (sessionMetadata.titles[orchestrationThread.id]) {
+        delete sessionMetadata.titles[orchestrationThread.id];
+      }
+      void hardDeleteSession(orchestrationThread.id).catch((cleanupError) => {
+        app.log.warn({ error: cleanupError, threadId: orchestrationThread?.id }, "failed to cleanup orchestration session");
+      });
+    }
+    return sendMappedCodexError(reply, error, "failed to create project orchestration session", {
+      method: "thread/start",
+      projectId
+    });
+  }
 
   const payload = toProjectSummary(projectId, project);
   publishToSockets("project_upserted", { project: payload }, undefined, { broadcastToAll: true });
+  if (orchestrationThread) {
+    publishToSockets(
+      "session_project_updated",
+      {
+        sessionId: orchestrationThread.id,
+        projectId
+      },
+      orchestrationThread.id,
+      { broadcastToAll: true }
+    );
+  }
   return {
     status: "ok",
-    project: payload
+    project: payload,
+    orchestrationSession: orchestrationThread ? toSessionSummary(orchestrationThread, false) : null
   };
 });
 
@@ -2470,9 +2866,18 @@ app.post("/api/projects/:projectId/rename", async (request, reply) => {
   }
 
   const nextName = body.name.trim();
+  const previousName = current.name;
   if (current.name !== nextName) {
     current.name = nextName;
     current.updatedAt = new Date().toISOString();
+    const orchestratorSessionId = sessionMetadata.projectOrchestratorSessionById[params.projectId];
+    if (typeof orchestratorSessionId === "string" && orchestratorSessionId.trim().length > 0) {
+      const currentStoredTitle = sessionMetadata.titles[orchestratorSessionId];
+      const expectedPreviousTitle = buildProjectOrchestratorTitle(previousName);
+      if (!currentStoredTitle || currentStoredTitle === expectedPreviousTitle) {
+        await setSessionTitle(orchestratorSessionId, buildProjectOrchestratorTitle(nextName));
+      }
+    }
     await persistSessionMetadata();
   }
 
@@ -2496,17 +2901,31 @@ app.delete("/api/projects/:projectId", async (request, reply) => {
     };
   }
 
+  const orchestrationSessionId = sessionMetadata.projectOrchestratorSessionById[params.projectId] ?? null;
   const projectSessionIds = listSessionIdsForProject(params.projectId);
-  if (projectSessionIds.length > 0) {
+  const blockingSessionIds = orchestrationSessionId
+    ? projectSessionIds.filter((sessionId) => sessionId !== orchestrationSessionId)
+    : projectSessionIds;
+
+  if (blockingSessionIds.length > 0) {
     reply.code(409);
     return {
       status: "project_not_empty",
       projectId: params.projectId,
-      sessionCount: projectSessionIds.length
+      sessionCount: blockingSessionIds.length
     };
   }
 
+  if (orchestrationSessionId) {
+    const outcome = await hardDeleteSession(orchestrationSessionId);
+    if (outcome.status === "not_found") {
+      setSessionProjectAssignment(orchestrationSessionId, null);
+      setSessionTitleOverride(orchestrationSessionId, null);
+    }
+  }
+
   delete sessionMetadata.projects[params.projectId];
+  delete sessionMetadata.projectOrchestratorSessionById[params.projectId];
   await persistSessionMetadata();
   publishToSockets(
     "project_deleted",
@@ -2671,6 +3090,7 @@ app.post("/api/projects/:projectId/chats/delete-all", async (request, reply) => 
 });
 
 app.get("/api/sessions", async (request) => {
+  await ensureProjectOrchestrationSessions();
   const query = listSessionsQuerySchema.parse(request.query);
   const archived = query.archived === "true";
   const cursor = query.cursor;
@@ -2765,6 +3185,8 @@ app.post("/api/sessions", async (request) => {
     approvalPolicy: env.DEFAULT_APPROVAL_POLICY,
     experimentalRawEvents: false
   });
+
+  await setSessionTitle(response.thread.id, defaultSessionTitle());
 
   return {
     session: toSessionSummary(response.thread, false),
@@ -2993,14 +3415,7 @@ app.post("/api/sessions/:sessionId/rename", async (request, reply) => {
   }
   const body = renameSessionBodySchema.parse(request.body);
 
-  await supervisor.call("thread/name/set", {
-    threadId: params.sessionId,
-    name: body.title
-  });
-
-  if (setSessionTitleOverride(params.sessionId, body.title)) {
-    await persistSessionMetadata();
-  }
+  await setSessionTitle(params.sessionId, body.title);
 
   let response: { thread: CodexThread };
   let materialized = true;
@@ -3187,6 +3602,124 @@ app.post("/api/sessions/:sessionId/resume", async (request, reply) => {
   };
 });
 
+app.post("/api/sessions/:sessionId/suggested-reply", async (request, reply) => {
+  const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
+  if (isSessionPurged(params.sessionId)) {
+    reply.code(410);
+    return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+  const body = suggestedReplyBodySchema.parse(request.body);
+
+  const source = await supervisor.call<{ thread: CodexThread }>("thread/read", {
+    threadId: params.sessionId,
+    includeTurns: true
+  });
+  const transcript = turnsToTranscript(Array.isArray(source.thread.turns) ? source.thread.turns : []);
+  const contextEntries = transcript
+    .filter((entry) => (entry.role === "user" || entry.role === "assistant") && entry.content.trim().length > 0)
+    .slice(-12);
+
+  if (contextEntries.length === 0) {
+    reply.code(409);
+    return {
+      status: "no_context",
+      sessionId: params.sessionId,
+      message: "No chat messages available to build a suggestion."
+    };
+  }
+
+  let helperThreadId: string | null = null;
+  let targetThreadId: string | null = null;
+  let fallbackReason = "unknown";
+  const suggestionPrompt = buildSuggestionPrompt(contextEntries, body?.draft);
+  const runSuggestionTurn = async (threadId: string): Promise<string> => {
+    const turn = await supervisor.call<{ turn: { id: string } }>("turn/start", {
+      threadId,
+      model: body?.model,
+      sandboxPolicy: toTurnSandboxPolicy("read-only"),
+      approvalPolicy: "never",
+      input: [
+        {
+          type: "text",
+          text: suggestionPrompt,
+          text_elements: []
+        }
+      ]
+    });
+
+    const rawSuggestion = await waitForSuggestedReply(threadId, turn.turn.id);
+    const suggestion = stripSuggestionScaffolding(rawSuggestion);
+    if (!suggestion) {
+      throw new Error("suggestion output contained only orchestration scaffolding");
+    }
+    return suggestion;
+  };
+
+  try {
+    const projectId = resolveSessionProjectId(params.sessionId);
+    if (projectId) {
+      await ensureProjectOrchestrationSessions();
+      const orchestrationSessionId = sessionMetadata.projectOrchestratorSessionById[projectId];
+      if (typeof orchestrationSessionId === "string" && orchestrationSessionId.trim().length > 0) {
+        targetThreadId = orchestrationSessionId;
+      }
+    }
+
+    if (targetThreadId) {
+      try {
+        const suggestion = await runSuggestionTurn(targetThreadId);
+        return {
+          status: "ok",
+          sessionId: params.sessionId,
+          suggestion
+        };
+      } catch (orchestratorError) {
+        fallbackReason = "project_orchestrator_failed";
+        app.log.warn({ error: orchestratorError, sessionId: params.sessionId, targetThreadId }, "project orchestrator suggestion turn failed");
+      }
+    }
+
+    helperThreadId = await ensureSuggestionThread(params.sessionId, source.thread, body?.model);
+    targetThreadId = helperThreadId;
+    try {
+      const suggestion = await runSuggestionTurn(targetThreadId);
+      return {
+        status: "ok",
+        sessionId: params.sessionId,
+        suggestion
+      };
+    } catch (helperError) {
+      fallbackReason = targetThreadId === helperThreadId ? "helper_first_attempt_failed" : fallbackReason;
+      app.log.warn({ error: helperError, sessionId: params.sessionId, helperThreadId }, "helper suggestion turn failed; retrying with fresh helper thread");
+    }
+
+    // One additional helper attempt handles transient thread/read races without immediately degrading to fallback text.
+    helperThreadId = await ensureSuggestionThread(params.sessionId, source.thread, body?.model);
+    targetThreadId = helperThreadId;
+    const suggestion = await runSuggestionTurn(targetThreadId);
+    return {
+      status: "ok",
+      sessionId: params.sessionId,
+      suggestion
+    };
+  } catch (error) {
+    if (fallbackReason === "unknown") {
+      fallbackReason = "unexpected_error";
+    }
+    app.log.warn({ error, sessionId: params.sessionId, fallbackReason }, "failed to generate suggested reply");
+    const fallbackSuggestion = buildFallbackSuggestedReply(contextEntries, body?.draft);
+    return {
+      status: "fallback",
+      sessionId: params.sessionId,
+      suggestion: fallbackSuggestion
+    };
+  } finally {
+    if (helperThreadId) {
+      suggestionThreadIds.delete(helperThreadId);
+    }
+  }
+});
+
 app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
   const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
   if (isSessionPurged(params.sessionId)) {
@@ -3195,19 +3728,46 @@ app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
   }
   const body = sendMessageBodySchema.parse(request.body);
 
-  const turn = await supervisor.call<{ turn: { id: string } }>("turn/start", {
-    threadId: params.sessionId,
-    model: body.model,
-    sandboxPolicy: toTurnSandboxPolicy(env.DEFAULT_SANDBOX_MODE),
-    approvalPolicy: env.DEFAULT_APPROVAL_POLICY,
-    input: [
-      {
-        type: "text",
-        text: body.text,
-        text_elements: []
+  const startTurn = async (): Promise<{ turn: { id: string } }> =>
+    supervisor.call<{ turn: { id: string } }>("turn/start", {
+      threadId: params.sessionId,
+      model: body.model,
+      sandboxPolicy: toTurnSandboxPolicy(env.DEFAULT_SANDBOX_MODE),
+      approvalPolicy: env.DEFAULT_APPROVAL_POLICY,
+      input: [
+        {
+          type: "text",
+          text: body.text,
+          text_elements: []
+        }
+      ]
+    });
+
+  let turn: { turn: { id: string } };
+  try {
+    turn = await startTurn();
+  } catch (error) {
+    if (isNoRolloutFoundError(error)) {
+      try {
+        await supervisor.call("thread/resume", {
+          threadId: params.sessionId,
+          sandbox: env.DEFAULT_SANDBOX_MODE,
+          approvalPolicy: env.DEFAULT_APPROVAL_POLICY
+        });
+        turn = await startTurn();
+      } catch (retryError) {
+        return sendMappedCodexError(reply, retryError, "failed to send message", {
+          method: "turn/start",
+          sessionId: params.sessionId
+        });
       }
-    ]
-  });
+    } else {
+      return sendMappedCodexError(reply, error, "failed to send message", {
+        method: "turn/start",
+        sessionId: params.sessionId
+      });
+    }
+  }
 
   activeTurnByThread.set(params.sessionId, turn.turn.id);
 
@@ -3346,6 +3906,8 @@ app.addHook("onClose", async () => {
   sockets.clear();
   socketThreadFilter.clear();
   activeTurnByThread.clear();
+  suggestionThreadBySession.clear();
+  suggestionThreadIds.clear();
   pendingApprovals.clear();
   pendingToolUserInputs.clear();
   await supervisor.stop();
@@ -3379,6 +3941,7 @@ process.on("SIGTERM", () => {
 
 await supervisor.start();
 try {
+  await ensureProjectOrchestrationSessions();
   await refreshCapabilities();
 } catch (error) {
   app.log.warn({ error }, "failed to initialize capability snapshot");

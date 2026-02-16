@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 
 type SessionSummary = {
@@ -540,6 +540,7 @@ export function App() {
   const [toolInputDraftById, setToolInputDraftById] = useState<Record<string, Record<string, string>>>({});
   const [toolInputActionRequestId, setToolInputActionRequestId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [loadingSuggestedReply, setLoadingSuggestedReply] = useState(false);
   const [steerDraft, setSteerDraft] = useState("");
   const [submittingSteer, setSubmittingSteer] = useState(false);
   const [activeTurnIdBySession, setActiveTurnIdBySession] = useState<Record<string, string>>({});
@@ -1327,7 +1328,7 @@ export function App() {
       throw new Error(`failed to create project (${response.status})`);
     }
 
-    const payload = (await response.json()) as { project: ProjectSummary };
+    const payload = (await response.json()) as { project: ProjectSummary; orchestrationSession?: SessionSummary | null };
     const project = payload.project;
     setProjects((current) => {
       const byId = new Map(current.map((entry) => [entry.projectId, entry]));
@@ -1339,6 +1340,20 @@ export function App() {
       [project.projectId]: true
     }));
     setShowProjects(true);
+
+    const orchestrationSession = payload.orchestrationSession ?? null;
+    if (orchestrationSession) {
+      setSessions((current) => {
+        const byId = new Map(current.map((entry) => [entry.sessionId, entry]));
+        byId.set(orchestrationSession.sessionId, orchestrationSession);
+        return Array.from(byId.values()).sort((left, right) => {
+          if (left.updatedAt !== right.updatedAt) {
+            return right.updatedAt - left.updatedAt;
+          }
+          return right.createdAt - left.createdAt;
+        });
+      });
+    }
 
     return project;
   };
@@ -2083,6 +2098,56 @@ export function App() {
     await dispatchMessage(retryPrompt);
   };
 
+  const loadSuggestedReply = async (): Promise<void> => {
+    if (!selectedSessionId) {
+      setError("create or select a session first");
+      return;
+    }
+
+    setError(null);
+    setLoadingSuggestedReply(true);
+    try {
+      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(selectedSessionId)}/suggested-reply`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          model: selectedModelId || undefined,
+          draft: draft.trim() || undefined
+        })
+      });
+
+      if (!response.ok) {
+        if (await handleDeletedSessionResponse(response, selectedSessionId)) {
+          return;
+        }
+        throw new Error(`failed to load suggested reply (${response.status})`);
+      }
+
+      const payload = (await response.json()) as { suggestion?: string };
+      const suggestion = typeof payload.suggestion === "string" ? payload.suggestion.trim() : "";
+      if (suggestion) {
+        setDraft(suggestion);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "failed to load suggested reply");
+    } finally {
+      setLoadingSuggestedReply(false);
+    }
+  };
+
+  const handleComposerKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>): void => {
+    if (!(event.ctrlKey && event.key === "Enter")) {
+      return;
+    }
+    event.preventDefault();
+    if (!selectedSessionId || !draft.trim()) {
+      return;
+    }
+    void sendMessage();
+  };
+
   const handleModelSelection = (modelId: string): void => {
     setSelectedModelId(modelId);
 
@@ -2793,6 +2858,7 @@ export function App() {
       setFollowTranscriptTail(true);
       setShowJumpToBottom(false);
       setRetryPrompt(null);
+      setLoadingSuggestedReply(false);
       setSteerDraft("");
       return;
     }
@@ -2800,6 +2866,7 @@ export function App() {
     setFollowTranscriptTail(true);
     setShowJumpToBottom(false);
     setRetryPrompt(null);
+    setLoadingSuggestedReply(false);
     void loadSessionTranscript(selectedSessionId);
     void loadSessionApprovals(selectedSessionId);
     void loadSessionToolInputs(selectedSessionId);
@@ -4101,6 +4168,7 @@ export function App() {
               placeholder={selectedSessionId ? "Type your message..." : "Create a session to start chatting"}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={handleComposerKeyDown}
               disabled={!selectedSessionId}
               rows={4}
             />
@@ -4124,6 +4192,9 @@ export function App() {
                   Retry Last Prompt
                 </button>
               ) : null}
+              <button type="button" className="ghost" onClick={() => void loadSuggestedReply()} disabled={!selectedSessionId || loadingSuggestedReply}>
+                {loadingSuggestedReply ? "Suggesting..." : "Suggest Reply"}
+              </button>
               <button type="button" onClick={() => void sendMessage()} disabled={!selectedSessionId || !draft.trim()}>
                 Send
               </button>

@@ -31,9 +31,13 @@ Use this with:
   - Handles initialize lifecycle and forwards notifications to WebSocket clients.
 - Session lifecycle:
   - list/create/read/resume/rename/archive/unarchive/delete.
+  - project create auto-provisions a project orchestration chat and assigns it to the new project.
+  - startup plus project/session list paths self-heal missing project-orchestration sessions by re-provisioning from metadata mappings.
   - hard delete is harness-level (disk purge + session tombstone + websocket broadcast) because app-server has no native `thread/delete`.
 - Messaging and turn control:
   - send message (`turn/start`) and interrupt.
+  - new user-created chats are initialized with a short sticky default title (`New chat`) and remain renameable via existing rename flow.
+  - suggested reply endpoint (`POST /api/sessions/:sessionId/suggested-reply`) that uses the project orchestration chat when the source chat belongs to a project (falls back to helper thread for unassigned chats), sanitizes orchestration scaffolding from model output, and returns deterministic fallback text when generation fails.
   - thread actions: fork, compact, rollback, background terminals clean, review start.
   - turn steering endpoint for active turns.
 - Approvals + tool user-input:
@@ -71,11 +75,13 @@ Use this with:
   - project-level and chat-level context menus with nested move menus.
 - Session/project actions:
   - create, rename, archive/unarchive, hard delete with confirmation.
+  - project creation inserts an auto-created orchestration chat into the project chat list immediately.
   - project creation/rename/delete, bulk move/delete chats, session assignment and move flows.
   - non-materialized session movement supported.
 - Chat runtime features:
   - websocket reconnect/backoff.
   - streamed transcript rendering with filters (All/Chat/Tools/Approvals).
+  - composer uses a single message input; `Suggest Reply` populates that same draft box and `Ctrl+Enter` sends.
   - pending approval cards and approval decisions.
   - tool-input request cards with answer submission.
   - active-turn controls (interrupt + steer).
