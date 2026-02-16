@@ -19,7 +19,7 @@
 <p align="center"><a href="../../issues">Issues</a> · <a href="../../issues/new">Report a Bug</a> · <a href="../../discussions">Discussions</a> · <a href="./CONTRIBUTING.md">Contributing</a></p>
 
 <p align="center">
-  <img src="./docs/assets/ui-overview.svg" alt="Codex Manager UI overview" width="92%" />
+  <img src="./docs/assets/ui-overview.png" alt="Codex Manager UI overview" width="92%" />
 </p>
 
 ---
