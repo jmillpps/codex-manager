@@ -4,8 +4,8 @@
 
 <p align="center">
   <a href="./LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache%202.0-2563eb" /></a>
-  <img alt="Node >=24" src="https://img.shields.io/badge/node-%3E%3D24-16a34a?logo=node.js&logoColor=white" />
-  <img alt="pnpm 10.29.3" src="https://img.shields.io/badge/pnpm-10.29.3-f97316?logo=pnpm&logoColor=white" />
+  <img alt="Node &gt;=24" src="https://img.shields.io/badge/node-%3E%3D24-16a34a?logo=node.js&amp;logoColor=white" />
+  <img alt="pnpm 10.29.3" src="https://img.shields.io/badge/pnpm-10.29.3-f97316?logo=pnpm&amp;logoColor=white" />
   <img alt="CI not configured yet" src="https://img.shields.io/badge/ci-not%20configured%20yet-6b7280" />
   <img alt="Transport: STDIO + WebSocket" src="https://img.shields.io/badge/transport-STDIO%20%2B%20WebSocket-0f172a" />
 </p>
