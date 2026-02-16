@@ -1,0 +1,16 @@
+<svg width="640" height="180" viewBox="0 0 640 180" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Codex Manager logo</title>
+  <desc id="desc">Wordmark logo for Codex Manager</desc>
+  <defs>
+    <linearGradient id="grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#1d4ed8" />
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="640" height="180" fill="#f8fafc" rx="24" />
+  <rect x="22" y="22" width="136" height="136" rx="26" fill="url(#grad)" />
+  <path d="M65 70h50v12H65zM65 94h50v12H65zM65 118h34v12H65z" fill="#e2e8f0" />
+  <circle cx="118" cy="126" r="10" fill="#93c5fd" />
+  <text x="186" y="88" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="48" font-weight="700" fill="#0f172a">Codex Manager</text>
+  <text x="186" y="122" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="18" fill="#334155">Local-first Codex app-server workspace</text>
+</svg>
