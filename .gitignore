@@ -8,3 +8,4 @@ node_modules
 *.log
 apps/*/dist
 packages/*/dist
+tmp/
