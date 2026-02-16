@@ -76,83 +76,365 @@ export type PendingApproval = {
   status: "pending";
 };
 
+export type PendingToolInput = {
+  requestId: string;
+  method: string;
+  threadId: string;
+  turnId: string | null;
+  itemId: string | null;
+  summary: string;
+  details: Record<string, unknown>;
+  questions: Array<Record<string, unknown>>;
+  createdAt: string;
+  status: "pending";
+};
+
 export type ModelEntry = Record<string, unknown>;
 export type McpServerStatusEntry = Record<string, unknown>;
 
-export async function fetchApiHealth(baseUrl = "/api"): Promise<ApiHealth> {
-  const response = await fetch(\`${"${baseUrl}"}/health\`);
-  if (!response.ok) {
-    throw new Error(\`health request failed (\${response.status})\`);
+type QueryValue = string | number | boolean | null | undefined;
+
+function withQuery(path: string, params: Record<string, QueryValue>): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+    if (typeof value === "boolean") {
+      query.set(key, value ? "true" : "false");
+      continue;
+    }
+    query.set(key, String(value));
   }
 
-  return (await response.json()) as ApiHealth;
+  const suffix = query.toString();
+  return suffix.length > 0 ? path + "?" + suffix : path;
+}
+
+async function requestJson<T>(
+  url: string,
+  init: RequestInit,
+  errorMessage: string,
+  okStatuses: Array<number> = [200]
+): Promise<T> {
+  const response = await fetch(url, init);
+  if (!okStatuses.includes(response.status)) {
+    throw new Error(errorMessage + " (" + response.status + ")");
+  }
+
+  return (await response.json()) as T;
+}
+
+export async function fetchApiHealth(baseUrl = "/api"): Promise<ApiHealth> {
+  return requestJson<ApiHealth>(baseUrl + "/health", {}, "health request failed");
+}
+
+export async function getApiInfo(baseUrl = "/api"): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(baseUrl, {}, "api info request failed");
+}
+
+export async function getCapabilities(baseUrl = "/api", refresh = false): Promise<Record<string, unknown>> {
+  const path = withQuery(baseUrl + "/capabilities", { refresh });
+  return requestJson<Record<string, unknown>>(path, {}, "capabilities request failed");
+}
+
+export async function listExperimentalFeatures(
+  baseUrl = "/api",
+  options: { cursor?: string; limit?: number } = {}
+): Promise<{ data: Array<Record<string, unknown>>; nextCursor: string | null }> {
+  const path = withQuery(baseUrl + "/features/experimental", options);
+  return requestJson<{ data: Array<Record<string, unknown>>; nextCursor: string | null }>(
+    path,
+    {},
+    "list experimental features failed",
+    [200, 501]
+  );
+}
+
+export async function listCollaborationModes(
+  baseUrl = "/api",
+  options: { cursor?: string; limit?: number } = {}
+): Promise<{ data: Array<Record<string, unknown>>; nextCursor: string | null }> {
+  const path = withQuery(baseUrl + "/collaboration/modes", options);
+  return requestJson<{ data: Array<Record<string, unknown>>; nextCursor: string | null }>(
+    path,
+    {},
+    "list collaboration modes failed",
+    [200, 501]
+  );
+}
+
+export async function listApps(
+  baseUrl = "/api",
+  options: { cursor?: string; limit?: number; threadId?: string; forceRefetch?: boolean } = {}
+): Promise<{ data: Array<Record<string, unknown>>; nextCursor: string | null }> {
+  const path = withQuery(baseUrl + "/apps", options);
+  return requestJson<{ data: Array<Record<string, unknown>>; nextCursor: string | null }>(
+    path,
+    {},
+    "list apps failed",
+    [200, 501]
+  );
+}
+
+export async function listSkills(
+  baseUrl = "/api",
+  options: { forceReload?: boolean; cwd?: string } = {}
+): Promise<{ data: Array<Record<string, unknown>>; nextCursor: string | null }> {
+  const path = withQuery(baseUrl + "/skills", options);
+  return requestJson<{ data: Array<Record<string, unknown>>; nextCursor: string | null }>(path, {}, "list skills failed", [
+    200,
+    501
+  ]);
+}
+
+export async function writeSkillConfig(
+  body: { path: string; enabled: boolean },
+  baseUrl = "/api"
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/skills/config",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    },
+    "write skill config failed",
+    [200, 501]
+  );
+}
+
+export async function readRemoteSkills(baseUrl = "/api"): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(baseUrl + "/skills/remote", {}, "read remote skills failed", [200, 500, 501]);
+}
+
+export async function writeRemoteSkills(
+  body: { hazelnutId: string; isPreload: boolean },
+  baseUrl = "/api"
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/skills/remote",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    },
+    "write remote skills failed",
+    [200, 501]
+  );
+}
+
+export async function reloadMcpConfig(baseUrl = "/api"): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/mcp/reload",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    },
+    "reload mcp failed",
+    [200, 501]
+  );
+}
+
+export async function startMcpOauthLogin(
+  serverName: string,
+  body: { scopes?: Array<string>; timeoutSecs?: number } = {},
+  baseUrl = "/api"
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/mcp/servers/" + encodeURIComponent(serverName) + "/oauth/login",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    },
+    "start mcp oauth login failed",
+    [200, 501]
+  );
+}
+
+export async function readAccount(baseUrl = "/api"): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(baseUrl + "/account", {}, "read account failed", [200, 401, 501]);
+}
+
+export async function startAccountLogin(
+  body:
+    | { type: "apiKey"; apiKey: string }
+    | { type: "chatgpt" }
+    | { type: "chatgptAuthTokens"; accessToken: string; chatgptAccountId: string; chatgptPlanType?: string },
+  baseUrl = "/api"
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/account/login/start",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    },
+    "start account login failed",
+    [200, 400, 501]
+  );
+}
+
+export async function cancelAccountLogin(loginId: string, baseUrl = "/api"): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/account/login/cancel",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ loginId })
+    },
+    "cancel account login failed",
+    [200, 404, 501]
+  );
+}
+
+export async function logoutAccount(baseUrl = "/api"): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/account/logout",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    },
+    "logout account failed",
+    [200, 501]
+  );
+}
+
+export async function readAccountRateLimits(baseUrl = "/api"): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(baseUrl + "/account/rate-limits", {}, "read account rate limits failed", [
+    200,
+    401,
+    501
+  ]);
+}
+
+export async function readConfig(
+  baseUrl = "/api",
+  options: { cwd?: string; includeLayers?: boolean } = {}
+): Promise<Record<string, unknown>> {
+  const path = withQuery(baseUrl + "/config", options);
+  return requestJson<Record<string, unknown>>(path, {}, "read config failed", [200, 501]);
+}
+
+export async function readConfigRequirements(baseUrl = "/api"): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(baseUrl + "/config/requirements", {}, "read config requirements failed", [
+    200,
+    501
+  ]);
+}
+
+export async function writeConfigValue(
+  body: {
+    keyPath: Array<string>;
+    mergeStrategy: "replace" | "upsert";
+    value: unknown;
+    expectedVersion?: number;
+    filePath?: string;
+  },
+  baseUrl = "/api"
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/config/value",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    },
+    "write config value failed",
+    [200, 501]
+  );
+}
+
+export async function writeConfigBatch(
+  body: {
+    edits: Array<{ keyPath: Array<string>; mergeStrategy: "replace" | "upsert"; value: unknown }>;
+    expectedVersion?: number;
+    filePath?: string;
+  },
+  baseUrl = "/api"
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/config/batch",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    },
+    "write config batch failed",
+    [200, 501]
+  );
+}
+
+export async function executeCommand(
+  body: { command: Array<string>; cwd?: string; timeoutMs?: number },
+  baseUrl = "/api"
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/commands/exec",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    },
+    "execute command failed",
+    [200, 501]
+  );
+}
+
+export async function uploadFeedback(
+  body: { classification: string; includeLogs: boolean; reason?: string; threadId?: string },
+  baseUrl = "/api"
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/feedback",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    },
+    "upload feedback failed",
+    [200, 501]
+  );
 }
 
 export async function listModels(
   baseUrl = "/api",
   options: { cursor?: string; limit?: number } = {}
 ): Promise<{ data: Array<ModelEntry>; nextCursor: string | null }> {
-  const query = new URLSearchParams();
-  if (typeof options.cursor === "string" && options.cursor.length > 0) {
-    query.set("cursor", options.cursor);
-  }
-  if (typeof options.limit === "number" && Number.isFinite(options.limit)) {
-    query.set("limit", String(options.limit));
-  }
-
-  const suffix = query.toString();
-  const response = await fetch(\`${"${baseUrl}"}/models\${suffix ? \`?\${suffix}\` : ""}\`);
-  if (!response.ok) {
-    throw new Error(\`list models failed (\${response.status})\`);
-  }
-
-  return (await response.json()) as { data: Array<ModelEntry>; nextCursor: string | null };
+  const path = withQuery(baseUrl + "/models", options);
+  return requestJson<{ data: Array<ModelEntry>; nextCursor: string | null }>(path, {}, "list models failed", [200, 501]);
 }
 
 export async function listMcpServers(
   baseUrl = "/api",
   options: { cursor?: string; limit?: number } = {}
 ): Promise<{ data: Array<McpServerStatusEntry>; nextCursor: string | null }> {
-  const query = new URLSearchParams();
-  if (typeof options.cursor === "string" && options.cursor.length > 0) {
-    query.set("cursor", options.cursor);
-  }
-  if (typeof options.limit === "number" && Number.isFinite(options.limit)) {
-    query.set("limit", String(options.limit));
-  }
-
-  const suffix = query.toString();
-  const response = await fetch(\`${"${baseUrl}"}/mcp/servers\${suffix ? \`?\${suffix}\` : ""}\`);
-  if (!response.ok) {
-    throw new Error(\`list mcp servers failed (\${response.status})\`);
-  }
-
-  return (await response.json()) as { data: Array<McpServerStatusEntry>; nextCursor: string | null };
+  const path = withQuery(baseUrl + "/mcp/servers", options);
+  return requestJson<{ data: Array<McpServerStatusEntry>; nextCursor: string | null }>(
+    path,
+    {},
+    "list mcp servers failed",
+    [200, 501]
+  );
 }
 
 export async function listProjects(baseUrl = "/api"): Promise<{ data: Array<ProjectSummary> }> {
-  const response = await fetch(\`${"${baseUrl}"}/projects\`);
-  if (!response.ok) {
-    throw new Error(\`list projects failed (\${response.status})\`);
-  }
-
-  return (await response.json()) as { data: Array<ProjectSummary> };
+  return requestJson<{ data: Array<ProjectSummary> }>(baseUrl + "/projects", {}, "list projects failed");
 }
 
 export async function createProject(name: string, baseUrl = "/api"): Promise<{ status: string; project: ProjectSummary }> {
-  const response = await fetch(\`${"${baseUrl}"}/projects\`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json"
+  return requestJson<{ status: string; project: ProjectSummary }>(
+    baseUrl + "/projects",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name })
     },
-    body: JSON.stringify({ name })
-  });
-
-  if (!response.ok) {
-    throw new Error(\`create project failed (\${response.status})\`);
-  }
-
-  return (await response.json()) as { status: string; project: ProjectSummary };
+    "create project failed"
+  );
 }
 
 export async function renameProject(
@@ -160,114 +442,233 @@ export async function renameProject(
   name: string,
   baseUrl = "/api"
 ): Promise<{ status: string; project: ProjectSummary }> {
-  const response = await fetch(\`${"${baseUrl}"}/projects/\${encodeURIComponent(projectId)}/rename\`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json"
+  return requestJson<{ status: string; project: ProjectSummary }>(
+    baseUrl + "/projects/" + encodeURIComponent(projectId) + "/rename",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name })
     },
-    body: JSON.stringify({ name })
-  });
-
-  if (!response.ok) {
-    throw new Error(\`rename project failed (\${response.status})\`);
-  }
-
-  return (await response.json()) as { status: string; project: ProjectSummary };
+    "rename project failed"
+  );
 }
 
 export async function deleteProject(
   projectId: string,
   baseUrl = "/api"
 ): Promise<{ status: string; projectId: string; unassignedSessionCount?: number }> {
-  const response = await fetch(\`${"${baseUrl}"}/projects/\${encodeURIComponent(projectId)}\`, {
-    method: "DELETE"
-  });
+  return requestJson<{ status: string; projectId: string; unassignedSessionCount?: number }>(
+    baseUrl + "/projects/" + encodeURIComponent(projectId),
+    {
+      method: "DELETE"
+    },
+    "delete project failed"
+  );
+}
 
-  if (!response.ok) {
-    throw new Error(\`delete project failed (\${response.status})\`);
-  }
+export async function moveProjectChats(
+  projectId: string,
+  destination: "unassigned" | "archive",
+  baseUrl = "/api"
+): Promise<{
+  status: string;
+  projectId: string;
+  destination: "unassigned" | "archive";
+  movedSessionCount: number;
+  archivedSessionCount?: number;
+  alreadyArchivedSessionCount?: number;
+}> {
+  return requestJson<{
+    status: string;
+    projectId: string;
+    destination: "unassigned" | "archive";
+    movedSessionCount: number;
+    archivedSessionCount?: number;
+    alreadyArchivedSessionCount?: number;
+  }>(
+    baseUrl + "/projects/" + encodeURIComponent(projectId) + "/chats/move-all",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ destination })
+    },
+    "move project chats failed"
+  );
+}
 
-  return (await response.json()) as { status: string; projectId: string; unassignedSessionCount?: number };
+export async function deleteProjectChats(
+  projectId: string,
+  baseUrl = "/api"
+): Promise<{ status: string; projectId: string; deletedSessionCount: number; skippedSessionCount: number }> {
+  return requestJson<{ status: string; projectId: string; deletedSessionCount: number; skippedSessionCount: number }>(
+    baseUrl + "/projects/" + encodeURIComponent(projectId) + "/chats/delete-all",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    },
+    "delete project chats failed"
+  );
 }
 
 export async function listSessions(
   baseUrl = "/api",
   options: { archived?: boolean; cursor?: string; limit?: number } = {}
 ): Promise<{ data: Array<SessionSummary>; nextCursor: string | null; archived: boolean }> {
-  const query = new URLSearchParams();
-  if (options.archived) {
-    query.set("archived", "true");
-  }
-  if (typeof options.cursor === "string" && options.cursor.length > 0) {
-    query.set("cursor", options.cursor);
-  }
-  if (typeof options.limit === "number" && Number.isFinite(options.limit)) {
-    query.set("limit", String(options.limit));
-  }
-
-  const suffix = query.toString();
-  const response = await fetch(\`${"${baseUrl}"}/sessions\${suffix ? \`?\${suffix}\` : ""}\`);
-  if (!response.ok) {
-    throw new Error(\`list sessions failed (\${response.status})\`);
-  }
-
-  return (await response.json()) as { data: Array<SessionSummary>; nextCursor: string | null; archived: boolean };
+  const path = withQuery(baseUrl + "/sessions", options);
+  return requestJson<{ data: Array<SessionSummary>; nextCursor: string | null; archived: boolean }>(
+    path,
+    {},
+    "list sessions failed"
+  );
 }
 
-export async function createSession(baseUrl = "/api", body: { cwd?: string; model?: string } = {}): Promise<{ session: SessionSummary; thread: unknown }> {
-  const response = await fetch(\`${"${baseUrl}"}/sessions\`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json"
+export async function createSession(
+  baseUrl = "/api",
+  body: { cwd?: string; model?: string } = {}
+): Promise<{ session: SessionSummary; thread: unknown }> {
+  return requestJson<{ session: SessionSummary; thread: unknown }>(
+    baseUrl + "/sessions",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
     },
-    body: JSON.stringify(body)
-  });
-
-  if (!response.ok) {
-    throw new Error(\`create session failed (\${response.status})\`);
-  }
-
-  return (await response.json()) as { session: SessionSummary; thread: unknown };
+    "create session failed"
+  );
 }
 
 export async function readSession(sessionId: string, baseUrl = "/api"): Promise<SessionDetail> {
-  const response = await fetch(\`${"${baseUrl}"}/sessions/\${encodeURIComponent(sessionId)}\`);
-  if (!response.ok) {
-    throw new Error(\`read session failed (\${response.status})\`);
-  }
-
-  return (await response.json()) as SessionDetail;
+  return requestJson<SessionDetail>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId),
+    {},
+    "read session failed",
+    [200, 410]
+  );
 }
 
 export async function deleteSession(
   sessionId: string,
   baseUrl = "/api"
 ): Promise<{ status: string; sessionId: string; title?: string | null; deletedFileCount?: number }> {
-  const response = await fetch(\`${"${baseUrl}"}/sessions/\${encodeURIComponent(sessionId)}\`, {
-    method: "DELETE"
-  });
+  return requestJson<{ status: string; sessionId: string; title?: string | null; deletedFileCount?: number }>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId),
+    {
+      method: "DELETE"
+    },
+    "delete session failed",
+    [200, 404, 410]
+  );
+}
 
-  if (!response.ok) {
-    throw new Error(\`delete session failed (\${response.status})\`);
-  }
+export async function forkSession(sessionId: string, baseUrl = "/api"): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/fork",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    },
+    "fork session failed",
+    [200, 410, 501]
+  );
+}
 
-  return (await response.json()) as { status: string; sessionId: string; title?: string | null; deletedFileCount?: number };
+export async function compactSession(sessionId: string, baseUrl = "/api"): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/compact",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    },
+    "compact session failed",
+    [200, 410, 501]
+  );
+}
+
+export async function rollbackSession(
+  sessionId: string,
+  numTurns = 1,
+  baseUrl = "/api"
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/rollback",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ numTurns })
+    },
+    "rollback session failed",
+    [200, 400, 409, 410, 501]
+  );
+}
+
+export async function cleanBackgroundTerminals(sessionId: string, baseUrl = "/api"): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/background-terminals/clean",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    },
+    "clean background terminals failed",
+    [200, 410, 501]
+  );
+}
+
+export async function startReview(
+  sessionId: string,
+  body: {
+    delivery?: "inline" | "detached";
+    targetType?: "uncommittedChanges" | "baseBranch" | "commit" | "custom";
+    branch?: string;
+    sha?: string;
+    title?: string;
+    instructions?: string;
+  } = {},
+  baseUrl = "/api"
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/review",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    },
+    "start review failed",
+    [200, 410, 501]
+  );
+}
+
+export async function steerTurn(
+  sessionId: string,
+  turnId: string,
+  input: string,
+  baseUrl = "/api"
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/turns/" + encodeURIComponent(turnId) + "/steer",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input })
+    },
+    "steer turn failed",
+    [200, 400, 410, 501]
+  );
 }
 
 export async function renameSession(sessionId: string, title: string, baseUrl = "/api"): Promise<{ status: string; session: SessionSummary }> {
-  const response = await fetch(\`${"${baseUrl}"}/sessions/\${encodeURIComponent(sessionId)}/rename\`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json"
+  return requestJson<{ status: string; session: SessionSummary }>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/rename",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title })
     },
-    body: JSON.stringify({ title })
-  });
-
-  if (!response.ok) {
-    throw new Error(\`rename session failed (\${response.status})\`);
-  }
-
-  return (await response.json()) as { status: string; session: SessionSummary };
+    "rename session failed"
+  );
 }
 
 export async function setSessionProject(
@@ -275,65 +676,72 @@ export async function setSessionProject(
   projectId: string | null,
   baseUrl = "/api"
 ): Promise<{ status: string; sessionId: string; projectId: string | null; previousProjectId?: string | null }> {
-  const response = await fetch(\`${"${baseUrl}"}/sessions/\${encodeURIComponent(sessionId)}/project\`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json"
+  return requestJson<{ status: string; sessionId: string; projectId: string | null; previousProjectId?: string | null }>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/project",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId })
     },
-    body: JSON.stringify({ projectId })
-  });
-
-  if (!response.ok) {
-    throw new Error(\`set session project failed (\${response.status})\`);
-  }
-
-  return (await response.json()) as {
-    status: string;
-    sessionId: string;
-    projectId: string | null;
-    previousProjectId?: string | null;
-  };
+    "set session project failed",
+    [200, 404, 410]
+  );
 }
 
 export async function archiveSession(sessionId: string, baseUrl = "/api"): Promise<{ status: string; sessionId: string }> {
-  const response = await fetch(\`${"${baseUrl}"}/sessions/\${encodeURIComponent(sessionId)}/archive\`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json"
+  return requestJson<{ status: string; sessionId: string }>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/archive",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
     },
-    body: JSON.stringify({})
-  });
-
-  if (!response.ok) {
-    throw new Error(\`archive session failed (\${response.status})\`);
-  }
-
-  return (await response.json()) as { status: string; sessionId: string };
+    "archive session failed",
+    [200, 409, 410]
+  );
 }
 
 export async function unarchiveSession(sessionId: string, baseUrl = "/api"): Promise<{ status: string; session: SessionSummary; thread: unknown }> {
-  const response = await fetch(\`${"${baseUrl}"}/sessions/\${encodeURIComponent(sessionId)}/unarchive\`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json"
+  return requestJson<{ status: string; session: SessionSummary; thread: unknown }>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/unarchive",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
     },
-    body: JSON.stringify({})
-  });
-
-  if (!response.ok) {
-    throw new Error(\`unarchive session failed (\${response.status})\`);
-  }
-
-  return (await response.json()) as { status: string; session: SessionSummary; thread: unknown };
+    "unarchive session failed"
+  );
 }
 
 export async function listSessionApprovals(sessionId: string, baseUrl = "/api"): Promise<{ data: Array<PendingApproval> }> {
-  const response = await fetch(\`${"${baseUrl}"}/sessions/\${encodeURIComponent(sessionId)}/approvals\`);
-  if (!response.ok) {
-    throw new Error(\`list approvals failed (\${response.status})\`);
-  }
+  return requestJson<{ data: Array<PendingApproval> }>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/approvals",
+    {},
+    "list approvals failed",
+    [200, 410]
+  );
+}
 
-  return (await response.json()) as { data: Array<PendingApproval> };
+export async function listSessionToolInput(sessionId: string, baseUrl = "/api"): Promise<{ data: Array<PendingToolInput> }> {
+  return requestJson<{ data: Array<PendingToolInput> }>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/tool-input",
+    {},
+    "list tool input failed",
+    [200, 410]
+  );
+}
+
+export async function resumeSession(sessionId: string, baseUrl = "/api"): Promise<{ session: SessionSummary; thread: unknown }> {
+  return requestJson<{ session: SessionSummary; thread: unknown }>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/resume",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    },
+    "resume session failed",
+    [200, 410]
+  );
 }
 
 export async function sendSessionMessage(
@@ -342,35 +750,54 @@ export async function sendSessionMessage(
   baseUrl = "/api",
   model?: string
 ): Promise<{ status: string; sessionId: string; turnId: string }> {
-  const response = await fetch(\`${"${baseUrl}"}/sessions/\${encodeURIComponent(sessionId)}/messages\`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json"
+  return requestJson<{ status: string; sessionId: string; turnId: string }>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/messages",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text, model })
     },
-    body: JSON.stringify({ text, model })
-  });
-
-  if (!response.ok) {
-    throw new Error(\`send message failed (\${response.status})\`);
-  }
-
-  return (await response.json()) as { status: string; sessionId: string; turnId: string };
+    "send message failed",
+    [202, 410]
+  );
 }
 
-export async function interruptSession(sessionId: string, baseUrl = "/api"): Promise<{ status: string; sessionId: string; turnId?: string }> {
-  const response = await fetch(\`${"${baseUrl}"}/sessions/\${encodeURIComponent(sessionId)}/interrupt\`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json"
+export async function interruptSession(
+  sessionId: string,
+  baseUrl = "/api",
+  turnId?: string
+): Promise<{ status: string; sessionId: string; turnId?: string }> {
+  return requestJson<{ status: string; sessionId: string; turnId?: string }>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/interrupt",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(turnId ? { turnId } : {})
     },
-    body: JSON.stringify({})
-  });
+    "interrupt session failed",
+    [200, 409, 410]
+  );
+}
 
-  if (!response.ok && response.status !== 409) {
-    throw new Error(\`interrupt session failed (\${response.status})\`);
-  }
-
-  return (await response.json()) as { status: string; sessionId: string; turnId?: string };
+export async function decideToolInput(
+  requestId: string,
+  body: {
+    decision: "accept" | "decline" | "cancel";
+    answers?: Record<string, { answers: Array<string> }>;
+    response?: unknown;
+  },
+  baseUrl = "/api"
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/tool-input/" + encodeURIComponent(requestId) + "/decision",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    },
+    "decide tool input failed",
+    [200, 404]
+  );
 }
 
 export async function decideApproval(
@@ -379,19 +806,16 @@ export async function decideApproval(
   scope: "turn" | "session" = "turn",
   baseUrl = "/api"
 ): Promise<{ status: string; approvalId: string; threadId?: string }> {
-  const response = await fetch(\`${"${baseUrl}"}/approvals/\${encodeURIComponent(approvalId)}/decision\`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json"
+  return requestJson<{ status: string; approvalId: string; threadId?: string }>(
+    baseUrl + "/approvals/" + encodeURIComponent(approvalId) + "/decision",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ decision, scope })
     },
-    body: JSON.stringify({ decision, scope })
-  });
-
-  if (!response.ok) {
-    throw new Error(\`decide approval failed (\${response.status})\`);
-  }
-
-  return (await response.json()) as { status: string; approvalId: string; threadId?: string };
+    "decide approval failed",
+    [200, 404]
+  );
 }
 `;
 

@@ -634,6 +634,7 @@ body {
 }
 
 .chat-header {
+  position: relative;
   border-bottom: 1px solid var(--border-subtle);
   background: #ffffff;
   padding: 0.74rem 1.2rem;
@@ -655,6 +656,7 @@ body {
   display: flex;
   align-items: center;
   gap: 0.55rem;
+  flex-wrap: wrap;
 }
 
 .model-picker {
@@ -725,6 +727,48 @@ body {
   flex-wrap: wrap;
 }
 
+.thread-menu {
+  position: absolute;
+  top: calc(100% - 0.1rem);
+  right: 1.2rem;
+  z-index: 24;
+  min-width: 230px;
+  border: 1px solid #d5dae3;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 10px 24px #0f172a1f;
+  padding: 0.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.thread-menu button {
+  text-align: left;
+  border: 0;
+  background: transparent;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #1f2937;
+  padding: 0.45rem 0.52rem;
+}
+
+.thread-menu button:hover:not(:disabled) {
+  background: #f1f4f8;
+}
+
+.chat-body {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.chat-body.with-drawer {
+  grid-template-columns: minmax(0, 1fr) 350px;
+}
+
 .chat-transcript {
   min-height: 0;
   overflow-y: auto;
@@ -740,6 +784,77 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.74rem;
+}
+
+.insight-drawer {
+  border-left: 1px solid var(--border-subtle);
+  background: #f8fafd;
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.insight-drawer header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.72rem 0.78rem;
+  border-bottom: 1px solid #dee3ed;
+}
+
+.insight-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.24rem;
+  padding: 0.54rem 0.72rem 0.4rem;
+}
+
+.insight-tabs button {
+  border: 1px solid #d3d9e4;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #4b5568;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.2rem 0.5rem;
+}
+
+.insight-tabs button.active {
+  border-color: #111827;
+  background: #111827;
+  color: #ffffff;
+}
+
+.insight-body {
+  overflow: auto;
+  padding: 0.48rem 0.72rem 0.72rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.44rem;
+}
+
+.insight-entry {
+  border: 1px solid #d7deea;
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 0.4rem 0.5rem;
+}
+
+.insight-entry summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #374151;
+  font-size: 0.75rem;
+}
+
+.insight-entry pre {
+  margin: 0.36rem 0 0;
+  white-space: pre-wrap;
+  font: inherit;
+  font-size: 0.74rem;
+  color: #1f2937;
 }
 
 .transcript-toolbar {
@@ -924,6 +1039,39 @@ body {
   gap: 0.45rem;
 }
 
+.tool-input-form {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.42rem;
+}
+
+.tool-input-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.22rem;
+}
+
+.tool-input-form label span {
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: #374151;
+}
+
+.tool-input-form label small {
+  font-size: 0.72rem;
+  color: #667085;
+}
+
+.tool-input-form input {
+  border: 1px solid #d5dbe6;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 0.36rem 0.44rem;
+  background: #ffffff;
+}
+
 .jump-to-bottom {
   position: sticky;
   bottom: 0.7rem;
@@ -947,6 +1095,22 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.56rem;
+}
+
+.steer-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.steer-controls input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #d4dbe6;
+  border-radius: 10px;
+  padding: 0.42rem 0.52rem;
+  font: inherit;
+  background: #ffffff;
 }
 
 textarea {
@@ -1035,6 +1199,125 @@ button.danger:hover:not(:disabled) {
   font-size: 0.84rem;
 }
 
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1400;
+  background: #1118274d;
+  backdrop-filter: blur(1px);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+.settings-modal {
+  width: min(1100px, 100%);
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+  border-radius: 16px;
+  border: 1px solid #d6dce7;
+  background: #ffffff;
+  box-shadow: 0 18px 42px #0f172a26;
+  padding: 0.92rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.72rem;
+}
+
+.settings-modal > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.62rem;
+  flex-wrap: wrap;
+}
+
+.settings-modal > header h3 {
+  margin: 0;
+  font-size: 1.06rem;
+}
+
+.settings-modal > header > div {
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  flex-wrap: wrap;
+}
+
+.settings-section {
+  border: 1px solid #d9deea;
+  border-radius: 12px;
+  background: #f8fafd;
+  padding: 0.72rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.48rem;
+}
+
+.settings-section h4 {
+  margin: 0;
+  font-size: 0.94rem;
+  color: #1f2937;
+}
+
+.settings-section h5 {
+  margin: 0;
+  font-size: 0.82rem;
+  color: #374151;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 0.44rem;
+  flex-wrap: wrap;
+}
+
+.settings-section pre {
+  margin: 0;
+  border: 1px solid #dde3ef;
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 0.45rem;
+  font-size: 0.73rem;
+  overflow: auto;
+  max-height: 240px;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 0.5rem;
+}
+
+.settings-grid > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.settings-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.settings-list li {
+  border: 1px solid #dde3ef;
+  border-radius: 9px;
+  background: #ffffff;
+  padding: 0.4rem 0.5rem;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.45rem;
+  align-items: center;
+  font-size: 0.77rem;
+}
+
 @media (max-width: 1100px) {
   .app-shell {
     grid-template-columns: 290px minmax(0, 1fr);
@@ -1046,6 +1329,17 @@ button.danger:hover:not(:disabled) {
 
   .model-picker select {
     min-width: 180px;
+  }
+
+  .chat-body.with-drawer {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .insight-drawer {
+    border-left: 0;
+    border-top: 1px solid var(--border-subtle);
+    max-height: 260px;
   }
 }
 
@@ -1067,5 +1361,10 @@ button.danger:hover:not(:disabled) {
 
   .chat-pane {
     min-height: 58dvh;
+  }
+
+  .settings-modal {
+    max-height: calc(100vh - 1rem);
+    padding: 0.72rem;
   }
 }

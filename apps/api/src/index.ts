@@ -103,6 +103,52 @@ type PendingApprovalRecord = PendingApproval & {
   rpcId: string | number;
 };
 
+type ToolUserInputRequestMethod = "item/tool/requestUserInput" | "tool/requestUserInput";
+type ToolUserInputDecisionInput = "accept" | "decline" | "cancel";
+
+type ToolUserInputQuestionOption = {
+  label: string;
+  description: string;
+};
+
+type ToolUserInputQuestion = {
+  id: string;
+  header: string;
+  question: string;
+  options: Array<ToolUserInputQuestionOption> | null;
+  isOther: boolean;
+  isSecret: boolean;
+};
+
+type PendingToolUserInput = {
+  requestId: string;
+  method: ToolUserInputRequestMethod;
+  threadId: string;
+  turnId: string | null;
+  itemId: string | null;
+  summary: string;
+  questions: Array<ToolUserInputQuestion>;
+  details: Record<string, unknown>;
+  createdAt: string;
+  status: "pending";
+};
+
+type PendingToolUserInputRecord = PendingToolUserInput & {
+  rpcId: string | number;
+};
+
+type CapabilityStatus = "available" | "disabled" | "unknown";
+
+type CapabilityEntry = {
+  status: CapabilityStatus;
+  reason: string | null;
+};
+
+type CapabilityMethodProbe = {
+  method: string;
+  probeParams?: unknown;
+};
+
 type ApprovalDecisionInput = "accept" | "decline" | "cancel";
 type DefaultSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 type AuthStatus = {
@@ -187,9 +233,125 @@ const moveProjectChatsBodySchema = z.object({
   destination: z.enum(["unassigned", "archive"])
 });
 
+const capabilityQuerySchema = z.object({
+  refresh: z.enum(["true", "false"]).optional()
+});
+
 const approvalDecisionBodySchema = z.object({
   decision: z.enum(["accept", "decline", "cancel"]),
   scope: z.enum(["turn", "session"]).optional()
+});
+
+const toolUserInputDecisionBodySchema = z.object({
+  decision: z.enum(["accept", "decline", "cancel"]),
+  answers: z.record(z.string(), z.object({ answers: z.array(z.string()) })).optional(),
+  response: z.unknown().optional()
+});
+
+const mcpOauthLoginBodySchema = z.object({
+  scopes: z.array(z.string()).optional(),
+  timeoutSecs: z.coerce.number().int().positive().optional()
+});
+
+const rollbackBodySchema = z
+  .object({
+    numTurns: z.coerce.number().int().min(1).default(1)
+  })
+  .default({ numTurns: 1 });
+
+const steerBodySchema = z.object({
+  input: z.string().trim().min(1)
+});
+
+const reviewBodySchema = z.object({
+  delivery: z.enum(["inline", "detached"]).optional(),
+  targetType: z.enum(["uncommittedChanges", "baseBranch", "commit", "custom"]).optional(),
+  branch: z.string().trim().min(1).optional(),
+  sha: z.string().trim().min(1).optional(),
+  title: z.string().trim().min(1).max(300).optional(),
+  instructions: z.string().trim().min(1).optional()
+});
+
+const accountLoginStartBodySchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("apiKey"),
+    apiKey: z.string().trim().min(1)
+  }),
+  z.object({
+    type: z.literal("chatgpt")
+  }),
+  z.object({
+    type: z.literal("chatgptAuthTokens"),
+    accessToken: z.string().trim().min(1),
+    chatgptAccountId: z.string().trim().min(1),
+    chatgptPlanType: z.string().trim().min(1).optional()
+  })
+]);
+
+const accountLoginCancelBodySchema = z.object({
+  loginId: z.string().trim().min(1)
+});
+
+const configReadQuerySchema = z.object({
+  cwd: z.string().trim().min(1).optional(),
+  includeLayers: z.enum(["true", "false"]).optional()
+});
+
+const configValueWriteBodySchema = z.object({
+  keyPath: z.string().trim().min(1),
+  mergeStrategy: z.enum(["replace", "upsert"]),
+  value: z.unknown(),
+  expectedVersion: z.string().trim().min(1).optional(),
+  filePath: z.string().trim().min(1).optional()
+});
+
+const configBatchWriteBodySchema = z.object({
+  edits: z
+    .array(
+      z.object({
+        keyPath: z.string().trim().min(1),
+        mergeStrategy: z.enum(["replace", "upsert"]),
+        value: z.unknown()
+      })
+    )
+    .min(1),
+  expectedVersion: z.string().trim().min(1).optional(),
+  filePath: z.string().trim().min(1).optional()
+});
+
+const feedbackUploadBodySchema = z.object({
+  classification: z.string().trim().min(1),
+  includeLogs: z.boolean(),
+  reason: z.string().trim().min(1).optional(),
+  threadId: z.string().trim().min(1).optional()
+});
+
+const commandExecBodySchema = z.object({
+  command: z.array(z.string().trim().min(1)).min(1),
+  cwd: z.string().trim().min(1).optional(),
+  timeoutMs: z.coerce.number().int().positive().optional()
+});
+
+const skillsListQuerySchema = z.object({
+  forceReload: z.enum(["true", "false"]).optional(),
+  cwd: z.string().trim().min(1).optional()
+});
+
+const skillsConfigWriteBodySchema = z.object({
+  path: z.string().trim().min(1),
+  enabled: z.boolean()
+});
+
+const skillsRemoteWriteBodySchema = z.object({
+  hazelnutId: z.string().trim().min(1),
+  isPreload: z.boolean()
+});
+
+const appsQuerySchema = z.object({
+  cursor: z.string().trim().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  threadId: z.string().trim().min(1).optional(),
+  forceRefetch: z.enum(["true", "false"]).optional()
 });
 
 const wsCommandSchema = z.discriminatedUnion("type", [
@@ -202,6 +364,36 @@ const app = Fastify({
   logger: {
     level: env.LOG_LEVEL
   }
+});
+
+app.setErrorHandler((error, _request, reply) => {
+  if (error instanceof z.ZodError) {
+    reply.code(400).send({
+      status: "error",
+      code: "invalid_request",
+      message: "request validation failed",
+      issues: error.issues
+    });
+    return;
+  }
+
+  const knownError = error as { statusCode?: unknown; message?: unknown };
+
+  if (typeof knownError.statusCode === "number") {
+    reply.code(knownError.statusCode).send({
+      status: "error",
+      code: "request_failed",
+      message: typeof knownError.message === "string" ? knownError.message : "request failed"
+    });
+    return;
+  }
+
+  app.log.error({ err: error }, "unhandled request error");
+  reply.code(500).send({
+    status: "error",
+    code: "internal_error",
+    message: "internal server error"
+  });
 });
 
 const dataLogDir = path.join(env.DATA_DIR, "logs");
@@ -245,6 +437,7 @@ const supervisor = new CodexSupervisor({
 
 const activeTurnByThread = new Map<string, string>();
 const pendingApprovals = new Map<string, PendingApprovalRecord>();
+const pendingToolUserInputs = new Map<string, PendingToolUserInputRecord>();
 const purgedSessionIds = new Set<string>();
 const sockets = new Set<WebSocketLike>();
 const socketThreadFilter = new Map<WebSocketLike, string | null>();
@@ -252,6 +445,41 @@ const codexHomeAuthFilePath = env.CODEX_HOME ? path.join(env.CODEX_HOME, "auth.j
 const sessionMetadataPath = path.join(env.DATA_DIR, "session-metadata.json");
 const sessionMetadata = await loadSessionMetadata();
 const deletedSessionMessage = "This chat was permanently deleted and is no longer available.";
+const capabilitiesByMethod = new Map<string, CapabilityEntry>();
+let capabilitiesLastUpdatedAt: string | null = null;
+let capabilitiesInitialized = false;
+let capabilitiesRefreshInFlight: Promise<void> | null = null;
+
+const capabilityMethodProbes: Array<CapabilityMethodProbe> = [
+  { method: "thread/fork", probeParams: {} },
+  { method: "thread/compact/start", probeParams: {} },
+  { method: "thread/rollback", probeParams: {} },
+  { method: "thread/backgroundTerminals/clean", probeParams: {} },
+  { method: "turn/steer", probeParams: {} },
+  { method: "review/start", probeParams: {} },
+  { method: "command/exec", probeParams: {} },
+  { method: "experimentalFeature/list", probeParams: { limit: 1 } },
+  { method: "collaborationMode/list", probeParams: {} },
+  { method: "skills/list", probeParams: {} },
+  { method: "skills/config/write", probeParams: {} },
+  { method: "skills/remote/read", probeParams: {} },
+  { method: "skills/remote/write", probeParams: {} },
+  { method: "app/list", probeParams: { limit: 1 } },
+  { method: "config/mcpServer/reload", probeParams: { _probe: true } },
+  { method: "mcpServer/oauth/login", probeParams: {} },
+  { method: "item/tool/requestUserInput", probeParams: {} },
+  { method: "tool/requestUserInput", probeParams: {} },
+  { method: "config/read", probeParams: {} },
+  { method: "config/value/write", probeParams: {} },
+  { method: "config/batchWrite", probeParams: {} },
+  { method: "configRequirements/read", probeParams: { _probe: true } },
+  { method: "feedback/upload", probeParams: {} },
+  { method: "account/read", probeParams: {} },
+  { method: "account/login/start", probeParams: {} },
+  { method: "account/login/cancel", probeParams: {} },
+  { method: "account/logout", probeParams: { _probe: true } },
+  { method: "account/rateLimits/read", probeParams: { _probe: true } }
+];
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
@@ -788,6 +1016,398 @@ function clearPendingApprovalsForThread(threadId: string): void {
   }
 }
 
+function hasPendingToolInputsForThread(threadId: string): boolean {
+  for (const item of pendingToolUserInputs.values()) {
+    if (item.threadId === threadId && item.status === "pending") {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function toPublicToolUserInput(record: PendingToolUserInputRecord): PendingToolUserInput {
+  const { rpcId: _rpcId, ...rest } = record;
+  return rest;
+}
+
+function listPendingToolInputsByThread(threadId: string): Array<PendingToolUserInput> {
+  const requests: Array<PendingToolUserInput> = [];
+  for (const request of pendingToolUserInputs.values()) {
+    if (request.threadId !== threadId || request.status !== "pending") {
+      continue;
+    }
+
+    requests.push(toPublicToolUserInput(request));
+  }
+
+  requests.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  return requests;
+}
+
+function normalizeToolUserInputQuestion(input: unknown): ToolUserInputQuestion | null {
+  if (!isObjectRecord(input)) {
+    return null;
+  }
+
+  if (typeof input.id !== "string" || typeof input.header !== "string" || typeof input.question !== "string") {
+    return null;
+  }
+
+  let options: Array<ToolUserInputQuestionOption> | null = null;
+  if (Array.isArray(input.options)) {
+    options = input.options
+      .map((entry) => {
+        if (!isObjectRecord(entry)) {
+          return null;
+        }
+
+        if (typeof entry.label !== "string" || typeof entry.description !== "string") {
+          return null;
+        }
+
+        return {
+          label: entry.label,
+          description: entry.description
+        };
+      })
+      .filter((entry): entry is ToolUserInputQuestionOption => entry !== null);
+  }
+
+  return {
+    id: input.id,
+    header: input.header,
+    question: input.question,
+    options,
+    isOther: input.isOther === true,
+    isSecret: input.isSecret === true
+  };
+}
+
+function buildToolUserInputSummary(params: Record<string, unknown>): string {
+  const questions = Array.isArray(params.questions) ? params.questions.length : 0;
+  const label = questions === 1 ? "question" : "questions";
+  return `Tool input required (${questions} ${label})`;
+}
+
+function createPendingToolUserInput(serverRequest: JsonRpcServerRequest): PendingToolUserInputRecord | null {
+  if (serverRequest.method !== "item/tool/requestUserInput" && serverRequest.method !== "tool/requestUserInput") {
+    return null;
+  }
+
+  if (!isObjectRecord(serverRequest.params)) {
+    return null;
+  }
+
+  const threadId = extractThreadId(serverRequest.params);
+  if (!threadId) {
+    return null;
+  }
+
+  const questions = Array.isArray(serverRequest.params.questions)
+    ? serverRequest.params.questions
+        .map((entry) => normalizeToolUserInputQuestion(entry))
+        .filter((entry): entry is ToolUserInputQuestion => entry !== null)
+    : [];
+
+  const requestId = String(serverRequest.id);
+  return {
+    requestId,
+    rpcId: serverRequest.id,
+    method: serverRequest.method,
+    threadId,
+    turnId: extractTurnId(serverRequest.params),
+    itemId: extractItemId(serverRequest.params),
+    summary: buildToolUserInputSummary(serverRequest.params),
+    questions,
+    details: serverRequest.params,
+    createdAt: new Date().toISOString(),
+    status: "pending"
+  };
+}
+
+function clearPendingToolInputsForThread(threadId: string): void {
+  for (const [requestId, pending] of pendingToolUserInputs.entries()) {
+    if (pending.threadId !== threadId) {
+      continue;
+    }
+
+    pendingToolUserInputs.delete(requestId);
+    publishToSockets(
+      "tool_user_input_resolved",
+      {
+        requestId,
+        status: "expired"
+      },
+      threadId
+    );
+  }
+}
+
+function clearPendingToolInputsForTurn(threadId: string, turnId: string): void {
+  for (const [requestId, pending] of pendingToolUserInputs.entries()) {
+    if (pending.threadId !== threadId || pending.turnId !== turnId) {
+      continue;
+    }
+
+    pendingToolUserInputs.delete(requestId);
+    publishToSockets(
+      "tool_user_input_resolved",
+      {
+        requestId,
+        status: "expired"
+      },
+      threadId
+    );
+  }
+}
+
+function toolUserInputResponsePayload(body: {
+  decision: ToolUserInputDecisionInput;
+  answers?: Record<string, { answers: Array<string> }>;
+  response?: unknown;
+}): unknown {
+  if (body.response !== undefined) {
+    return body.response;
+  }
+
+  if (body.decision === "accept") {
+    return {
+      answers: body.answers ?? {}
+    };
+  }
+
+  return {
+    status: body.decision
+  };
+}
+
+function isMethodUnavailableError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const lower = error.message.toLowerCase();
+  return (
+    lower.includes("rpc error -32601") ||
+    lower.includes("method not found") ||
+    lower.includes("unknown variant") ||
+    lower.includes("requires experimentalapi capability") ||
+    lower.includes("experimental api capability")
+  );
+}
+
+function isInvalidParamsError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const lower = error.message.toLowerCase();
+  return lower.includes("rpc error -32602") || lower.includes("missing field") || lower.includes("invalid type");
+}
+
+function isInvalidRequestStateError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const lower = error.message.toLowerCase();
+  return (
+    lower.includes("rpc error -32600") ||
+    lower.includes("cannot rollback while a turn is in progress") ||
+    lower.includes("turn is in progress") ||
+    lower.includes("already in progress")
+  );
+}
+
+function isAuthRequiredError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const lower = error.message.toLowerCase();
+  return (
+    lower.includes("unauthorized") ||
+    lower.includes("missing bearer or basic authentication") ||
+    lower.includes("authentication required")
+  );
+}
+
+function mapCodexError(error: unknown, fallbackMessage = "codex call failed"): {
+  httpStatus: number;
+  code: string;
+  message: string;
+} {
+  if (isMethodUnavailableError(error)) {
+    return {
+      httpStatus: 501,
+      code: "method_not_supported",
+      message: error instanceof Error ? error.message : fallbackMessage
+    };
+  }
+
+  if (isInvalidParamsError(error)) {
+    return {
+      httpStatus: 400,
+      code: "invalid_params",
+      message: error instanceof Error ? error.message : fallbackMessage
+    };
+  }
+
+  if (isInvalidRequestStateError(error)) {
+    return {
+      httpStatus: 409,
+      code: "invalid_state",
+      message: error instanceof Error ? error.message : fallbackMessage
+    };
+  }
+
+  if (isAuthRequiredError(error)) {
+    return {
+      httpStatus: 401,
+      code: "auth_required",
+      message: error instanceof Error ? error.message : fallbackMessage
+    };
+  }
+
+  if (error instanceof Error && error.message.toLowerCase().includes("timed out")) {
+    return {
+      httpStatus: 504,
+      code: "codex_timeout",
+      message: error.message
+    };
+  }
+
+  return {
+    httpStatus: 500,
+    code: "codex_error",
+    message: error instanceof Error ? error.message : fallbackMessage
+  };
+}
+
+function sendMappedCodexError(
+  reply: { code: (statusCode: number) => unknown },
+  error: unknown,
+  fallbackMessage: string,
+  details?: Record<string, unknown>
+): { status: "error"; code: string; message: string; details?: Record<string, unknown> } {
+  const mapped = mapCodexError(error, fallbackMessage);
+  reply.code(mapped.httpStatus);
+  return {
+    status: "error",
+    code: mapped.code,
+    message: mapped.message,
+    ...(details ? { details } : {})
+  };
+}
+
+function classifyCapabilityProbeError(error: unknown): CapabilityEntry {
+  if (isMethodUnavailableError(error)) {
+    return {
+      status: "disabled",
+      reason: error instanceof Error ? error.message : "method unavailable"
+    };
+  }
+
+  if (
+    isInvalidParamsError(error) ||
+    isInvalidRequestStateError(error) ||
+    isAuthRequiredError(error) ||
+    isNoRolloutFoundError(error)
+  ) {
+    return {
+      status: "available",
+      reason: error instanceof Error ? error.message : "runtime validation"
+    };
+  }
+
+  if (error instanceof Error) {
+    return {
+      status: "unknown",
+      reason: error.message
+    };
+  }
+
+  return {
+    status: "unknown",
+    reason: "unknown error"
+  };
+}
+
+async function refreshCapabilities(): Promise<void> {
+  if (capabilitiesRefreshInFlight) {
+    return capabilitiesRefreshInFlight;
+  }
+
+  const task = (async () => {
+    const next = new Map<string, CapabilityEntry>();
+    for (const probe of capabilityMethodProbes) {
+      try {
+        await supervisor.call(probe.method, probe.probeParams);
+        next.set(probe.method, {
+          status: "available",
+          reason: null
+        });
+      } catch (error) {
+        next.set(probe.method, classifyCapabilityProbeError(error));
+      }
+    }
+
+    capabilitiesByMethod.clear();
+    for (const [method, result] of next.entries()) {
+      capabilitiesByMethod.set(method, result);
+    }
+
+    capabilitiesInitialized = true;
+    capabilitiesLastUpdatedAt = new Date().toISOString();
+  })();
+
+  capabilitiesRefreshInFlight = task;
+  try {
+    await task;
+  } finally {
+    capabilitiesRefreshInFlight = null;
+  }
+}
+
+function methodCapabilityStatus(method: string): CapabilityStatus {
+  return capabilitiesByMethod.get(method)?.status ?? "unknown";
+}
+
+function capabilityFeatures(): Record<string, boolean> {
+  return {
+    toolUserInput:
+      methodCapabilityStatus("item/tool/requestUserInput") === "available" ||
+      methodCapabilityStatus("tool/requestUserInput") === "available",
+    threadFork: methodCapabilityStatus("thread/fork") === "available",
+    threadCompact: methodCapabilityStatus("thread/compact/start") === "available",
+    threadRollback: methodCapabilityStatus("thread/rollback") === "available",
+    threadBackgroundTerminalClean: methodCapabilityStatus("thread/backgroundTerminals/clean") === "available",
+    turnSteer: methodCapabilityStatus("turn/steer") === "available",
+    reviewStart: methodCapabilityStatus("review/start") === "available",
+    commandExec: methodCapabilityStatus("command/exec") === "available",
+    feedbackUpload: methodCapabilityStatus("feedback/upload") === "available",
+    mcpOauth: methodCapabilityStatus("mcpServer/oauth/login") === "available",
+    mcpReload: methodCapabilityStatus("config/mcpServer/reload") === "available",
+    accountLifecycle:
+      methodCapabilityStatus("account/read") === "available" &&
+      methodCapabilityStatus("account/login/start") === "available" &&
+      methodCapabilityStatus("account/logout") === "available",
+    configRead: methodCapabilityStatus("config/read") === "available",
+    configWrite:
+      methodCapabilityStatus("config/value/write") === "available" ||
+      methodCapabilityStatus("config/batchWrite") === "available",
+    configRequirements: methodCapabilityStatus("configRequirements/read") === "available",
+    apps: methodCapabilityStatus("app/list") === "available",
+    skills: methodCapabilityStatus("skills/list") === "available",
+    collaborationModes: methodCapabilityStatus("collaborationMode/list") === "available",
+    experimentalFeatures: methodCapabilityStatus("experimentalFeature/list") === "available",
+    planUpdates: true,
+    diffUpdates: true,
+    tokenUsage: true
+  };
+}
+
 async function resolveKnownSessionTitle(sessionId: string): Promise<string | undefined> {
   const storedTitle = sessionMetadata.titles[sessionId];
   if (typeof storedTitle === "string" && storedTitle.trim().length > 0) {
@@ -929,7 +1549,11 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
 
   const deletedPaths = await purgeRolloutFilesForSession(sessionId, knownPath);
   const existsInMemory =
-    activeTurnByThread.has(sessionId) || hasPendingApprovalsForThread(sessionId) || sessionReadSucceeded || knownPath !== null;
+    activeTurnByThread.has(sessionId) ||
+    hasPendingApprovalsForThread(sessionId) ||
+    hasPendingToolInputsForThread(sessionId) ||
+    sessionReadSucceeded ||
+    knownPath !== null;
   if (!existsInMemory && deletedPaths.length === 0) {
     return {
       status: "not_found",
@@ -943,6 +1567,7 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
 
   activeTurnByThread.delete(sessionId);
   clearPendingApprovalsForThread(sessionId);
+  clearPendingToolInputsForThread(sessionId);
   purgedSessionIds.add(sessionId);
 
   const titleMetadataChanged = setSessionTitleOverride(sessionId, null);
@@ -1222,8 +1847,41 @@ supervisor.on("notification", (notification: JsonRpcNotification) => {
 
       if (typeof params.turn?.id === "string") {
         clearPendingApprovalsForTurn(params.threadId, params.turn.id);
+        clearPendingToolInputsForTurn(params.threadId, params.turn.id);
       }
     }
+  }
+
+  if (notification.method === "turn/plan/updated") {
+    publishToSockets("turn_plan_updated", notification.params ?? {}, threadId);
+  }
+
+  if (notification.method === "turn/diff/updated") {
+    publishToSockets("turn_diff_updated", notification.params ?? {}, threadId);
+  }
+
+  if (notification.method === "thread/tokenUsage/updated") {
+    publishToSockets("thread_token_usage_updated", notification.params ?? {}, threadId);
+  }
+
+  if (notification.method === "app/list/updated") {
+    publishToSockets("app_list_updated", notification.params ?? {}, threadId, { broadcastToAll: true });
+  }
+
+  if (notification.method === "mcpServer/oauthLogin/completed") {
+    publishToSockets("mcp_oauth_completed", notification.params ?? {}, threadId, { broadcastToAll: true });
+  }
+
+  if (notification.method === "account/updated") {
+    publishToSockets("account_updated", notification.params ?? {}, threadId, { broadcastToAll: true });
+  }
+
+  if (notification.method === "account/login/completed") {
+    publishToSockets("account_login_completed", notification.params ?? {}, threadId, { broadcastToAll: true });
+  }
+
+  if (notification.method === "account/rateLimits/updated") {
+    publishToSockets("account_rate_limits_updated", notification.params ?? {}, threadId, { broadcastToAll: true });
   }
 
   publishToSockets("notification", notification, threadId);
@@ -1248,6 +1906,13 @@ supervisor.on("serverRequest", (serverRequest: JsonRpcServerRequest) => {
   if (approval) {
     pendingApprovals.set(approval.approvalId, approval);
     publishToSockets("approval", toPublicApproval(approval), approval.threadId);
+    return;
+  }
+
+  const toolUserInput = createPendingToolUserInput(serverRequest);
+  if (toolUserInput) {
+    pendingToolUserInputs.set(toolUserInput.requestId, toolUserInput);
+    publishToSockets("tool_user_input_requested", toPublicToolUserInput(toolUserInput), toolUserInput.threadId);
     return;
   }
 
@@ -1334,6 +1999,388 @@ app.get("/api", async () => {
     name: "Codex Manager API",
     version: "0.1.0"
   };
+});
+
+app.get("/api/capabilities", async (request) => {
+  const query = capabilityQuerySchema.parse(request.query);
+  if (query.refresh === "true" || !capabilitiesInitialized) {
+    await refreshCapabilities();
+  }
+
+  const methods: Record<string, CapabilityStatus> = {};
+  const details: Record<string, { status: CapabilityStatus; reason: string | null }> = {};
+
+  for (const probe of capabilityMethodProbes) {
+    const entry = capabilitiesByMethod.get(probe.method) ?? { status: "unknown", reason: null };
+    methods[probe.method] = entry.status;
+    details[probe.method] = entry;
+  }
+
+  return {
+    status: "ok",
+    runtime: {
+      initialized: supervisor.status().initialized,
+      capabilitiesLastUpdatedAt
+    },
+    methods,
+    details,
+    features: capabilityFeatures()
+  };
+});
+
+app.get("/api/features/experimental", async (request, reply) => {
+  const query = listQuerySchema.parse(request.query);
+  try {
+    const response = await supervisor.call<{ data: Array<Record<string, unknown>>; nextCursor: string | null }>(
+      "experimentalFeature/list",
+      {
+        limit: query.limit ?? 100,
+        cursor: query.cursor ?? null
+      }
+    );
+    return response;
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to list experimental features", {
+      method: "experimentalFeature/list"
+    });
+  }
+});
+
+app.get("/api/collaboration/modes", async (request, reply) => {
+  const query = listQuerySchema.parse(request.query);
+  try {
+    const response = await supervisor.call<{ data: Array<Record<string, unknown>>; nextCursor?: string | null }>(
+      "collaborationMode/list",
+      {
+        limit: query.limit ?? 100,
+        cursor: query.cursor ?? null
+      }
+    );
+    return {
+      data: Array.isArray(response.data) ? response.data : [],
+      nextCursor: typeof response.nextCursor === "string" ? response.nextCursor : null
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to list collaboration modes", {
+      method: "collaborationMode/list"
+    });
+  }
+});
+
+app.get("/api/apps", async (request, reply) => {
+  const query = appsQuerySchema.parse(request.query);
+  try {
+    const response = await supervisor.call<{ data: Array<Record<string, unknown>>; nextCursor: string | null }>("app/list", {
+      limit: query.limit ?? 100,
+      cursor: query.cursor ?? null,
+      threadId: query.threadId ?? null,
+      forceRefetch: query.forceRefetch === "true"
+    });
+    return response;
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to list apps", {
+      method: "app/list"
+    });
+  }
+});
+
+app.get("/api/skills", async (request, reply) => {
+  const query = skillsListQuerySchema.parse(request.query);
+  try {
+    const response = await supervisor.call<{ data: Array<Record<string, unknown>>; nextCursor?: string | null }>("skills/list", {
+      forceReload: query.forceReload === "true",
+      cwds: query.cwd ? [query.cwd] : undefined
+    });
+    return {
+      data: Array.isArray(response.data) ? response.data : [],
+      nextCursor: typeof response.nextCursor === "string" ? response.nextCursor : null
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to list skills", {
+      method: "skills/list"
+    });
+  }
+});
+
+app.post("/api/skills/config", async (request, reply) => {
+  const body = skillsConfigWriteBodySchema.parse(request.body);
+  try {
+    const response = await supervisor.call("skills/config/write", {
+      path: body.path,
+      enabled: body.enabled
+    });
+    return {
+      status: "ok",
+      result: response
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to write skill config", {
+      method: "skills/config/write",
+      path: body.path
+    });
+  }
+});
+
+app.get("/api/skills/remote", async (_request, reply) => {
+  try {
+    const response = await supervisor.call("skills/remote/read", {});
+    return {
+      status: "ok",
+      result: response
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to read remote skills", {
+      method: "skills/remote/read"
+    });
+  }
+});
+
+app.post("/api/skills/remote", async (request, reply) => {
+  const body = skillsRemoteWriteBodySchema.parse(request.body);
+  try {
+    const response = await supervisor.call("skills/remote/write", {
+      hazelnutId: body.hazelnutId,
+      isPreload: body.isPreload
+    });
+    return {
+      status: "ok",
+      result: response
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to write remote skill settings", {
+      method: "skills/remote/write",
+      hazelnutId: body.hazelnutId
+    });
+  }
+});
+
+app.post("/api/mcp/reload", async (_request, reply) => {
+  try {
+    const response = await supervisor.call("config/mcpServer/reload", undefined);
+    return {
+      status: "ok",
+      result: response
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to reload mcp config", {
+      method: "config/mcpServer/reload"
+    });
+  }
+});
+
+app.post("/api/mcp/servers/:serverName/oauth/login", async (request, reply) => {
+  const params = z.object({ serverName: z.string().min(1) }).parse(request.params);
+  const body = mcpOauthLoginBodySchema.parse(request.body ?? {});
+  try {
+    const response = await supervisor.call("mcpServer/oauth/login", {
+      name: params.serverName,
+      scopes: body.scopes ?? null,
+      timeoutSecs: body.timeoutSecs ?? null
+    });
+    return {
+      status: "ok",
+      result: response
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to start mcp oauth login", {
+      method: "mcpServer/oauth/login",
+      name: params.serverName
+    });
+  }
+});
+
+app.get("/api/account", async (_request, reply) => {
+  try {
+    const response = await supervisor.call("account/read", {});
+    return response;
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to read account state", {
+      method: "account/read"
+    });
+  }
+});
+
+app.post("/api/account/login/start", async (request, reply) => {
+  const body = accountLoginStartBodySchema.parse(request.body);
+  try {
+    const response = await supervisor.call("account/login/start", {
+      ...(body.type === "apiKey"
+        ? {
+            type: "apiKey",
+            apiKey: body.apiKey
+          }
+        : body.type === "chatgpt"
+          ? {
+              type: "chatgpt"
+            }
+          : {
+              type: "chatgptAuthTokens",
+              accessToken: body.accessToken,
+              chatgptAccountId: body.chatgptAccountId,
+              chatgptPlanType: body.chatgptPlanType ?? null
+            })
+    });
+    return {
+      status: "ok",
+      result: response
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to start account login", {
+      method: "account/login/start",
+      type: body.type
+    });
+  }
+});
+
+app.post("/api/account/login/cancel", async (request, reply) => {
+  const body = accountLoginCancelBodySchema.parse(request.body);
+  try {
+    const response = await supervisor.call("account/login/cancel", {
+      loginId: body.loginId
+    });
+    return {
+      status: "ok",
+      result: response
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to cancel account login", {
+      method: "account/login/cancel",
+      loginId: body.loginId
+    });
+  }
+});
+
+app.post("/api/account/logout", async (_request, reply) => {
+  try {
+    const response = await supervisor.call("account/logout", undefined);
+    return {
+      status: "ok",
+      result: response
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to logout account", {
+      method: "account/logout"
+    });
+  }
+});
+
+app.get("/api/account/rate-limits", async (_request, reply) => {
+  try {
+    const response = await supervisor.call("account/rateLimits/read", undefined);
+    return response;
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to read rate limits", {
+      method: "account/rateLimits/read"
+    });
+  }
+});
+
+app.get("/api/config", async (request, reply) => {
+  const query = configReadQuerySchema.parse(request.query);
+  try {
+    const response = await supervisor.call("config/read", {
+      cwd: query.cwd ?? null,
+      includeLayers: query.includeLayers === "true"
+    });
+    return response;
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to read config", {
+      method: "config/read"
+    });
+  }
+});
+
+app.get("/api/config/requirements", async (_request, reply) => {
+  try {
+    const response = await supervisor.call("configRequirements/read", undefined);
+    return response;
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to read config requirements", {
+      method: "configRequirements/read"
+    });
+  }
+});
+
+app.post("/api/config/value", async (request, reply) => {
+  const body = configValueWriteBodySchema.parse(request.body);
+  try {
+    const response = await supervisor.call("config/value/write", {
+      keyPath: body.keyPath,
+      mergeStrategy: body.mergeStrategy,
+      value: body.value,
+      expectedVersion: body.expectedVersion ?? null,
+      filePath: body.filePath ?? null
+    });
+    return {
+      status: "ok",
+      result: response
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to write config value", {
+      method: "config/value/write",
+      keyPath: body.keyPath
+    });
+  }
+});
+
+app.post("/api/config/batch", async (request, reply) => {
+  const body = configBatchWriteBodySchema.parse(request.body);
+  try {
+    const response = await supervisor.call("config/batchWrite", {
+      edits: body.edits,
+      expectedVersion: body.expectedVersion ?? null,
+      filePath: body.filePath ?? null
+    });
+    return {
+      status: "ok",
+      result: response
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to batch write config", {
+      method: "config/batchWrite"
+    });
+  }
+});
+
+app.post("/api/commands/exec", async (request, reply) => {
+  const body = commandExecBodySchema.parse(request.body);
+  try {
+    const response = await supervisor.call("command/exec", {
+      command: body.command,
+      cwd: body.cwd ?? null,
+      timeoutMs: body.timeoutMs ?? null,
+      sandboxPolicy: null
+    });
+    return {
+      status: "ok",
+      result: response
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to execute command", {
+      method: "command/exec",
+      command: body.command.join(" ")
+    });
+  }
+});
+
+app.post("/api/feedback", async (request, reply) => {
+  const body = feedbackUploadBodySchema.parse(request.body);
+  try {
+    const response = await supervisor.call("feedback/upload", {
+      classification: body.classification,
+      includeLogs: body.includeLogs,
+      reason: body.reason ?? null,
+      threadId: body.threadId ?? null
+    });
+    return {
+      status: "ok",
+      result: response
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to upload feedback", {
+      method: "feedback/upload"
+    });
+  }
 });
 
 app.get("/api/models", async (request) => {
@@ -1762,6 +2809,182 @@ app.get("/api/sessions/:sessionId", async (request, reply) => {
   };
 });
 
+app.post("/api/sessions/:sessionId/fork", async (request, reply) => {
+  const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
+  if (isSessionPurged(params.sessionId)) {
+    reply.code(410);
+    return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  try {
+    const response = await supervisor.call<{ thread: CodexThread }>("thread/fork", {
+      threadId: params.sessionId,
+      sandbox: env.DEFAULT_SANDBOX_MODE,
+      approvalPolicy: env.DEFAULT_APPROVAL_POLICY
+    });
+
+    return {
+      status: "ok",
+      sourceSessionId: params.sessionId,
+      session: toSessionSummary(response.thread, true),
+      thread: response.thread
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to fork session", {
+      method: "thread/fork",
+      sessionId: params.sessionId
+    });
+  }
+});
+
+app.post("/api/sessions/:sessionId/compact", async (request, reply) => {
+  const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
+  if (isSessionPurged(params.sessionId)) {
+    reply.code(410);
+    return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  try {
+    const response = await supervisor.call("thread/compact/start", {
+      threadId: params.sessionId
+    });
+    return {
+      status: "ok",
+      sessionId: params.sessionId,
+      result: response
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to compact session context", {
+      method: "thread/compact/start",
+      sessionId: params.sessionId
+    });
+  }
+});
+
+app.post("/api/sessions/:sessionId/rollback", async (request, reply) => {
+  const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
+  if (isSessionPurged(params.sessionId)) {
+    reply.code(410);
+    return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+  const body = rollbackBodySchema.parse(request.body);
+
+  try {
+    const response = await supervisor.call("thread/rollback", {
+      threadId: params.sessionId,
+      numTurns: body.numTurns
+    });
+    return {
+      status: "ok",
+      sessionId: params.sessionId,
+      numTurns: body.numTurns,
+      result: response
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to rollback session", {
+      method: "thread/rollback",
+      sessionId: params.sessionId,
+      numTurns: body.numTurns
+    });
+  }
+});
+
+app.post("/api/sessions/:sessionId/background-terminals/clean", async (request, reply) => {
+  const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
+  if (isSessionPurged(params.sessionId)) {
+    reply.code(410);
+    return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  try {
+    const response = await supervisor.call("thread/backgroundTerminals/clean", {
+      threadId: params.sessionId
+    });
+    return {
+      status: "ok",
+      sessionId: params.sessionId,
+      result: response
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to clean background terminals", {
+      method: "thread/backgroundTerminals/clean",
+      sessionId: params.sessionId
+    });
+  }
+});
+
+app.post("/api/sessions/:sessionId/review", async (request, reply) => {
+  const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
+  if (isSessionPurged(params.sessionId)) {
+    reply.code(410);
+    return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+  const body = reviewBodySchema.parse(request.body ?? {});
+
+  const targetType = body.targetType ?? "custom";
+  const target =
+    targetType === "uncommittedChanges"
+      ? { type: "uncommittedChanges" }
+      : targetType === "baseBranch"
+        ? { type: "baseBranch", branch: body.branch ?? "main" }
+        : targetType === "commit"
+          ? { type: "commit", sha: body.sha ?? "", title: body.title ?? null }
+          : { type: "custom", instructions: body.instructions ?? "Review this thread's current changes." };
+
+  try {
+    const response = await supervisor.call("review/start", {
+      threadId: params.sessionId,
+      delivery: body.delivery ?? "inline",
+      target
+    });
+    return {
+      status: "ok",
+      sessionId: params.sessionId,
+      result: response
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to start review", {
+      method: "review/start",
+      sessionId: params.sessionId
+    });
+  }
+});
+
+app.post("/api/sessions/:sessionId/turns/:turnId/steer", async (request, reply) => {
+  const params = z.object({ sessionId: z.string().min(1), turnId: z.string().min(1) }).parse(request.params);
+  if (isSessionPurged(params.sessionId)) {
+    reply.code(410);
+    return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+  const body = steerBodySchema.parse(request.body);
+
+  try {
+    const response = await supervisor.call("turn/steer", {
+      threadId: params.sessionId,
+      expectedTurnId: params.turnId,
+      input: [
+        {
+          type: "text",
+          text: body.input,
+          text_elements: []
+        }
+      ]
+    });
+    return {
+      status: "ok",
+      sessionId: params.sessionId,
+      turnId: params.turnId,
+      result: response
+    };
+  } catch (error) {
+    return sendMappedCodexError(reply, error, "failed to steer active turn", {
+      method: "turn/steer",
+      sessionId: params.sessionId,
+      turnId: params.turnId
+    });
+  }
+});
+
 app.post("/api/sessions/:sessionId/rename", async (request, reply) => {
   const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
   if (isSessionPurged(params.sessionId)) {
@@ -1933,6 +3156,18 @@ app.get("/api/sessions/:sessionId/approvals", async (request, reply) => {
   };
 });
 
+app.get("/api/sessions/:sessionId/tool-input", async (request, reply) => {
+  const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
+  if (isSessionPurged(params.sessionId)) {
+    reply.code(410);
+    return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  return {
+    data: listPendingToolInputsByThread(params.sessionId)
+  };
+});
+
 app.post("/api/sessions/:sessionId/resume", async (request, reply) => {
   const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
   if (isSessionPurged(params.sessionId)) {
@@ -2013,6 +3248,47 @@ app.post("/api/sessions/:sessionId/interrupt", async (request, reply) => {
   };
 });
 
+app.post("/api/tool-input/:requestId/decision", async (request, reply) => {
+  const params = z.object({ requestId: z.string().min(1) }).parse(request.params);
+  const body = toolUserInputDecisionBodySchema.parse(request.body);
+
+  const pending = pendingToolUserInputs.get(params.requestId);
+  if (!pending) {
+    reply.code(404);
+    return {
+      status: "not_found",
+      requestId: params.requestId
+    };
+  }
+
+  try {
+    await supervisor.respond(pending.rpcId, toolUserInputResponsePayload(body));
+    pendingToolUserInputs.delete(params.requestId);
+    publishToSockets(
+      "tool_user_input_resolved",
+      {
+        requestId: params.requestId,
+        status: "resolved",
+        decision: body.decision
+      },
+      pending.threadId
+    );
+
+    return {
+      status: "ok",
+      requestId: params.requestId,
+      threadId: pending.threadId
+    };
+  } catch (error) {
+    app.log.error({ error, requestId: params.requestId }, "failed to submit tool user input decision");
+    reply.code(500);
+    return {
+      status: "error",
+      requestId: params.requestId
+    };
+  }
+});
+
 app.post("/api/approvals/:approvalId/decision", async (request, reply) => {
   const params = z.object({ approvalId: z.string().min(1) }).parse(request.params);
   const body = approvalDecisionBodySchema.parse(request.body);
@@ -2071,6 +3347,7 @@ app.addHook("onClose", async () => {
   socketThreadFilter.clear();
   activeTurnByThread.clear();
   pendingApprovals.clear();
+  pendingToolUserInputs.clear();
   await supervisor.stop();
 });
 
@@ -2101,6 +3378,11 @@ process.on("SIGTERM", () => {
 });
 
 await supervisor.start();
+try {
+  await refreshCapabilities();
+} catch (error) {
+  app.log.warn({ error }, "failed to initialize capability snapshot");
+}
 const authStatus = currentAuthStatus();
 if (authStatus.likelyUnauthenticated) {
   app.log.warn(

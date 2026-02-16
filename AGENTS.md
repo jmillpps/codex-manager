@@ -8,32 +8,48 @@ Record all new information and documentation under docs/ and treat this director
 
 At the end of every turn, you must perform a Documentation Impact Assessment by determining whether anything in that turn changed the system’s external behavior, public surface, lifecycle semantics, configuration requirements, operational steps, or user workflow. Report the result as your own assessment (not as a question to the user). If the answer is yes, documentation must be updated in the same commit; if the answer is no, no documentation changes are required. If a competent developer reading the existing docs would form a different mental model than the system now implements, the docs are wrong and must be corrected immediately. Documentation hygiene is as important as development.
 
+Keep default runs clean:
+
+- Runtime and test artifacts must be written under `.data/` (or another gitignored runtime path), not into tracked source directories.
+- Playwright/Vitest/other report outputs must never be committed.
+- Root report/state directories such as `test-results/`, `playwright-report/`, `blob-report/`, and `coverage/` are treated as ephemeral and must remain untracked.
+
 ## Brief
 
 This project is a local-first Codex chat application in active implementation, with a runnable React/Vite frontend and Fastify backend that supervise and bridge `codex app-server` over STDIO for session lifecycle, streaming responses, and approval decisions while keeping Codex as the authoritative runtime.
 
 ## Repository context
 
-This repository contains both planning documents and initial implementation code:
+This repository contains both planning documents and active implementation code:
 
-- `apps/web`: React + Vite chat UI with compact session list, archived-session filtering, collapsible `Projects` and `Your chats` groups, hover ellipsis context menu for rename/archive/restore/delete (with confirmation before permanent delete) plus nested hover `Move` submenu with nested `Projects` flyout (`New Project` at the top, then scrollable project list capped to 5 visible rows; project-assigned chats also expose `Your Chats` and `Archive` destinations there), archived-view section gating (hide empty project groups; hide `Projects` when no project has archived chats; hide `Your chats` when no unassigned archived chats), Projects header row ellipsis actions (`New Project`) anchored in-row with shared row highlight, per-project row ellipsis context menu with `New Chat` plus confirmed bulk project actions (`Move chats` to `Your Chats`/`Archive` and `Delete chats`, shown only when the project currently has chats, plus guarded `Delete Project`), ellipsis triggers with stronger local hover/focus chip while parent row hover stays visible, top-level context menus that open to the right of their trigger with same-row vertical alignment and viewport-aware fallback, pagination load-more, materialization-aware archive guard, transcript filtering/grouped activity cards, ChatGPT-like split-pane shell (independent chat/sidebar scrolling plus fixed-bottom centered composer), model selection, MCP status panel, streaming updates, approval controls, send-retry, reconnect backoff, and right-pane blocking modal flow when an active session is deleted
-- `apps/api`: Fastify backend with Codex app-server JSON-RPC bridge, session/message/approval endpoints (including rename/archive/unarchive plus harness-level hard-delete since app-server has no native `thread/delete`), project endpoints (`/api/projects*`) including empty-project delete enforcement (`409 project_not_empty`) and bulk chat operations (`POST /api/projects/:projectId/chats/move-all`, `POST /api/projects/:projectId/chats/delete-all`), session-project assignment endpoint (`POST /api/sessions/:sessionId/project`) that also supports loaded non-materialized sessions, paginated/loaded-thread session listing (non-materialized visibility is loaded-memory based until first rollout), hard-delete disk purge with `410` guards, model+MCP capability endpoints, WebSocket event streaming (including `session_deleted` and project-assignment sync events), health/auth-readiness status reporting, session/project metadata persistence, and startup auth bootstrap into repo-local CODEX_HOME
-- `packages/api-client`: generated API client for health, session/project lifecycle (including project bulk move/delete-all helpers), messaging, approvals, model listing, and MCP server status operations
-- root dev tooling includes Playwright test runner dependency for browser automation checks (environment still needs required system libraries to launch browsers)
-- `docs/*`: product, architecture, protocol, operations, and implementation status documentation
+- `apps/web`: React + Vite chat UI with ChatGPT-like split-pane layout, compact/expandable Projects + chats navigation, hover ellipsis context menus with nested move/project flyouts, archive/delete/rename flows, project bulk actions, materialization-aware archive guard, transcript filtering and grouped activity cards, approval handling, tool user-input prompts/decisions, thread actions (fork/compact/rollback/review/background-terminals clean), active-turn steer controls, insights drawer (plan/diff/usage/tools), settings modal (capabilities/account/config/mcp/skills/apps), websocket reconnect/backoff, and right-pane blocking modal behavior when the active session is deleted
+- `apps/api`: Fastify backend with Codex app-server JSON-RPC bridge, session/project lifecycle endpoints (including harness-level hard delete + purge tombstones), thread-control endpoints (`fork`, `compact`, `rollback`, `background-terminals/clean`, `review`, `turn steer`), approval + tool-input request workflows, capability probing, discovery/settings/account/config/integration endpoints, command/feedback endpoints, session/project metadata persistence, startup auth bootstrap into repo-local CODEX_HOME, websocket event fan-out (session/project/tool-input/plan/diff/token-usage/account/app/mcp events), and structured Codex/Zod error mapping for stable HTTP semantics
+- `packages/api-client`: generated TypeScript API client for health, session/project lifecycle, bulk project operations, approvals/tool-input decisions, thread actions, and settings/account/integration surfaces
+- root dev tooling includes Playwright browser smoke/e2e commands (`pnpm test:e2e*`) routed through `scripts/run-playwright.mjs` (Linux shared-library bootstrap into `.data/playwright-libs` when needed, and test output under `.data/playwright-test-results`) plus a runtime integration smoke harness (`pnpm smoke:runtime`) for API + websocket lifecycle validation
+- `docs/*`: product, architecture, protocol, operations, and implementation-status documentation organized as focused knowledge-tree modules
 
 ## Document guide
 
 - `docs/prd.md`: Product requirements and scope. Defines goals, non-goals, functional and UX requirements, milestones, risks, and success metrics.
 - `docs/architecture.md`: System architecture and invariants. Describes component responsibilities, lifecycle flows, transport model, persistence boundaries, and security posture.
-- `docs/ops.md`: Day-to-day operational runbook. Covers setup, environment variables, local development commands, testing/build gates, troubleshooting, and reset procedures.
-- `docs/codex-app-server.md`: Protocol reference for `codex app-server`. Documents handshake rules, methods, notifications, item/turn/thread semantics, approvals, and capability flags.
+- `docs/ops.md`: Operations index linking focused runbooks.
+- `docs/operations/setup-and-run.md`: Prerequisites, environment setup, local execution, Codex supervision behavior, and MCP runtime operations.
+- `docs/operations/generation-and-validation.md`: Contract generation, protocol schema generation, and validation commands.
+- `docs/operations/troubleshooting.md`: Debugging steps and failure-mode runbooks.
+- `docs/operations/maintenance.md`: Reset procedures, git workflow rules, CI expectations, and operational invariants.
+- `docs/codex-app-server.md`: Protocol index linking focused Codex protocol references.
+- `docs/protocol/overview.md`: Transport/framing, JSON-RPC model, handshake, and protocol primitives.
+- `docs/protocol/methods-core.md`: Core method surface (initialize/thread/turn/review lifecycle).
+- `docs/protocol/methods-integrations.md`: Integration/configuration method surface (commands, skills, apps, MCP, config, account, feedback).
+- `docs/protocol/events.md`: Stream/event and delta semantics.
+- `docs/protocol/approvals-and-tool-input.md`: Approval and server-initiated user-input flows.
+- `docs/protocol/config-security-and-client-rules.md`: MCP config semantics, security model, and non-negotiable client rules.
 - `docs/implementation-status.md`: Current code-level implementation status and known gaps versus planned behavior.
 
 ## How to use these docs
 
 1. Start with `docs/prd.md` for product intent and acceptance criteria.
 2. Use `docs/architecture.md` to align implementation boundaries and invariants.
-3. Use `docs/codex-app-server.md` when implementing protocol-level behavior.
-4. Use `docs/ops.md` for local setup, verification, and release-quality checks.
-5. Use `docs/implementation-status.md` to understand what is currently implemented versus planned.
+3. Use `docs/codex-app-server.md` as the protocol index, then open the focused file under `docs/protocol/` for the concern you are implementing.
+4. Use `docs/ops.md` as the operations index, then open the focused file under `docs/operations/` for setup, validation, troubleshooting, or maintenance tasks.
+5. Use `docs/implementation-status.md` to understand current implementation coverage and residual gaps.

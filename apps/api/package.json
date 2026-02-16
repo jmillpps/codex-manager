@@ -9,7 +9,7 @@
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "echo 'lint not configured for @repo/api yet'",
-    "test": "echo 'test not configured for @repo/api yet'"
+    "test": "node ../../scripts/test-api-contracts.mjs"
   },
   "dependencies": {
     "@fastify/websocket": "^11.2.0",

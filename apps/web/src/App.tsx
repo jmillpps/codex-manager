@@ -59,6 +59,52 @@ type PendingApproval = {
   status: "pending";
 };
 
+type ToolInputOption = {
+  label: string;
+  description: string;
+};
+
+type ToolInputQuestion = {
+  id: string;
+  header: string;
+  question: string;
+  options: Array<ToolInputOption> | null;
+  isOther: boolean;
+  isSecret: boolean;
+};
+
+type PendingToolInput = {
+  requestId: string;
+  method: string;
+  threadId: string;
+  turnId: string | null;
+  itemId: string | null;
+  summary: string;
+  questions: Array<ToolInputQuestion>;
+  details: Record<string, unknown>;
+  createdAt: string;
+  status: "pending";
+};
+
+type ToolInputAnswer = {
+  answers: Array<string>;
+};
+
+type CapabilityStatus = "available" | "disabled" | "unknown";
+
+type CapabilitiesResponse = {
+  status: string;
+  runtime: {
+    initialized: boolean;
+    capabilitiesLastUpdatedAt: string | null;
+  };
+  methods: Record<string, CapabilityStatus>;
+  details: Record<string, { status: CapabilityStatus; reason: string | null }>;
+  features: Record<string, boolean>;
+};
+
+type InsightTab = "plan" | "diff" | "usage" | "tools";
+
 type NotificationEnvelope = {
   type:
     | "notification"
@@ -69,6 +115,16 @@ type NotificationEnvelope = {
     | "project_upserted"
     | "project_deleted"
     | "session_project_updated"
+    | "tool_user_input_requested"
+    | "tool_user_input_resolved"
+    | "turn_plan_updated"
+    | "turn_diff_updated"
+    | "thread_token_usage_updated"
+    | "app_list_updated"
+    | "mcp_oauth_completed"
+    | "account_updated"
+    | "account_login_completed"
+    | "account_rate_limits_updated"
     | "ready"
     | "error"
     | "pong";
@@ -113,6 +169,12 @@ type McpServerSummary = {
   status: string;
   authStatus: string;
   toolCount: number;
+};
+
+type AccountStatus = {
+  account?: unknown;
+  requiresOpenaiAuth?: boolean;
+  [key: string]: unknown;
 };
 
 type SessionMenuPosition = {
@@ -163,6 +225,51 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     return value as Record<string, unknown>;
   }
   return null;
+}
+
+function parseShellLikeArgs(input: string): Array<string> {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  if (trimmed.startsWith("[")) {
+    const parsed = JSON.parse(trimmed);
+    if (!Array.isArray(parsed)) {
+      throw new Error("JSON command input must be an array of strings.");
+    }
+
+    const values = parsed
+      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+      .filter((entry) => entry.length > 0);
+
+    if (values.length === 0) {
+      throw new Error("Command array must include at least one non-empty argument.");
+    }
+
+    return values;
+  }
+
+  return trimmed.split(/\s+/g).filter((part) => part.length > 0);
+}
+
+function extractLoginIdCandidate(accountStatus: AccountStatus | null): string {
+  if (!accountStatus) {
+    return "";
+  }
+
+  const direct = accountStatus.loginId;
+  if (typeof direct === "string" && direct.trim().length > 0) {
+    return direct.trim();
+  }
+
+  const loginRecord = asRecord(accountStatus.login);
+  const fromLoginRecord = loginRecord?.id;
+  if (typeof fromLoginRecord === "string" && fromLoginRecord.trim().length > 0) {
+    return fromLoginRecord.trim();
+  }
+
+  return "";
 }
 
 function normalizeModelOption(input: unknown): ModelOption | null {
@@ -283,7 +390,7 @@ function approvalMessageId(approvalId: string): string {
 }
 
 function messageCategory(message: ChatMessage): "chat" | "tools" | "approvals" {
-  if (message.type.startsWith("approval.")) {
+  if (message.type.startsWith("approval.") || message.type.startsWith("tool_input.")) {
     return "approvals";
   }
 
@@ -358,6 +465,52 @@ function approvalResolutionSummary(payload: {
   return "Approval resolved.";
 }
 
+function toolInputMessageId(requestId: string): string {
+  return `tool-input-${requestId}`;
+}
+
+function toolInputResolutionStatus(payload: {
+  status?: string;
+  decision?: "accept" | "decline" | "cancel";
+}): ChatMessage["status"] {
+  if (payload.status === "expired") {
+    return "canceled";
+  }
+
+  if (payload.decision === "decline") {
+    return "error";
+  }
+
+  if (payload.decision === "cancel") {
+    return "canceled";
+  }
+
+  return "complete";
+}
+
+function toolInputResolutionSummary(payload: {
+  status?: string;
+  decision?: "accept" | "decline" | "cancel";
+}): string {
+  if (payload.status === "expired") {
+    return "Tool input request expired before a decision was submitted.";
+  }
+
+  if (payload.decision === "accept") {
+    return "Tool input submitted.";
+  }
+
+  if (payload.decision === "decline") {
+    return "Tool input declined.";
+  }
+
+  if (payload.decision === "cancel") {
+    return "Tool input canceled.";
+  }
+
+  return "Tool input request resolved.";
+}
+
 export function App() {
   const apiBase = useMemo(() => import.meta.env.VITE_API_BASE || "/api", []);
   const [sessions, setSessions] = useState<Array<SessionSummary>>([]);
@@ -383,11 +536,38 @@ export function App() {
   const [transcriptFilter, setTranscriptFilter] = useState<TranscriptFilter>("all");
   const [messages, setMessages] = useState<Array<ChatMessage>>([]);
   const [pendingApprovals, setPendingApprovals] = useState<Array<PendingApproval>>([]);
+  const [pendingToolInputs, setPendingToolInputs] = useState<Array<PendingToolInput>>([]);
+  const [toolInputDraftById, setToolInputDraftById] = useState<Record<string, Record<string, string>>>({});
+  const [toolInputActionRequestId, setToolInputActionRequestId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [steerDraft, setSteerDraft] = useState("");
+  const [submittingSteer, setSubmittingSteer] = useState(false);
+  const [activeTurnIdBySession, setActiveTurnIdBySession] = useState<Record<string, string>>({});
   const [retryPrompt, setRetryPrompt] = useState<string | null>(null);
   const [models, setModels] = useState<Array<ModelOption>>([]);
   const [selectedModelId, setSelectedModelId] = useState<string>("");
   const [sessionModelById, setSessionModelById] = useState<Record<string, string>>({});
+  const [capabilities, setCapabilities] = useState<CapabilitiesResponse | null>(null);
+  const [loadingCapabilities, setLoadingCapabilities] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [accountStatus, setAccountStatus] = useState<AccountStatus | null>(null);
+  const [accountRateLimits, setAccountRateLimits] = useState<unknown>(null);
+  const [appsCatalog, setAppsCatalog] = useState<Array<Record<string, unknown>>>([]);
+  const [skillsCatalog, setSkillsCatalog] = useState<Array<Record<string, unknown>>>([]);
+  const [collaborationModes, setCollaborationModes] = useState<Array<Record<string, unknown>>>([]);
+  const [experimentalFeatures, setExperimentalFeatures] = useState<Array<Record<string, unknown>>>([]);
+  const [configSnapshot, setConfigSnapshot] = useState<Record<string, unknown> | null>(null);
+  const [configRequirements, setConfigRequirements] = useState<Record<string, unknown> | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [settingsActionResult, setSettingsActionResult] = useState<unknown>(null);
+  const [settingsActionPending, setSettingsActionPending] = useState<string | null>(null);
+  const [insightDrawerOpen, setInsightDrawerOpen] = useState(false);
+  const [insightTab, setInsightTab] = useState<InsightTab>("plan");
+  const [planBySession, setPlanBySession] = useState<Record<string, Array<Record<string, unknown>>>>({});
+  const [diffBySession, setDiffBySession] = useState<Record<string, Array<Record<string, unknown>>>>({});
+  const [usageBySession, setUsageBySession] = useState<Record<string, Array<Record<string, unknown>>>>({});
+  const [threadMenuOpen, setThreadMenuOpen] = useState(false);
+  const [threadActionPending, setThreadActionPending] = useState<string | null>(null);
   const [loadingModels, setLoadingModels] = useState(false);
   const [mcpServers, setMcpServers] = useState<Array<McpServerSummary>>([]);
   const [loadingMcpServers, setLoadingMcpServers] = useState(false);
@@ -419,6 +599,8 @@ export function App() {
   const projectsHeaderMenuRef = useRef<HTMLDivElement | null>(null);
   const projectsHeaderMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
+  const threadMenuRef = useRef<HTMLDivElement | null>(null);
+  const threadMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const selectedSession = useMemo(
     () => sessions.find((session) => session.sessionId === selectedSessionId) ?? null,
     [sessions, selectedSessionId]
@@ -469,6 +651,22 @@ export function App() {
   const pendingApprovalsById = useMemo(() => {
     return new Map(pendingApprovals.map((approval) => [approval.approvalId, approval]));
   }, [pendingApprovals]);
+  const pendingToolInputsById = useMemo(() => {
+    return new Map(pendingToolInputs.map((request) => [request.requestId, request]));
+  }, [pendingToolInputs]);
+  const activeTurnId = selectedSessionId ? activeTurnIdBySession[selectedSessionId] ?? null : null;
+  const capabilityFlags = capabilities?.features ?? {};
+  const planEntries = selectedSessionId ? planBySession[selectedSessionId] ?? [] : [];
+  const diffEntries = selectedSessionId ? diffBySession[selectedSessionId] ?? [] : [];
+  const usageEntries = selectedSessionId ? usageBySession[selectedSessionId] ?? [] : [];
+  const runtimeStateLabel =
+    pendingToolInputs.length > 0
+      ? "Needs input"
+      : pendingApprovals.length > 0
+        ? "Waiting for approval"
+        : streaming
+          ? "Streaming"
+          : "Idle";
 
   const transcriptCounts = useMemo(() => {
     const counts: Record<TranscriptFilter, number> = {
@@ -582,6 +780,65 @@ export function App() {
     });
   };
 
+  const upsertPendingToolInputMessage = (request: PendingToolInput): void => {
+    upsertMessage({
+      id: toolInputMessageId(request.requestId),
+      turnId: request.turnId ?? "tool-input",
+      role: "system",
+      type: "tool_input.request",
+      content: request.summary,
+      details: safePrettyJson({
+        method: request.method,
+        createdAt: request.createdAt,
+        questions: request.questions,
+        ...request.details
+      }),
+      status: "streaming"
+    });
+  };
+
+  const resolveToolInputMessage = (payload: {
+    requestId: string;
+    status?: string;
+    decision?: "accept" | "decline" | "cancel";
+  }): void => {
+    setMessages((current) => {
+      const messageId = toolInputMessageId(payload.requestId);
+      const existingIndex = current.findIndex((entry) => entry.id === messageId);
+      const summary = toolInputResolutionSummary(payload);
+
+      if (existingIndex === -1) {
+        return [
+          ...current,
+          {
+            id: messageId,
+            turnId: "tool-input",
+            role: "system",
+            type: "tool_input.resolved",
+            content: summary,
+            details: safePrettyJson(payload),
+            status: toolInputResolutionStatus(payload)
+          }
+        ];
+      }
+
+      const next = [...current];
+      const existing = next[existingIndex];
+      const mergedContent = existing.content.includes(summary) ? existing.content : `${existing.content}\n${summary}`.trim();
+      next[existingIndex] = {
+        ...existing,
+        type: "tool_input.resolved",
+        content: mergedContent,
+        details: safePrettyJson({
+          previous: existing.details ?? null,
+          resolution: payload
+        }),
+        status: toolInputResolutionStatus(payload)
+      };
+      return next;
+    });
+  };
+
   const upsertSystemErrorMessage = (id: string, turnId: string, content: string): void => {
     setMessages((current) => {
       const existingIndex = current.findIndex((entry) => entry.id === id);
@@ -618,6 +875,15 @@ export function App() {
 
     setSessions((current) => current.filter((session) => session.sessionId !== sessionId));
     setPendingApprovals((current) => current.filter((approval) => approval.threadId !== sessionId));
+    setPendingToolInputs((current) => current.filter((request) => request.threadId !== sessionId));
+    setActiveTurnIdBySession((current) => {
+      if (!(sessionId in current)) {
+        return current;
+      }
+
+      const { [sessionId]: _removed, ...rest } = current;
+      return rest;
+    });
     setSessionModelById((current) => {
       if (!(sessionId in current)) {
         return current;
@@ -797,6 +1063,102 @@ export function App() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed to load approvals");
       setPendingApprovals([]);
+    }
+  };
+
+  const loadSessionToolInputs = async (sessionId: string): Promise<void> => {
+    try {
+      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(sessionId)}/tool-input`);
+      if (!response.ok) {
+        if (await handleDeletedSessionResponse(response, sessionId)) {
+          setPendingToolInputs([]);
+          return;
+        }
+        throw new Error(`failed to load tool input requests (${response.status})`);
+      }
+
+      const payload = (await response.json()) as { data: Array<PendingToolInput> };
+      setPendingToolInputs(payload.data);
+      for (const request of payload.data) {
+        upsertPendingToolInputMessage(request);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "failed to load tool input requests");
+      setPendingToolInputs([]);
+    }
+  };
+
+  const loadCapabilities = async (refresh = false): Promise<void> => {
+    setLoadingCapabilities(true);
+    try {
+      const response = await fetch(`${apiBase}/capabilities${refresh ? "?refresh=true" : ""}`);
+      if (!response.ok) {
+        throw new Error(`failed to load capabilities (${response.status})`);
+      }
+
+      const payload = (await response.json()) as CapabilitiesResponse;
+      setCapabilities(payload);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "failed to load capabilities");
+      setCapabilities(null);
+    } finally {
+      setLoadingCapabilities(false);
+    }
+  };
+
+  const loadSettingsData = async (): Promise<void> => {
+    setSettingsError(null);
+    setSettingsActionResult(null);
+    try {
+      const [accountResponse, rateLimitsResponse, appsResponse, skillsResponse, modesResponse, featuresResponse, configResponse, requirementsResponse] =
+        await Promise.all([
+          fetch(`${apiBase}/account`),
+          fetch(`${apiBase}/account/rate-limits`),
+          fetch(`${apiBase}/apps?limit=100`),
+          fetch(`${apiBase}/skills`),
+          fetch(`${apiBase}/collaboration/modes?limit=100`),
+          fetch(`${apiBase}/features/experimental?limit=100`),
+          fetch(`${apiBase}/config?includeLayers=true`),
+          fetch(`${apiBase}/config/requirements`)
+        ]);
+
+      if (accountResponse.ok) {
+        setAccountStatus((await accountResponse.json()) as AccountStatus);
+      }
+
+      if (rateLimitsResponse.ok) {
+        setAccountRateLimits(await rateLimitsResponse.json());
+      }
+
+      if (appsResponse.ok) {
+        const payload = (await appsResponse.json()) as { data?: Array<Record<string, unknown>> };
+        setAppsCatalog(Array.isArray(payload.data) ? payload.data : []);
+      }
+
+      if (skillsResponse.ok) {
+        const payload = (await skillsResponse.json()) as { data?: Array<Record<string, unknown>> };
+        setSkillsCatalog(Array.isArray(payload.data) ? payload.data : []);
+      }
+
+      if (modesResponse.ok) {
+        const payload = (await modesResponse.json()) as { data?: Array<Record<string, unknown>> };
+        setCollaborationModes(Array.isArray(payload.data) ? payload.data : []);
+      }
+
+      if (featuresResponse.ok) {
+        const payload = (await featuresResponse.json()) as { data?: Array<Record<string, unknown>> };
+        setExperimentalFeatures(Array.isArray(payload.data) ? payload.data : []);
+      }
+
+      if (configResponse.ok) {
+        setConfigSnapshot((await configResponse.json()) as Record<string, unknown>);
+      }
+
+      if (requirementsResponse.ok) {
+        setConfigRequirements((await requirementsResponse.json()) as Record<string, unknown>);
+      }
+    } catch (err) {
+      setSettingsError(err instanceof Error ? err.message : "failed to load settings data");
     }
   };
 
@@ -1444,6 +1806,203 @@ export function App() {
     }
   };
 
+  const runThreadAction = async (label: string, action: () => Promise<void>): Promise<void> => {
+    setThreadActionPending(label);
+    setError(null);
+    setThreadMenuOpen(false);
+
+    try {
+      await action();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `failed to ${label.toLowerCase()}`);
+    } finally {
+      setThreadActionPending(null);
+    }
+  };
+
+  const forkSession = async (): Promise<void> => {
+    if (!selectedSessionId) {
+      return;
+    }
+
+    await runThreadAction("Fork", async () => {
+      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(selectedSessionId)}/fork`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({})
+      });
+      if (!response.ok) {
+        throw new Error(`failed to fork session (${response.status})`);
+      }
+
+      const payload = (await response.json()) as { session?: SessionSummary };
+      const nextSessionId = payload.session?.sessionId;
+      await loadSessions(showArchived, nextSessionId ?? selectedSessionId);
+      if (nextSessionId) {
+        setSelectedSessionId(nextSessionId);
+      }
+    });
+  };
+
+  const compactSession = async (): Promise<void> => {
+    if (!selectedSessionId) {
+      return;
+    }
+
+    await runThreadAction("Compact", async () => {
+      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(selectedSessionId)}/compact`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({})
+      });
+      if (!response.ok) {
+        throw new Error(`failed to compact context (${response.status})`);
+      }
+    });
+  };
+
+  const rollbackSession = async (): Promise<void> => {
+    if (!selectedSessionId) {
+      return;
+    }
+
+    const raw = window.prompt("Rollback how many turns?", "1");
+    if (raw === null) {
+      return;
+    }
+
+    const numTurns = Number(raw);
+    if (!Number.isFinite(numTurns) || numTurns < 1 || !Number.isInteger(numTurns)) {
+      setError("rollback value must be an integer >= 1");
+      return;
+    }
+
+    const confirmed = window.confirm(`Rollback ${numTurns} turn${numTurns === 1 ? "" : "s"} from this chat?`);
+    if (!confirmed) {
+      return;
+    }
+
+    await runThreadAction("Rollback", async () => {
+      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(selectedSessionId)}/rollback`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ numTurns })
+      });
+      if (!response.ok) {
+        throw new Error(`failed to rollback session (${response.status})`);
+      }
+
+      await loadSessionTranscript(selectedSessionId);
+    });
+  };
+
+  const startReview = async (): Promise<void> => {
+    if (!selectedSessionId) {
+      return;
+    }
+
+    const instructions = window.prompt("Review instructions", "Review uncommitted changes for correctness and risks.");
+    if (instructions === null) {
+      return;
+    }
+
+    await runThreadAction("Review", async () => {
+      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(selectedSessionId)}/review`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          targetType: "custom",
+          instructions,
+          delivery: "inline"
+        })
+      });
+      if (!response.ok) {
+        throw new Error(`failed to start review (${response.status})`);
+      }
+    });
+  };
+
+  const cleanBackgroundTerminals = async (): Promise<void> => {
+    if (!selectedSessionId) {
+      return;
+    }
+
+    await runThreadAction("Clean Terminals", async () => {
+      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(selectedSessionId)}/background-terminals/clean`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({})
+      });
+      if (!response.ok) {
+        throw new Error(`failed to clean background terminals (${response.status})`);
+      }
+    });
+  };
+
+  const submitToolInputDecision = async (
+    request: PendingToolInput,
+    decision: "accept" | "decline" | "cancel"
+  ): Promise<void> => {
+    setError(null);
+    setToolInputActionRequestId(request.requestId);
+    try {
+      const draftAnswers = toolInputDraftById[request.requestId] ?? {};
+      const answerMap: Record<string, ToolInputAnswer> = {};
+      for (const question of request.questions) {
+        const value = (draftAnswers[question.id] ?? "").trim();
+        if (!value) {
+          continue;
+        }
+
+        answerMap[question.id] = {
+          answers: [value]
+        };
+      }
+
+      const response = await fetch(`${apiBase}/tool-input/${encodeURIComponent(request.requestId)}/decision`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          decision,
+          answers: decision === "accept" ? answerMap : undefined
+        })
+      });
+      if (!response.ok) {
+        throw new Error(`failed to submit tool input decision (${response.status})`);
+      }
+
+      setPendingToolInputs((current) => current.filter((entry) => entry.requestId !== request.requestId));
+      setToolInputDraftById((current) => {
+        if (!(request.requestId in current)) {
+          return current;
+        }
+        const { [request.requestId]: _removed, ...rest } = current;
+        return rest;
+      });
+      resolveToolInputMessage({
+        requestId: request.requestId,
+        status: "resolved",
+        decision
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "failed to submit tool input decision");
+    } finally {
+      setToolInputActionRequestId(null);
+    }
+  };
+
   const dispatchMessage = async (text: string): Promise<void> => {
     if (!selectedSessionId) {
       setError("create or select a session first");
@@ -1488,6 +2047,14 @@ export function App() {
           return;
         }
         throw new Error(`failed to send message (${response.status})`);
+      }
+
+      const payload = (await response.json()) as { turnId?: string };
+      if (typeof payload.turnId === "string") {
+        setActiveTurnIdBySession((current) => ({
+          ...current,
+          [selectedSessionId]: payload.turnId as string
+        }));
       }
     } catch (err) {
       setStreaming(false);
@@ -1551,8 +2118,54 @@ export function App() {
       }
 
       setStreaming(false);
+      setSteerDraft("");
+      setActiveTurnIdBySession((current) => {
+        if (!(selectedSessionId in current)) {
+          return current;
+        }
+
+        const { [selectedSessionId]: _removed, ...rest } = current;
+        return rest;
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed to interrupt turn");
+    }
+  };
+
+  const submitSteer = async (): Promise<void> => {
+    if (!selectedSessionId || !activeTurnId) {
+      setError("No active turn is available to steer.");
+      return;
+    }
+
+    const input = steerDraft.trim();
+    if (!input) {
+      return;
+    }
+
+    setSubmittingSteer(true);
+    setError(null);
+    try {
+      const response = await fetch(
+        `${apiBase}/sessions/${encodeURIComponent(selectedSessionId)}/turns/${encodeURIComponent(activeTurnId)}/steer`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({ input })
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`failed to steer turn (${response.status})`);
+      }
+
+      setSteerDraft("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "failed to steer turn");
+    } finally {
+      setSubmittingSteer(false);
     }
   };
 
@@ -1586,6 +2199,352 @@ export function App() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed to submit approval decision");
     }
+  };
+
+  const runSettingsAction = async (label: string, action: () => Promise<unknown>, reloadAfter = true): Promise<void> => {
+    setSettingsError(null);
+    setSettingsActionPending(label);
+    try {
+      const result = await action();
+      setSettingsActionResult(result);
+      if (reloadAfter) {
+        await loadSettingsData();
+      }
+    } catch (err) {
+      setSettingsError(err instanceof Error ? err.message : `failed to run ${label.toLowerCase()}`);
+    } finally {
+      setSettingsActionPending(null);
+    }
+  };
+
+  const reloadMcpConfig = async (): Promise<void> => {
+    await runSettingsAction("Reload MCP", async () => {
+      const response = await fetch(`${apiBase}/mcp/reload`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({})
+      });
+      if (!response.ok) {
+        throw new Error(`failed to reload mcp config (${response.status})`);
+      }
+      const payload = (await response.json()) as Record<string, unknown>;
+      await loadMcpServers();
+      return payload;
+    });
+  };
+
+  const startMcpOauth = async (serverName: string): Promise<void> => {
+    await runSettingsAction(`MCP OAuth (${serverName})`, async () => {
+      const response = await fetch(`${apiBase}/mcp/servers/${encodeURIComponent(serverName)}/oauth/login`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({})
+      });
+      if (!response.ok) {
+        throw new Error(`failed to start oauth login (${response.status})`);
+      }
+      const payload = (await response.json()) as { result?: { authUrl?: string } };
+      const authUrl = payload?.result && typeof payload.result.authUrl === "string" ? payload.result.authUrl : null;
+      if (authUrl) {
+        window.open(authUrl, "_blank", "noopener,noreferrer");
+      }
+      return payload;
+    });
+  };
+
+  const startAccountChatGptLogin = async (): Promise<void> => {
+    await runSettingsAction("Start ChatGPT Login", async () => {
+      const response = await fetch(`${apiBase}/account/login/start`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ type: "chatgpt" })
+      });
+      if (!response.ok) {
+        throw new Error(`failed to start account login (${response.status})`);
+      }
+      const payload = (await response.json()) as { result?: { authUrl?: string } };
+      const authUrl = payload?.result && typeof payload.result.authUrl === "string" ? payload.result.authUrl : null;
+      if (authUrl) {
+        window.open(authUrl, "_blank", "noopener,noreferrer");
+      }
+      return payload;
+    });
+  };
+
+  const startAccountApiKeyLogin = async (): Promise<void> => {
+    const apiKey = window.prompt("OpenAI API key");
+    if (apiKey === null) {
+      return;
+    }
+    const trimmed = apiKey.trim();
+    if (!trimmed) {
+      setSettingsError("api key cannot be empty");
+      return;
+    }
+
+    await runSettingsAction("Start API Key Login", async () => {
+      const response = await fetch(`${apiBase}/account/login/start`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          type: "apiKey",
+          apiKey: trimmed
+        })
+      });
+      if (!response.ok) {
+        throw new Error(`failed to start API-key login (${response.status})`);
+      }
+      return (await response.json()) as Record<string, unknown>;
+    });
+  };
+
+  const cancelAccountLogin = async (): Promise<void> => {
+    const defaultLoginId = extractLoginIdCandidate(accountStatus);
+    const loginId = window.prompt("Login id to cancel", defaultLoginId);
+    if (loginId === null) {
+      return;
+    }
+    const trimmed = loginId.trim();
+    if (!trimmed) {
+      setSettingsError("login id cannot be empty");
+      return;
+    }
+
+    await runSettingsAction("Cancel Login", async () => {
+      const response = await fetch(`${apiBase}/account/login/cancel`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ loginId: trimmed })
+      });
+      if (!response.ok) {
+        throw new Error(`failed to cancel account login (${response.status})`);
+      }
+      return (await response.json()) as Record<string, unknown>;
+    });
+  };
+
+  const logoutAccount = async (): Promise<void> => {
+    const confirmed = window.confirm("Log out of the current account?");
+    if (!confirmed) {
+      return;
+    }
+
+    await runSettingsAction("Logout", async () => {
+      const response = await fetch(`${apiBase}/account/logout`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({})
+      });
+      if (!response.ok) {
+        throw new Error(`failed to logout account (${response.status})`);
+      }
+      return (await response.json()) as Record<string, unknown>;
+    });
+  };
+
+  const writeAllowlistedConfigValue = async (keyPath: string, value: unknown): Promise<void> => {
+    await runSettingsAction(`Config Write (${keyPath})`, async () => {
+      const response = await fetch(`${apiBase}/config/value`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          keyPath,
+          mergeStrategy: "upsert",
+          value
+        })
+      });
+      if (!response.ok) {
+        throw new Error(`failed to write config (${response.status})`);
+      }
+      return (await response.json()) as Record<string, unknown>;
+    });
+  };
+
+  const writeConfigBatch = async (): Promise<void> => {
+    const raw = window.prompt(
+      "Config batch edits JSON",
+      '[{"keyPath":"model","mergeStrategy":"upsert","value":"gpt-5.3-codex"}]'
+    );
+    if (raw === null) {
+      return;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      setSettingsError("config batch input must be valid JSON");
+      return;
+    }
+
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      setSettingsError("config batch input must be a non-empty JSON array");
+      return;
+    }
+
+    await runSettingsAction("Config Batch Write", async () => {
+      const response = await fetch(`${apiBase}/config/batch`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          edits: parsed
+        })
+      });
+      if (!response.ok) {
+        throw new Error(`failed to batch write config (${response.status})`);
+      }
+      return (await response.json()) as Record<string, unknown>;
+    });
+  };
+
+  const updateSkillEnabledState = async (enabled: boolean): Promise<void> => {
+    const skillPath = window.prompt(enabled ? "Skill path to enable" : "Skill path to disable");
+    if (skillPath === null) {
+      return;
+    }
+    const trimmed = skillPath.trim();
+    if (!trimmed) {
+      setSettingsError("skill path cannot be empty");
+      return;
+    }
+
+    await runSettingsAction(enabled ? "Enable Skill" : "Disable Skill", async () => {
+      const response = await fetch(`${apiBase}/skills/config`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          path: trimmed,
+          enabled
+        })
+      });
+      if (!response.ok) {
+        throw new Error(`failed to update skill config (${response.status})`);
+      }
+      return (await response.json()) as Record<string, unknown>;
+    });
+  };
+
+  const writeRemoteSkillSetting = async (): Promise<void> => {
+    const hazelnutId = window.prompt("Remote skill id (hazelnutId)");
+    if (hazelnutId === null) {
+      return;
+    }
+    const trimmed = hazelnutId.trim();
+    if (!trimmed) {
+      setSettingsError("remote skill id cannot be empty");
+      return;
+    }
+
+    const preload = window.confirm("Enable preload for this remote skill?");
+
+    await runSettingsAction("Remote Skill Config", async () => {
+      const response = await fetch(`${apiBase}/skills/remote`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          hazelnutId: trimmed,
+          isPreload: preload
+        })
+      });
+      if (!response.ok) {
+        throw new Error(`failed to update remote skill setting (${response.status})`);
+      }
+      return (await response.json()) as Record<string, unknown>;
+    });
+  };
+
+  const executeOneOffCommand = async (): Promise<void> => {
+    const input = window.prompt("Command argv (space-separated or JSON array)", "pwd");
+    if (input === null) {
+      return;
+    }
+
+    let command: Array<string>;
+    try {
+      command = parseShellLikeArgs(input);
+    } catch (err) {
+      setSettingsError(err instanceof Error ? err.message : "invalid command input");
+      return;
+    }
+
+    if (command.length === 0) {
+      setSettingsError("command cannot be empty");
+      return;
+    }
+
+    await runSettingsAction("Command Exec", async () => {
+      const response = await fetch(`${apiBase}/commands/exec`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          command
+        })
+      });
+      if (!response.ok) {
+        throw new Error(`failed to execute command (${response.status})`);
+      }
+      return (await response.json()) as Record<string, unknown>;
+    }, false);
+  };
+
+  const uploadFeedback = async (): Promise<void> => {
+    const classification = window.prompt("Feedback classification", "ux");
+    if (classification === null) {
+      return;
+    }
+    const trimmedClassification = classification.trim();
+    if (!trimmedClassification) {
+      setSettingsError("feedback classification cannot be empty");
+      return;
+    }
+
+    const reason = window.prompt("Feedback reason (optional)");
+    if (reason === null) {
+      return;
+    }
+
+    const includeLogs = window.confirm("Include logs in feedback upload?");
+
+    await runSettingsAction("Feedback Upload", async () => {
+      const response = await fetch(`${apiBase}/feedback`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          classification: trimmedClassification,
+          includeLogs,
+          reason: reason.trim() ? reason.trim() : undefined,
+          threadId: selectedSessionId ?? undefined
+        })
+      });
+      if (!response.ok) {
+        throw new Error(`failed to upload feedback (${response.status})`);
+      }
+      return (await response.json()) as Record<string, unknown>;
+    }, false);
   };
 
   useEffect(() => {
@@ -1703,9 +2662,42 @@ export function App() {
   }, [showProjectsHeaderMenu]);
 
   useEffect(() => {
+    if (!threadMenuOpen) {
+      return;
+    }
+
+    const handleClickOutside = (event: MouseEvent): void => {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+
+      const insideMenu = threadMenuRef.current?.contains(target) ?? false;
+      const insideTrigger = threadMenuTriggerRef.current?.contains(target) ?? false;
+      if (!insideMenu && !insideTrigger) {
+        setThreadMenuOpen(false);
+      }
+    };
+
+    const handleEscape = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        setThreadMenuOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [threadMenuOpen]);
+
+  useEffect(() => {
     closeSessionMenu();
     closeProjectMenu();
     closeProjectsHeaderMenu();
+    setThreadMenuOpen(false);
   }, [selectedSessionId, showArchived]);
 
   useEffect(() => {
@@ -1790,15 +2782,18 @@ export function App() {
     void loadModels();
     void loadMcpServers();
     void loadProjects();
+    void loadCapabilities();
   }, []);
 
   useEffect(() => {
     if (!selectedSessionId) {
       setMessages([]);
       setPendingApprovals([]);
+      setPendingToolInputs([]);
       setFollowTranscriptTail(true);
       setShowJumpToBottom(false);
       setRetryPrompt(null);
+      setSteerDraft("");
       return;
     }
 
@@ -1807,7 +2802,16 @@ export function App() {
     setRetryPrompt(null);
     void loadSessionTranscript(selectedSessionId);
     void loadSessionApprovals(selectedSessionId);
+    void loadSessionToolInputs(selectedSessionId);
   }, [selectedSessionId]);
+
+  useEffect(() => {
+    if (!showSettings) {
+      return;
+    }
+
+    void loadSettingsData();
+  }, [showSettings]);
 
   useEffect(() => {
     if (selectedSessionId) {
@@ -1998,6 +3002,117 @@ export function App() {
           return;
         }
 
+        if (envelope.type === "tool_user_input_requested") {
+          const request = envelope.payload as PendingToolInput;
+          if (!request || typeof request.requestId !== "string") {
+            return;
+          }
+
+          setPendingToolInputs((current) => {
+            if (selectedSessionId && request.threadId !== selectedSessionId) {
+              return current;
+            }
+
+            const existingIndex = current.findIndex((entry) => entry.requestId === request.requestId);
+            if (existingIndex === -1) {
+              return [...current, request].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+            }
+
+            const next = [...current];
+            next[existingIndex] = request;
+            return next;
+          });
+          upsertPendingToolInputMessage(request);
+          return;
+        }
+
+        if (envelope.type === "tool_user_input_resolved") {
+          const payload = envelope.payload as {
+            requestId?: string;
+            status?: string;
+            decision?: "accept" | "decline" | "cancel";
+          };
+          if (typeof payload?.requestId !== "string") {
+            return;
+          }
+
+          setPendingToolInputs((current) => current.filter((request) => request.requestId !== payload.requestId));
+          setToolInputDraftById((current) => {
+            if (!(payload.requestId as string in current)) {
+              return current;
+            }
+            const { [payload.requestId as string]: _removed, ...rest } = current;
+            return rest;
+          });
+          resolveToolInputMessage({
+            requestId: payload.requestId,
+            status: payload.status,
+            decision: payload.decision
+          });
+          return;
+        }
+
+        if (envelope.type === "turn_plan_updated") {
+          const threadId = envelope.threadId;
+          if (!threadId) {
+            return;
+          }
+
+          const payload = asRecord(envelope.payload) ?? { raw: envelope.payload };
+          setPlanBySession((current) => ({
+            ...current,
+            [threadId]: [...(current[threadId] ?? []), payload].slice(-100)
+          }));
+
+          setInsightDrawerOpen(true);
+          return;
+        }
+
+        if (envelope.type === "turn_diff_updated") {
+          const threadId = envelope.threadId;
+          if (!threadId) {
+            return;
+          }
+
+          const payload = asRecord(envelope.payload) ?? { raw: envelope.payload };
+          setDiffBySession((current) => ({
+            ...current,
+            [threadId]: [...(current[threadId] ?? []), payload].slice(-100)
+          }));
+
+          setInsightDrawerOpen(true);
+          return;
+        }
+
+        if (envelope.type === "thread_token_usage_updated") {
+          const threadId = envelope.threadId;
+          if (!threadId) {
+            return;
+          }
+
+          const payload = asRecord(envelope.payload) ?? { raw: envelope.payload };
+          setUsageBySession((current) => ({
+            ...current,
+            [threadId]: [...(current[threadId] ?? []), payload].slice(-100)
+          }));
+          return;
+        }
+
+        if (envelope.type === "app_list_updated") {
+          void loadSettingsData();
+          return;
+        }
+
+        if (
+          envelope.type === "mcp_oauth_completed" ||
+          envelope.type === "account_updated" ||
+          envelope.type === "account_login_completed" ||
+          envelope.type === "account_rate_limits_updated"
+        ) {
+          void loadSettingsData();
+          return;
+        }
+
         if (envelope.type === "server_request") {
           const payload = envelope.payload as { method?: string };
           if (payload?.method === "account/chatgptAuthTokens/refresh") {
@@ -2050,12 +3165,23 @@ export function App() {
         }
 
         if (method === "turn/started") {
+          const turnPayload = params as {
+            threadId?: string;
+            turn?: { id?: string };
+          };
+          if (typeof turnPayload.threadId === "string" && typeof turnPayload.turn?.id === "string") {
+            setActiveTurnIdBySession((current) => ({
+              ...current,
+              [turnPayload.threadId as string]: turnPayload.turn?.id as string
+            }));
+          }
           setStreaming(true);
           return;
         }
 
         if (method === "turn/completed") {
           setStreaming(false);
+          setSteerDraft("");
 
           const completedPayload = params as {
             threadId?: string;
@@ -2070,6 +3196,16 @@ export function App() {
           };
 
           const status = completedPayload.turn?.status;
+          if (typeof completedPayload.threadId === "string") {
+            setActiveTurnIdBySession((current) => {
+              if (!(completedPayload.threadId as string in current)) {
+                return current;
+              }
+
+              const { [completedPayload.threadId as string]: _removed, ...rest } = current;
+              return rest;
+            });
+          }
           if (status === "failed") {
             const turnId = completedPayload.turn?.id ?? "turn";
             const errorMessage =
@@ -2292,7 +3428,11 @@ export function App() {
     const projectName = session.projectId ? projectNameById[session.projectId] : null;
 
     return (
-      <li key={session.sessionId} className={`session-row${isSelected ? " selected" : ""}${isMenuOpen ? " menu-open" : ""}`}>
+      <li
+        key={session.sessionId}
+        data-session-id={session.sessionId}
+        className={`session-row${isSelected ? " selected" : ""}${isMenuOpen ? " menu-open" : ""}`}
+      >
         {renamingSessionId === session.sessionId ? (
           <form
             className="session-rename-form"
@@ -2577,11 +3717,72 @@ export function App() {
                 ))}
               </select>
             </label>
-            <span className="state-pill">{pendingApprovals.length > 0 ? "Waiting for approval" : streaming ? "Streaming" : "Idle"}</span>
+            <span className="state-pill">{runtimeStateLabel}</span>
+            <button
+              ref={threadMenuTriggerRef}
+              type="button"
+              className="ghost"
+              onClick={() => setThreadMenuOpen((current) => !current)}
+              disabled={!selectedSessionId}
+            >
+              Thread Actions
+            </button>
+            <button type="button" className="ghost" onClick={() => setInsightDrawerOpen((current) => !current)}>
+              {insightDrawerOpen ? "Hide Insights" : "Insights"}
+            </button>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => {
+                setShowSettings(true);
+                void loadSettingsData();
+              }}
+            >
+              Settings
+            </button>
             <button type="button" onClick={() => void interruptTurn()} disabled={!streaming || !selectedSessionId}>
               Cancel Turn
             </button>
           </div>
+          {threadMenuOpen ? (
+            <div className="thread-menu" ref={threadMenuRef}>
+              <button
+                type="button"
+                onClick={() => void forkSession()}
+                disabled={!selectedSessionId || threadActionPending !== null || capabilityFlags.threadFork === false}
+              >
+                {threadActionPending === "Fork" ? "Forking..." : "Fork"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void startReview()}
+                disabled={!selectedSessionId || threadActionPending !== null || capabilityFlags.reviewStart === false}
+              >
+                {threadActionPending === "Review" ? "Starting..." : "Start Review"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void compactSession()}
+                disabled={!selectedSessionId || threadActionPending !== null || capabilityFlags.threadCompact === false}
+              >
+                {threadActionPending === "Compact" ? "Running..." : "Compact Context"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void rollbackSession()}
+                disabled={!selectedSessionId || threadActionPending !== null || capabilityFlags.threadRollback === false}
+              >
+                {threadActionPending === "Rollback" ? "Rolling back..." : "Rollback"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void cleanBackgroundTerminals()}
+                disabled={!selectedSessionId || threadActionPending !== null || capabilityFlags.threadBackgroundTerminalClean === false}
+              >
+                {threadActionPending === "Clean Terminals" ? "Cleaning..." : "Clean Background Terminals"}
+              </button>
+            </div>
+          ) : null}
         </header>
 
         {deletedSessionNotice ? (
@@ -2602,8 +3803,9 @@ export function App() {
           </div>
         ) : null}
 
-        <div className="chat-transcript" ref={transcriptRef} onScroll={handleTranscriptScroll}>
-          <div className="chat-transcript-inner">
+        <div className={`chat-body${insightDrawerOpen ? " with-drawer" : ""}`}>
+          <div className="chat-transcript" ref={transcriptRef} onScroll={handleTranscriptScroll}>
+            <div className="chat-transcript-inner">
             <div className="transcript-toolbar">
               <div className="filter-group" role="tablist" aria-label="Transcript filter">
                 <button
@@ -2653,6 +3855,11 @@ export function App() {
                   ? message.id.slice("approval-".length)
                   : null;
               const pendingApproval = maybeApprovalId ? pendingApprovalsById.get(maybeApprovalId) : undefined;
+              const maybeToolInputId =
+                message.type.startsWith("tool_input.") && message.id.startsWith("tool-input-")
+                  ? message.id.slice("tool-input-".length)
+                  : null;
+              const pendingToolInput = maybeToolInputId ? pendingToolInputsById.get(maybeToolInputId) : undefined;
 
               if (category === "chat") {
                 return (
@@ -2667,18 +3874,26 @@ export function App() {
               }
 
               if (category === "approvals") {
+                const title = message.type.startsWith("tool_input.")
+                  ? message.type === "tool_input.request"
+                    ? "Input Required"
+                    : "Input Update"
+                  : message.type === "approval.request"
+                    ? "Approval Required"
+                    : "Approval Update";
                 return (
                   <div key={message.id}>
                     {showGroupLabel ? (
-                      <p className="event-group-label">Approval activity for turn {shortTurnId(message.turnId)}</p>
+                      <p className="event-group-label">Action required activity for turn {shortTurnId(message.turnId)}</p>
                     ) : null}
                     <article className={`event-card approval ${message.status}`}>
                       <header>
-                        <strong>{message.type === "approval.request" ? "Approval Required" : "Approval Update"}</strong>
+                        <strong>{title}</strong>
                         <span className="event-status-chip">{statusLabel(message.status)}</span>
                       </header>
                       <p>{message.content}</p>
                       {pendingApproval ? <p className="approval-time">Requested: {formatApprovalDate(pendingApproval.createdAt)}</p> : null}
+                      {pendingToolInput ? <p className="approval-time">Requested: {formatApprovalDate(pendingToolInput.createdAt)}</p> : null}
                       {message.details ? (
                         <details className="bubble-details">
                           <summary>Details</summary>
@@ -2700,6 +3915,55 @@ export function App() {
                           >
                             Deny
                           </button>
+                        </div>
+                      ) : null}
+                      {pendingToolInput ? (
+                        <div className="tool-input-form">
+                          {pendingToolInput.questions.map((question) => (
+                            <label key={question.id}>
+                              <span>{question.header}</span>
+                              <small>{question.question}</small>
+                              <input
+                                type={question.isSecret ? "password" : "text"}
+                                value={toolInputDraftById[pendingToolInput.requestId]?.[question.id] ?? ""}
+                                onChange={(event) =>
+                                  setToolInputDraftById((current) => ({
+                                    ...current,
+                                    [pendingToolInput.requestId]: {
+                                      ...(current[pendingToolInput.requestId] ?? {}),
+                                      [question.id]: event.target.value
+                                    }
+                                  }))
+                                }
+                                placeholder={question.options?.[0]?.label ?? "Answer"}
+                              />
+                            </label>
+                          ))}
+                          <div className="approval-actions">
+                            <button
+                              type="button"
+                              onClick={() => void submitToolInputDecision(pendingToolInput, "accept")}
+                              disabled={toolInputActionRequestId === pendingToolInput.requestId}
+                            >
+                              {toolInputActionRequestId === pendingToolInput.requestId ? "Submitting..." : "Submit"}
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => void submitToolInputDecision(pendingToolInput, "cancel")}
+                              disabled={toolInputActionRequestId === pendingToolInput.requestId}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              className="danger"
+                              onClick={() => void submitToolInputDecision(pendingToolInput, "decline")}
+                              disabled={toolInputActionRequestId === pendingToolInput.requestId}
+                            >
+                              Decline
+                            </button>
+                          </div>
                         </div>
                       ) : null}
                     </article>
@@ -2726,12 +3990,108 @@ export function App() {
                 </div>
               );
             })}
+            </div>
+
+            {showJumpToBottom ? (
+              <button type="button" className="jump-to-bottom" onClick={jumpToBottom}>
+                Jump to bottom
+              </button>
+            ) : null}
           </div>
 
-          {showJumpToBottom ? (
-            <button type="button" className="jump-to-bottom" onClick={jumpToBottom}>
-              Jump to bottom
-            </button>
+          {insightDrawerOpen ? (
+            <aside className="insight-drawer">
+              <header>
+                <strong>Insights</strong>
+                <button type="button" className="ghost" onClick={() => setInsightDrawerOpen(false)}>
+                  Close
+                </button>
+              </header>
+              <div className="insight-tabs">
+                <button
+                  type="button"
+                  className={insightTab === "plan" ? "active" : ""}
+                  onClick={() => setInsightTab("plan")}
+                >
+                  Plan ({planEntries.length})
+                </button>
+                <button
+                  type="button"
+                  className={insightTab === "diff" ? "active" : ""}
+                  onClick={() => setInsightTab("diff")}
+                >
+                  Diff ({diffEntries.length})
+                </button>
+                <button
+                  type="button"
+                  className={insightTab === "usage" ? "active" : ""}
+                  onClick={() => setInsightTab("usage")}
+                >
+                  Usage ({usageEntries.length})
+                </button>
+                <button
+                  type="button"
+                  className={insightTab === "tools" ? "active" : ""}
+                  onClick={() => setInsightTab("tools")}
+                >
+                  Tools ({messages.filter((message) => messageCategory(message) === "tools").length})
+                </button>
+              </div>
+              <div className="insight-body">
+                {insightTab === "plan" ? (
+                  planEntries.length === 0 ? (
+                    <p className="hint">No plan updates yet.</p>
+                  ) : (
+                    planEntries.map((entry, index) => (
+                      <details key={`plan-${index}`} className="insight-entry" open={index === planEntries.length - 1}>
+                        <summary>Plan update {index + 1}</summary>
+                        <pre>{safePrettyJson(entry) ?? "(empty)"}</pre>
+                      </details>
+                    ))
+                  )
+                ) : null}
+                {insightTab === "diff" ? (
+                  diffEntries.length === 0 ? (
+                    <p className="hint">No diff updates yet.</p>
+                  ) : (
+                    diffEntries.map((entry, index) => (
+                      <details key={`diff-${index}`} className="insight-entry" open={index === diffEntries.length - 1}>
+                        <summary>Diff update {index + 1}</summary>
+                        <pre>{safePrettyJson(entry) ?? "(empty)"}</pre>
+                      </details>
+                    ))
+                  )
+                ) : null}
+                {insightTab === "usage" ? (
+                  usageEntries.length === 0 ? (
+                    <p className="hint">No token usage updates yet.</p>
+                  ) : (
+                    usageEntries.map((entry, index) => (
+                      <details key={`usage-${index}`} className="insight-entry" open={index === usageEntries.length - 1}>
+                        <summary>Usage update {index + 1}</summary>
+                        <pre>{safePrettyJson(entry) ?? "(empty)"}</pre>
+                      </details>
+                    ))
+                  )
+                ) : null}
+                {insightTab === "tools" ? (
+                  messages.filter((message) => messageCategory(message) === "tools").length === 0 ? (
+                    <p className="hint">No tool activity yet.</p>
+                  ) : (
+                    messages
+                      .filter((message) => messageCategory(message) === "tools")
+                      .map((message) => (
+                        <details key={`tool-${message.id}`} className="insight-entry">
+                          <summary>
+                            {message.type} ({statusLabel(message.status)})
+                          </summary>
+                          <pre>{message.details ?? message.content}</pre>
+                        </details>
+                      ))
+                  )
+                ) : null}
+              </div>
+            </aside>
           ) : null}
         </div>
 
@@ -2744,6 +4104,20 @@ export function App() {
               disabled={!selectedSessionId}
               rows={4}
             />
+            {streaming && selectedSessionId ? (
+              <div className="steer-controls">
+                <input
+                  type="text"
+                  value={steerDraft}
+                  onChange={(event) => setSteerDraft(event.target.value)}
+                  placeholder="Steer active turn..."
+                  disabled={submittingSteer || !activeTurnId}
+                />
+                <button type="button" className="ghost" onClick={() => void submitSteer()} disabled={!steerDraft.trim() || submittingSteer || !activeTurnId}>
+                  {submittingSteer ? "Steering..." : "Steer"}
+                </button>
+              </div>
+            ) : null}
             <div className="composer-actions">
               {error && retryPrompt && selectedSessionId ? (
                 <button type="button" className="ghost" onClick={() => void retryLastMessage()}>
@@ -2759,6 +4133,163 @@ export function App() {
         </footer>
       </section>
       </main>
+      {showSettings ? (
+        <div className="settings-overlay" role="dialog" aria-modal="true">
+          <div className="settings-modal">
+            <header>
+              <h3>Settings & Integrations</h3>
+              <div>
+                <button type="button" className="ghost" onClick={() => void loadCapabilities(true)} disabled={loadingCapabilities}>
+                  {loadingCapabilities ? "Refreshing..." : "Refresh Capabilities"}
+                </button>
+                <button type="button" className="ghost" onClick={() => void loadSettingsData()}>
+                  Refresh Data
+                </button>
+                <button type="button" onClick={() => setShowSettings(false)}>
+                  Close
+                </button>
+              </div>
+            </header>
+
+            {settingsError ? <p className="error-line">{settingsError}</p> : null}
+
+            <section className="settings-section">
+              <h4>Capabilities</h4>
+              {capabilities ? (
+                <>
+                  <p className="hint">
+                    Last updated: {capabilities.runtime.capabilitiesLastUpdatedAt ?? "unknown"}.
+                  </p>
+                  <pre>{safePrettyJson(capabilities.features) ?? "(empty)"}</pre>
+                </>
+              ) : (
+                <p className="hint">Capabilities unavailable.</p>
+              )}
+            </section>
+
+            <section className="settings-section">
+              <h4>Account</h4>
+              <div className="settings-row">
+                <button type="button" onClick={() => void startAccountChatGptLogin()} disabled={settingsActionPending !== null}>
+                  Start ChatGPT Login
+                </button>
+                <button type="button" className="ghost" onClick={() => void startAccountApiKeyLogin()} disabled={settingsActionPending !== null}>
+                  Start API Key Login
+                </button>
+                <button type="button" className="ghost" onClick={() => void cancelAccountLogin()} disabled={settingsActionPending !== null}>
+                  Cancel Login
+                </button>
+                <button type="button" className="ghost" onClick={() => void logoutAccount()} disabled={settingsActionPending !== null}>
+                  Logout
+                </button>
+              </div>
+              <pre>{safePrettyJson(accountStatus) ?? "(empty)"}</pre>
+              <pre>{safePrettyJson(accountRateLimits) ?? "(empty)"}</pre>
+            </section>
+
+            <section className="settings-section">
+              <h4>MCP</h4>
+              <div className="settings-row">
+                <button type="button" onClick={() => void reloadMcpConfig()} disabled={settingsActionPending !== null}>
+                  Reload MCP Config
+                </button>
+              </div>
+              {mcpServers.length === 0 ? <p className="hint">No MCP servers reported.</p> : null}
+              <ul className="settings-list">
+                {mcpServers.map((server) => (
+                  <li key={`settings-mcp-${server.name}`}>
+                    <span>
+                      {server.name} ({server.status}, auth: {server.authStatus})
+                    </span>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => void startMcpOauth(server.name)}
+                      disabled={settingsActionPending !== null}
+                    >
+                      Connect
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+
+            <section className="settings-section">
+              <h4>Config</h4>
+              <div className="settings-row">
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void writeAllowlistedConfigValue("model", selectedModelId)}
+                  disabled={settingsActionPending !== null}
+                >
+                  Set model to selected
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void writeAllowlistedConfigValue("web_search", "live")}
+                  disabled={settingsActionPending !== null}
+                >
+                  Set web_search=live
+                </button>
+                <button type="button" className="ghost" onClick={() => void writeConfigBatch()} disabled={settingsActionPending !== null}>
+                  Write Config Batch
+                </button>
+              </div>
+              <pre>{safePrettyJson(configSnapshot) ?? "(empty)"}</pre>
+              <pre>{safePrettyJson(configRequirements) ?? "(empty)"}</pre>
+            </section>
+
+            <section className="settings-section">
+              <h4>Integrations</h4>
+              <div className="settings-row">
+                <button type="button" className="ghost" onClick={() => void updateSkillEnabledState(true)} disabled={settingsActionPending !== null}>
+                  Enable Skill
+                </button>
+                <button type="button" className="ghost" onClick={() => void updateSkillEnabledState(false)} disabled={settingsActionPending !== null}>
+                  Disable Skill
+                </button>
+                <button type="button" className="ghost" onClick={() => void writeRemoteSkillSetting()} disabled={settingsActionPending !== null}>
+                  Set Remote Skill
+                </button>
+              </div>
+              <div className="settings-grid">
+                <div>
+                  <h5>Apps ({appsCatalog.length})</h5>
+                  <pre>{safePrettyJson(appsCatalog) ?? "(empty)"}</pre>
+                </div>
+                <div>
+                  <h5>Skills ({skillsCatalog.length})</h5>
+                  <pre>{safePrettyJson(skillsCatalog) ?? "(empty)"}</pre>
+                </div>
+                <div>
+                  <h5>Collaboration Modes ({collaborationModes.length})</h5>
+                  <pre>{safePrettyJson(collaborationModes) ?? "(empty)"}</pre>
+                </div>
+                <div>
+                  <h5>Experimental Features ({experimentalFeatures.length})</h5>
+                  <pre>{safePrettyJson(experimentalFeatures) ?? "(empty)"}</pre>
+                </div>
+              </div>
+            </section>
+
+            <section className="settings-section">
+              <h4>Operational Actions</h4>
+              <div className="settings-row">
+                <button type="button" className="ghost" onClick={() => void executeOneOffCommand()} disabled={settingsActionPending !== null}>
+                  Run Command
+                </button>
+                <button type="button" className="ghost" onClick={() => void uploadFeedback()} disabled={settingsActionPending !== null}>
+                  Send Feedback
+                </button>
+              </div>
+              {settingsActionPending ? <p className="hint">Running: {settingsActionPending}...</p> : null}
+              {settingsActionResult ? <pre>{safePrettyJson(settingsActionResult) ?? "(empty)"}</pre> : null}
+            </section>
+          </div>
+        </div>
+      ) : null}
       {sessionMenuSession && sessionMenuPosition
         ? createPortal(
             <div

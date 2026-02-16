@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Codex Manager API",
-    "version": "0.9.0"
+    "version": "1.0.0"
   },
   "paths": {
     "/api/health": {
@@ -83,20 +83,44 @@
         }
       }
     },
-    "/api/sessions": {
+    "/api": {
       "get": {
-        "summary": "List sessions",
-        "operationId": "listSessions",
+        "summary": "API entry metadata",
+        "operationId": "getApiInfo",
+        "responses": {
+          "200": {
+            "description": "API metadata"
+          }
+        }
+      }
+    },
+    "/api/capabilities": {
+      "get": {
+        "summary": "Read probed Codex capabilities",
+        "operationId": "getCapabilities",
         "parameters": [
           {
             "in": "query",
-            "name": "archived",
+            "name": "refresh",
             "required": false,
             "schema": {
               "type": "boolean"
             },
-            "description": "When true, return archived sessions instead of active sessions."
-          },
+            "description": "When true, refresh capability probes before returning."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Capabilities state"
+          }
+        }
+      }
+    },
+    "/api/features/experimental": {
+      "get": {
+        "summary": "List experimental features",
+        "operationId": "listExperimentalFeatures",
+        "parameters": [
           {
             "in": "query",
             "name": "cursor",
@@ -104,7 +128,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Pagination cursor from a previous list response."
+            "description": "Pagination cursor from a previous response."
           },
           {
             "in": "query",
@@ -115,21 +139,728 @@
               "minimum": 1,
               "maximum": 200
             },
-            "description": "Maximum sessions to return."
+            "description": "Maximum rows to return."
           }
         ],
         "responses": {
           "200": {
-            "description": "Session list"
+            "description": "Feature list"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/collaboration/modes": {
+      "get": {
+        "summary": "List collaboration modes",
+        "operationId": "listCollaborationModes",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Pagination cursor from a previous response."
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            "description": "Maximum rows to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Collaboration mode list"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/apps": {
+      "get": {
+        "summary": "List configured apps/connectors",
+        "operationId": "listApps",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Pagination cursor from a previous response."
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            "description": "Maximum rows to return."
+          },
+          {
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional thread id for capability-scoped listing."
+          },
+          {
+            "in": "query",
+            "name": "forceRefetch",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "When true, force refresh from Codex."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "App list"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/skills": {
+      "get": {
+        "summary": "List local skills",
+        "operationId": "listSkills",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "forceReload",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "When true, force reload from disk."
+          },
+          {
+            "in": "query",
+            "name": "cwd",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional workspace to scope skill discovery."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Skill list"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/skills/config": {
+      "post": {
+        "summary": "Write local skill config",
+        "operationId": "writeSkillConfig",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "path",
+                  "enabled"
+                ],
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Skill config written"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/skills/remote": {
+      "get": {
+        "summary": "Read remote skill settings",
+        "operationId": "readRemoteSkills",
+        "responses": {
+          "200": {
+            "description": "Remote skill settings"
+          },
+          "500": {
+            "description": "Upstream service error"
+          },
+          "501": {
+            "description": "Method unavailable"
           }
         }
       },
       "post": {
-        "summary": "Create a session",
-        "operationId": "createSession",
+        "summary": "Write remote skill settings",
+        "operationId": "writeRemoteSkills",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "hazelnutId",
+                  "isPreload"
+                ],
+                "properties": {
+                  "hazelnutId": {
+                    "type": "string"
+                  },
+                  "isPreload": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
-            "description": "Created session"
+            "description": "Remote settings written"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/mcp/reload": {
+      "post": {
+        "summary": "Reload MCP configuration",
+        "operationId": "reloadMcpConfig",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reload triggered"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/mcp/servers/{serverName}/oauth/login": {
+      "post": {
+        "summary": "Start MCP OAuth login",
+        "operationId": "startMcpOauthLogin",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "serverName",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "MCP server name"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "scopes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "timeoutSecs": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OAuth login started"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/account": {
+      "get": {
+        "summary": "Read account state",
+        "operationId": "readAccount",
+        "responses": {
+          "200": {
+            "description": "Account details"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/account/login/start": {
+      "post": {
+        "summary": "Start account login",
+        "operationId": "startAccountLogin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "required": [
+                      "type",
+                      "apiKey"
+                    ],
+                    "properties": {
+                      "type": {
+                        "type": "string",
+                        "enum": [
+                          "apiKey"
+                        ]
+                      },
+                      "apiKey": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "type"
+                    ],
+                    "properties": {
+                      "type": {
+                        "type": "string",
+                        "enum": [
+                          "chatgpt"
+                        ]
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "type",
+                      "accessToken",
+                      "chatgptAccountId"
+                    ],
+                    "properties": {
+                      "type": {
+                        "type": "string",
+                        "enum": [
+                          "chatgptAuthTokens"
+                        ]
+                      },
+                      "accessToken": {
+                        "type": "string"
+                      },
+                      "chatgptAccountId": {
+                        "type": "string"
+                      },
+                      "chatgptPlanType": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Login started"
+          },
+          "400": {
+            "description": "Invalid login payload"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/account/login/cancel": {
+      "post": {
+        "summary": "Cancel account login",
+        "operationId": "cancelAccountLogin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "loginId"
+                ],
+                "properties": {
+                  "loginId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Login canceled"
+          },
+          "404": {
+            "description": "Login id not found"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/account/logout": {
+      "post": {
+        "summary": "Logout account",
+        "operationId": "logoutAccount",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Logged out"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/account/rate-limits": {
+      "get": {
+        "summary": "Read account rate limits",
+        "operationId": "readAccountRateLimits",
+        "responses": {
+          "200": {
+            "description": "Rate limits"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/config": {
+      "get": {
+        "summary": "Read Codex config",
+        "operationId": "readConfig",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cwd",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Workspace root for config resolution."
+          },
+          {
+            "in": "query",
+            "name": "includeLayers",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Include layered config metadata."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Config payload"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/config/requirements": {
+      "get": {
+        "summary": "Read config requirements",
+        "operationId": "readConfigRequirements",
+        "responses": {
+          "200": {
+            "description": "Config requirement payload"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/config/value": {
+      "post": {
+        "summary": "Write single config value",
+        "operationId": "writeConfigValue",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "keyPath",
+                  "mergeStrategy",
+                  "value"
+                ],
+                "properties": {
+                  "keyPath": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1
+                  },
+                  "mergeStrategy": {
+                    "type": "string",
+                    "enum": [
+                      "replace",
+                      "upsert"
+                    ]
+                  },
+                  "value": {},
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "filePath": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Config value written"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/config/batch": {
+      "post": {
+        "summary": "Write config batch edits",
+        "operationId": "writeConfigBatch",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "edits"
+                ],
+                "properties": {
+                  "edits": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "keyPath",
+                        "mergeStrategy",
+                        "value"
+                      ],
+                      "properties": {
+                        "keyPath": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          },
+                          "minItems": 1
+                        },
+                        "mergeStrategy": {
+                          "type": "string",
+                          "enum": [
+                            "replace",
+                            "upsert"
+                          ]
+                        },
+                        "value": {}
+                      }
+                    }
+                  },
+                  "expectedVersion": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "filePath": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Config edits written"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/commands/exec": {
+      "post": {
+        "summary": "Execute one-off command",
+        "operationId": "executeCommand",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "command"
+                ],
+                "properties": {
+                  "command": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "cwd": {
+                    "type": "string"
+                  },
+                  "timeoutMs": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Command result"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/feedback": {
+      "post": {
+        "summary": "Upload feedback to Codex",
+        "operationId": "uploadFeedback",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "classification",
+                  "includeLogs"
+                ],
+                "properties": {
+                  "classification": {
+                    "type": "string"
+                  },
+                  "includeLogs": {
+                    "type": "boolean"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "threadId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Feedback accepted"
+          },
+          "501": {
+            "description": "Method unavailable"
           }
         }
       }
@@ -145,7 +876,8 @@
             "required": false,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Pagination cursor from a previous response."
           },
           {
             "in": "query",
@@ -155,12 +887,16 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 200
-            }
+            },
+            "description": "Maximum rows to return."
           }
         ],
         "responses": {
           "200": {
             "description": "Model list"
+          },
+          "501": {
+            "description": "Method unavailable"
           }
         }
       }
@@ -176,7 +912,8 @@
             "required": false,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Pagination cursor from a previous response."
           },
           {
             "in": "query",
@@ -186,12 +923,16 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 200
-            }
+            },
+            "description": "Maximum rows to return."
           }
         ],
         "responses": {
           "200": {
             "description": "MCP server statuses"
+          },
+          "501": {
+            "description": "Method unavailable"
           }
         }
       }
@@ -250,7 +991,8 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Project id"
           }
         ],
         "requestBody": {
@@ -297,7 +1039,8 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Project id"
           }
         ],
         "responses": {
@@ -306,6 +1049,164 @@
           },
           "404": {
             "description": "Project not found"
+          },
+          "409": {
+            "description": "Project must be empty before deletion"
+          }
+        }
+      }
+    },
+    "/api/projects/{projectId}/chats/move-all": {
+      "post": {
+        "summary": "Move all project chats",
+        "operationId": "moveProjectChats",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Project id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "destination"
+                ],
+                "properties": {
+                  "destination": {
+                    "type": "string",
+                    "enum": [
+                      "unassigned",
+                      "archive"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Chats moved"
+          },
+          "404": {
+            "description": "Project not found"
+          },
+          "409": {
+            "description": "Archive precondition failed"
+          }
+        }
+      }
+    },
+    "/api/projects/{projectId}/chats/delete-all": {
+      "post": {
+        "summary": "Delete all project chats",
+        "operationId": "deleteProjectChats",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Project id"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Chats deleted"
+          },
+          "404": {
+            "description": "Project not found"
+          }
+        }
+      }
+    },
+    "/api/sessions": {
+      "get": {
+        "summary": "List sessions",
+        "operationId": "listSessions",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "archived",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "When true, list archived sessions."
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Pagination cursor from a previous response."
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            "description": "Maximum rows to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session list"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a session",
+        "operationId": "createSession",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "cwd": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session created"
           }
         }
       }
@@ -321,12 +1222,16 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Session id"
           }
         ],
         "responses": {
           "200": {
             "description": "Session detail"
+          },
+          "410": {
+            "description": "Session deleted"
           }
         }
       },
@@ -340,7 +1245,8 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Session id"
           }
         ],
         "responses": {
@@ -351,7 +1257,302 @@
             "description": "Session not found"
           },
           "410": {
-            "description": "Session was already deleted"
+            "description": "Session already deleted"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/fork": {
+      "post": {
+        "summary": "Fork a session",
+        "operationId": "forkSession",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Session id"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session forked"
+          },
+          "410": {
+            "description": "Session deleted"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/compact": {
+      "post": {
+        "summary": "Start context compaction",
+        "operationId": "compactSession",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Session id"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Compaction started"
+          },
+          "410": {
+            "description": "Session deleted"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/rollback": {
+      "post": {
+        "summary": "Rollback turns in a session",
+        "operationId": "rollbackSession",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Session id"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "numTurns": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session rolled back"
+          },
+          "400": {
+            "description": "Invalid rollback payload"
+          },
+          "409": {
+            "description": "Rollback not allowed in current state"
+          },
+          "410": {
+            "description": "Session deleted"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/background-terminals/clean": {
+      "post": {
+        "summary": "Clean background terminals",
+        "operationId": "cleanBackgroundTerminals",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Session id"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Background terminals cleaned"
+          },
+          "410": {
+            "description": "Session deleted"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/review": {
+      "post": {
+        "summary": "Start review mode",
+        "operationId": "startReview",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Session id"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "delivery": {
+                    "type": "string",
+                    "enum": [
+                      "inline",
+                      "detached"
+                    ]
+                  },
+                  "targetType": {
+                    "type": "string",
+                    "enum": [
+                      "uncommittedChanges",
+                      "baseBranch",
+                      "commit",
+                      "custom"
+                    ]
+                  },
+                  "branch": {
+                    "type": "string"
+                  },
+                  "sha": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "instructions": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Review started"
+          },
+          "410": {
+            "description": "Session deleted"
+          },
+          "501": {
+            "description": "Method unavailable"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/turns/{turnId}/steer": {
+      "post": {
+        "summary": "Steer an active turn",
+        "operationId": "steerTurn",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Session id"
+          },
+          {
+            "in": "path",
+            "name": "turnId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Turn id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "input"
+                ],
+                "properties": {
+                  "input": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Turn steered"
+          },
+          "400": {
+            "description": "Invalid steer payload"
+          },
+          "410": {
+            "description": "Session deleted"
+          },
+          "501": {
+            "description": "Method unavailable"
           }
         }
       }
@@ -367,7 +1568,8 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Session id"
           }
         ],
         "requestBody": {
@@ -408,15 +1610,30 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Session id"
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Session archived"
           },
           "409": {
-            "description": "Session is not materialized yet (send first message before archiving)"
+            "description": "Session not materialized"
+          },
+          "410": {
+            "description": "Session deleted"
           }
         }
       }
@@ -432,9 +1649,21 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Session id"
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Session unarchived"
@@ -453,12 +1682,41 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Session id"
           }
         ],
         "responses": {
           "200": {
             "description": "Pending approvals"
+          },
+          "410": {
+            "description": "Session deleted"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/tool-input": {
+      "get": {
+        "summary": "List pending tool-input requests for a session",
+        "operationId": "listSessionToolInput",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Session id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pending tool-input requests"
+          },
+          "410": {
+            "description": "Session deleted"
           }
         }
       }
@@ -474,12 +1732,27 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Session id"
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
-            "description": "Resumed session"
+            "description": "Session resumed"
+          },
+          "410": {
+            "description": "Session deleted"
           }
         }
       }
@@ -495,7 +1768,8 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Session id"
           }
         ],
         "requestBody": {
@@ -529,7 +1803,7 @@
             "description": "Session or project not found"
           },
           "410": {
-            "description": "Session was already deleted"
+            "description": "Session deleted"
           }
         }
       }
@@ -545,7 +1819,8 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Session id"
           }
         ],
         "requestBody": {
@@ -572,6 +1847,9 @@
         "responses": {
           "202": {
             "description": "Turn accepted"
+          },
+          "410": {
+            "description": "Session deleted"
           }
         }
       }
@@ -587,15 +1865,100 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Session id"
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "turnId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Turn interrupted"
           },
           "409": {
             "description": "No active turn"
+          },
+          "410": {
+            "description": "Session deleted"
+          }
+        }
+      }
+    },
+    "/api/tool-input/{requestId}/decision": {
+      "post": {
+        "summary": "Submit tool-input decision",
+        "operationId": "decideToolInput",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "requestId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Tool-input request id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "decision"
+                ],
+                "properties": {
+                  "decision": {
+                    "type": "string",
+                    "enum": [
+                      "accept",
+                      "decline",
+                      "cancel"
+                    ]
+                  },
+                  "answers": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "object",
+                      "required": [
+                        "answers"
+                      ],
+                      "properties": {
+                        "answers": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "response": {}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Decision submitted"
+          },
+          "404": {
+            "description": "Request not found"
           }
         }
       }
@@ -611,7 +1974,8 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Approval id"
           }
         ],
         "requestBody": {
