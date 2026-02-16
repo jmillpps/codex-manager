@@ -193,6 +193,17 @@ Backend must:
 
 ---
 
+## Suggested Reply Generation (Harness Strategy)
+
+`codex app-server` does not expose a dedicated "suggest reply" primitive, so the backend composes this behavior from thread/turn methods:
+
+1. For sessions assigned to a project, the backend targets that project's orchestration session first.
+2. If orchestrator execution is unavailable or the source session is unassigned, the backend creates a temporary helper thread (read-only sandbox, `approvalPolicy: "never"`).
+3. Helper sessions are harness-owned internals: tracked in metadata for cleanup, filtered out of user-visible session lists/events, and hard-deleted after suggestion completion (plus startup cleanup on boot).
+4. If no transcript context exists (for example, non-materialized session with no turns), the API returns deterministic fallback semantics (`status: "fallback"` when draft text exists, otherwise `409 status: "no_context"`).
+
+---
+
 ## Deleting a Session (Harness Extension)
 
 `codex app-server` does not expose a native `thread/delete` method, so hard-delete is implemented in the backend API layer.

@@ -16,6 +16,8 @@ The operations manual was split into focused documents to keep setup, validation
   - Logs, failure modes, and concrete recovery playbooks.
 - `docs/operations/maintenance.md`
   - Safe reset flows, git workflow rules, CI expectations, and operational invariants.
+- `docs/implementation-status.md`
+  - Current code-level feature coverage and user-visible API/workflow semantics.
 
 ## Fast-path commands
 

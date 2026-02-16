@@ -12,8 +12,8 @@
 
 Use GitHub Issues:
 
-- Browse: [`Issues`](../../issues)
-- Open new: [`New issue`](../../issues/new)
+- Browse: [`Issues`](https://github.com/jmillpps/codex-manager/issues)
+- Open new: [`New issue`](https://github.com/jmillpps/codex-manager/issues/new)
 
 Include:
 
@@ -34,8 +34,8 @@ Use GitHub Issues and describe:
 
 Use GitHub Discussions if enabled:
 
-- Browse: [`Discussions`](../../discussions)
-- Create: [`New discussion`](../../discussions/new)
+- Browse: [`Discussions`](https://github.com/jmillpps/codex-manager/discussions)
+- Create: [`New discussion`](https://github.com/jmillpps/codex-manager/discussions/new)
 
 If Discussions are not enabled, use GitHub Issues with a clear question title.
 

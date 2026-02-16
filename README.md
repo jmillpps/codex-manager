@@ -16,7 +16,7 @@
 <p align="center"><code>pnpm install && cp apps/api/.env.example apps/api/.env && cp apps/web/.env.example apps/web/.env && pnpm dev</code></p>
 <p align="center">Before sending your first turn, set <code>OPENAI_API_KEY</code> in <code>apps/api/.env</code> or ensure <code>~/.codex/auth.json</code> exists for bootstrap.</p>
 
-<p align="center"><a href="../../issues">Issues</a> · <a href="../../issues/new">Report a Bug</a> · <a href="../../discussions">Discussions</a> · <a href="./CONTRIBUTING.md">Contributing</a></p>
+<p align="center"><a href="https://github.com/jmillpps/codex-manager/issues">Issues</a> · <a href="https://github.com/jmillpps/codex-manager/issues/new">Report a Bug</a> · <a href="https://github.com/jmillpps/codex-manager/discussions">Discussions</a> · <a href="./CONTRIBUTING.md">Contributing</a></p>
 
 <p align="center">
   <img src="./docs/assets/ui-overview.png" alt="Codex Manager UI overview" width="92%" />
@@ -259,9 +259,9 @@ Highlights:
 For help, issue reports, and feature requests:
 
 - Start with [`SUPPORT.md`](SUPPORT.md).
-- Use [`Issues`](../../issues) for bugs and feature requests.
-- Open a new ticket from [`New issue`](../../issues/new).
-- Use [`Discussions`](../../discussions) for implementation questions (if enabled).
+- Use [`Issues`](https://github.com/jmillpps/codex-manager/issues) for bugs and feature requests.
+- Open a new ticket from [`New issue`](https://github.com/jmillpps/codex-manager/issues/new).
+- Use [`Discussions`](https://github.com/jmillpps/codex-manager/discussions) for implementation questions.
 
 If you suspect a security issue, do not post sensitive details publicly. Use a private reporting path if configured, or open a minimal issue requesting one.
 

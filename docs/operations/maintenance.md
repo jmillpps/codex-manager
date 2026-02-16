@@ -63,16 +63,20 @@ Use Conventional Commits:
 
 ## CI expectations
 
-CI enforces the same gates as local development:
+GitHub Actions workflows are not configured in this repository yet.
 
-- install
-- `pnpm gen` (and fail if it produces diffs)
+Until CI is added, treat the local gate set as required before opening or merging PRs:
+
+- `pnpm install`
+- `pnpm gen` (and confirm generated artifacts are committed when changed)
 - `pnpm lint`
 - `pnpm typecheck`
 - `pnpm test`
 - `pnpm build`
+- `pnpm smoke:runtime`
+- `pnpm test:e2e`
 
-A PR is not mergeable unless CI passes.
+When CI is introduced, mirror this exact gate set in workflow configuration.
 
 ---
 

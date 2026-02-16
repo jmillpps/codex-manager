@@ -93,6 +93,31 @@ Checklist:
 - Confirm credentials are visible to the API process (not only your shell profile).
 - Restart the API after changing credentials.
 
+#### Suggested reply returns 409 `no_context`
+
+Symptoms:
+
+- `POST /api/sessions/:sessionId/suggested-reply` returns HTTP `409` with `status: "no_context"`.
+- This usually happens for non-materialized chats with no prior turns and no draft text.
+
+Checklist:
+
+- Send the first user message in that chat so transcript context exists.
+- Or provide draft text in the suggest-reply request payload so fallback suggestion can be returned.
+- Confirm the target session id is not deleted (deleted sessions return HTTP `410`).
+
+#### Project delete returns 409 `project_not_empty`
+
+Symptoms:
+
+- `DELETE /api/projects/:projectId` returns HTTP `409` + `status: "project_not_empty"`.
+
+Checklist:
+
+- Move project chats out first (`POST /api/projects/:projectId/chats/move-all` to `unassigned` or `archive`).
+- Or delete project chats (`POST /api/projects/:projectId/chats/delete-all`).
+- If moving to archive fails with `status: "not_materialized_sessions"`, send a first message in those chats before archiving, or move to `unassigned` instead.
+
 #### MCP server not available inside Codex
 
 Symptoms:

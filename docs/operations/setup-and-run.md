@@ -29,40 +29,18 @@ Codex is managed via:
 - **STDIO** to `codex app-server` (newline-delimited JSON / JSON-RPC-like protocol)
 - optional MCP servers configured via Codex config (`.codex/config.toml` or `~/.codex/config.toml`)
 
-## Current implementation scope
+## Operational behavior contracts
 
-The repository has a runnable baseline with session and streaming flows.
+This runbook is for setup and day-to-day operation. Keep feature-by-feature implementation inventory in `docs/implementation-status.md`.
 
-Implemented now:
+Key runtime semantics operators should know:
 
-- API process startup and Codex JSON-RPC handshake/supervision
-- API session lifecycle endpoints (`/api/sessions*`) including list/create/read/resume/rename/archive/unarchive/delete, plus turn actions (`messages`, `interrupt`)
-- API suggested-reply endpoint (`POST /api/sessions/:sessionId/suggested-reply`) with project-orchestrator routing, helper-thread fallback, non-materialized no-context handling (`status: "fallback"` when draft exists; HTTP `409 no_context` when neither draft nor transcript context exist), and helper-session cleanup so suggestion internals do not appear in session lists
-- API project endpoints (`/api/projects*`) including list/create/rename/delete (with empty-project enforcement), bulk project chat operations (`POST /api/projects/:projectId/chats/move-all`, `POST /api/projects/:projectId/chats/delete-all`), and session assignment (`POST /api/sessions/:sessionId/project`)
-- API capability endpoints (`/api/models`, `/api/mcp/servers`) for model discovery and MCP status visibility
-- API approval endpoints (`/api/sessions/:sessionId/approvals`, `/api/approvals/:approvalId/decision`)
-- API WebSocket event stream endpoint (`/api/stream`), including `session_deleted`, `project_upserted`, `project_deleted`, and `session_project_updated` payloads for cross-client sidebar sync
-- Web UI session list with compact rows, hover ellipsis context menu for rename/archive/restore/delete (with confirmation before permanent delete) and a nested hover `Move` submenu with a nested `Projects` flyout (`New Project` at the top, then project targets in a scrollable list capped to 5 visible rows; chats already inside a project also expose `Your Chats` and `Archive` destinations there), project-row ellipsis context menu with `New Chat` (directly in that project) plus confirmed bulk project operations (`Move chats` to `Your Chats`/`Archive` and `Delete chats`, shown only when chats exist in that project, plus guarded `Delete Project`), archived-session filter, collapsible `Projects` + `Your chats` groups, pagination load-more control, transcript load, message send/cancel/retry, live stream rendering, inline approval actions, model selection, and reconnect backoff behavior
-- Archived sidebar filtering: in `Show archived` mode, only project groups containing archived chats are rendered; the `Projects` section is omitted when no project has archived chats, and `Your chats` is omitted when no unassigned archived chats exist.
-- System/tool/approval events rendered with grouped cards, status chips, details expansion, and transcript filters
-- Chat layout keeps left navigation and right chat surfaces independently scrollable, with the composer pinned at the bottom of the right pane.
-- Suggested-reply UI requests are session-aware and abort stale in-flight calls so delayed responses do not overwrite drafts after switching chats.
-- New sessions are exposed immediately in `/api/sessions` via loaded-thread merge, even before Codex rollout materialization.
-- Session summaries include `materialized` to indicate whether the thread has a persisted rollout (first user turn completed/started).
-- Non-materialized sessions come from `thread/loaded/list` (in-memory runtime state). They are not guaranteed to survive API/Codex process restart until a first message materializes a rollout.
-- Session summaries include `projectId` (`string | null`) so assigned chats render only under their project group; unassigned chats render under `Your chats`.
-- Archiving non-materialized sessions returns HTTP `409` with `status: "not_materialized"`; send the first message before archiving.
-- Deleting a session (`DELETE /api/sessions/:sessionId`) returns `status: "ok"` on success, purges session artifacts from disk, and subsequent session operations for that id return HTTP `410 Gone` with `status: "deleted"`.
-- Deleting a project (`DELETE /api/projects/:projectId`) returns HTTP `409` with `status: "project_not_empty"` when live assigned chats remain; stale assignment metadata that points to missing threads is pruned automatically during delete.
-- Bulk move-to-archive for project chats returns HTTP `409` with `status: "not_materialized_sessions"` when any assigned chat has no rollout yet (send a first message or move to `Your Chats` instead).
-- Per-chat project reassignment (`POST /api/sessions/:sessionId/project`) supports loaded non-materialized chats, so chats can be moved between projects before first message.
-- Session hard-delete is a backend harness extension (the upstream app-server surface provides archive/unarchive but no native `thread/delete` method in the verified CLI schema set).
-- If the active chat is deleted, the right chat pane is blocked by a modal and remains non-interactive until another chat is selected or a new chat is created.
-- Generation scripts for OpenAPI and API client stubs
-
-Still pending relative to PRD:
-
-- No outstanding scoped gaps currently tracked.
+- Session listing merges persisted threads (`thread/list`) with currently loaded non-materialized threads (`thread/loaded/list`) so newly created chats are visible immediately.
+- Non-materialized chats are in-memory runtime state and are not guaranteed to survive API/Codex restart until a first turn materializes rollout state.
+- Session hard delete is a harness extension (`DELETE /api/sessions/:sessionId`) because app-server has no native `thread/delete`.
+- Suggested-reply (`POST /api/sessions/:sessionId/suggested-reply`) routes through project orchestrator chat when available, falls back to helper-thread strategy, and cleans helper sessions so they do not appear in lists or stream traffic.
+- Project deletion enforces emptiness against live sessions only; stale assignment metadata is pruned during delete before emptiness is evaluated.
+- In the web UI, the left sidebar and right chat pane scroll independently and the composer remains pinned in the right pane.
 
 ---
 
@@ -72,19 +50,19 @@ These requirements are mandatory. If you do not meet them, development is unsupp
 
 ### Node and package manager
 
-- Node.js must be installed (repo pins a specific version in `.nvmrc` or `package.json#engines` if present).
-- pnpm is used via Corepack.
+- Node.js `>=24.0.0` is required (`package.json#engines.node`).
+- pnpm `10.29.3` is required (`package.json#packageManager`) and should be managed via Corepack.
 
 Required setup commands:
 
 ```bash
 corepack enable
-corepack prepare pnpm@latest --activate
+corepack prepare pnpm@10.29.3 --activate
 ```
 
 Notes:
 
-- If the repo specifies `packageManager` in root `package.json`, that exact pnpm version must be used.
+- The root `packageManager` field is authoritative for pnpm version.
 - Always install dependencies from repo root.
 
 ### Codex CLI availability

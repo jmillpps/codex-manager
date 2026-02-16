@@ -64,15 +64,27 @@ Use this with:
 - Error handling:
   - Codex RPC errors are mapped to structured HTTP responses (unsupported, invalid params, invalid state, auth required, timeout, fallback).
   - global Zod request-validation errors return HTTP 400 with validation issues.
+- API lifecycle/status contracts:
+  - `GET /api/sessions` merges persisted `thread/list` output with `thread/loaded/list` so newly created, non-materialized chats appear immediately.
+  - Session summaries expose `materialized` (`true` when backed by persisted rollout state; `false` for loaded in-memory threads read via `includeTurns: false` fallback).
+  - Session summaries expose `projectId` (`string | null`) so assigned chats render under project sections and unassigned chats render under `Your chats`.
+  - Non-materialized sessions are movable/assignable but are not guaranteed to survive API/Codex restart before first-turn rollout materialization.
+  - `POST /api/sessions/:sessionId/archive` returns HTTP `409` + `status: "not_materialized"` when no rollout exists yet.
+  - `DELETE /api/sessions/:sessionId` returns `status: "ok"` on successful purge, `status: "not_found"` when the session cannot be resolved, and returns HTTP `410` deleted payloads for already-purged ids.
+  - `DELETE /api/projects/:projectId` returns HTTP `409` + `status: "project_not_empty"` only for live assigned chats after stale assignment metadata is pruned.
+  - `POST /api/projects/:projectId/chats/move-all` with `destination: "archive"` returns HTTP `409` + `status: "not_materialized_sessions"` and explicit `sessionIds` when any assigned chat lacks rollout state.
+  - `POST /api/sessions/:sessionId/project` supports loaded non-materialized sessions, so chats can be moved between projects before first message.
+  - Suggested-reply helper sessions are persisted as harness metadata for cleanup, filtered out of `GET /api/sessions`, filtered from forwarded stream traffic, auto-declined/canceled for helper-thread approvals/tool-input requests, and cleaned on startup plus post-request finally cleanup.
 
 ### Web (`apps/web`)
 
 - ChatGPT-like split-pane layout with independent sidebar/chat scrolling and fixed composer in right pane.
 - Sidebar features:
   - collapsible `Projects` and `Your chats` sections.
-  - archived view filtering with section visibility gating.
+  - archived view filtering with section visibility gating (only projects with archived chats are shown; empty `Projects`/`Your chats` sections are omitted).
+  - session pagination with load-more controls for long chat lists.
   - compact rows with hover ellipsis actions.
-  - project-level and chat-level context menus with nested move menus.
+  - project-level and chat-level context menus with nested move menus/flyouts, including project-scoped bulk operations and project-aware move destinations.
 - Session/project actions:
   - create, rename, archive/unarchive, hard delete with confirmation.
   - project creation inserts an auto-created orchestration chat into the project chat list immediately.
@@ -80,7 +92,9 @@ Use this with:
   - non-materialized session movement supported.
 - Chat runtime features:
   - websocket reconnect/backoff.
+  - message send/cancel/retry flows.
   - streamed transcript rendering with filters (All/Chat/Tools/Approvals).
+  - system/tool/approval activity cards with status chips and expandable details.
   - composer uses a single message input; `Suggest Reply` populates that same draft box and `Ctrl+Enter` sends.
   - suggest-reply requests are race-guarded so late responses do not overwrite the draft after session switches or user edits.
   - pending approval cards and approval decisions.

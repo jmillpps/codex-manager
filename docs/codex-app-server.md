@@ -52,6 +52,10 @@ The previous single-file reference was split into focused documents so protocol 
   - `account_updated`
   - `account_login_completed`
   - `account_rate_limits_updated`
+- Harness-managed suggested-reply helper threads are treated as internal runtime threads:
+  - helper ids are tracked in metadata for cleanup,
+  - helper thread notifications/server-requests are not forwarded as user chat activity,
+  - helper sessions are filtered from session-list responses and cleaned on startup/teardown.
 
 ## Updating protocol docs
 
@@ -60,4 +64,3 @@ When protocol behavior changes in code:
 1. Update the focused document under `docs/protocol/` that owns that concern.
 2. Update this index if files were added/renamed or responsibilities moved.
 3. Keep implementation mapping notes accurate so readers can trace protocol semantics into `apps/api` and `apps/web`.
-
