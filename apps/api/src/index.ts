@@ -42,6 +42,14 @@ type CodexTurn = {
   id: string;
   status: string;
   items: Array<CodexThreadItem>;
+  startedAt?: unknown;
+  started_at?: unknown;
+  startTime?: unknown;
+  start_time?: unknown;
+  completedAt?: unknown;
+  completed_at?: unknown;
+  endTime?: unknown;
+  end_time?: unknown;
 };
 
 type CodexThreadItem = { type: string; id: string; [key: string]: unknown };
@@ -78,7 +86,19 @@ type TranscriptEntry = {
   type: string;
   content: string;
   details?: string;
+  startedAt?: number;
+  completedAt?: number;
   status: "streaming" | "complete" | "canceled" | "error";
+};
+
+type SupplementalTranscriptEntry = {
+  sequence: number;
+  entry: TranscriptEntry;
+};
+
+type TurnTimingRecord = {
+  startedAt: number;
+  completedAt?: number;
 };
 
 type ApprovalMethod =
@@ -151,6 +171,7 @@ type CapabilityMethodProbe = {
 
 type ApprovalDecisionInput = "accept" | "decline" | "cancel";
 type DefaultSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
+type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 type AuthStatus = {
   hasOpenAiApiKey: boolean;
   codexHomeAuthFile: boolean;
@@ -163,6 +184,7 @@ type SessionMetadataStore = {
   sessionProjectById: Record<string, string>;
   projectOrchestratorSessionById: Record<string, string>;
   suggestionHelperSessionIds: Record<string, true>;
+  turnTimingBySessionId: Record<string, Record<string, TurnTimingRecord>>;
 };
 
 type DeletedSessionPayload = {
@@ -197,14 +219,18 @@ const createSessionBodySchema = z
   })
   .optional();
 
+const reasoningEffortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
+
 const sendMessageBodySchema = z.object({
   text: z.string().trim().min(1),
-  model: z.string().min(1).optional()
+  model: z.string().min(1).optional(),
+  effort: reasoningEffortSchema.optional()
 });
 
 const suggestedReplyBodySchema = z
   .object({
     model: z.string().min(1).optional(),
+    effort: reasoningEffortSchema.optional(),
     draft: z.string().trim().min(1).max(4000).optional()
   })
   .optional();
@@ -450,6 +476,8 @@ const suggestionThreadIds = new Set<string>();
 const pendingApprovals = new Map<string, PendingApprovalRecord>();
 const pendingToolUserInputs = new Map<string, PendingToolUserInputRecord>();
 const purgedSessionIds = new Set<string>();
+const supplementalTranscriptByThread = new Map<string, Map<string, SupplementalTranscriptEntry>>();
+let supplementalTranscriptSequence = 1;
 const sockets = new Set<WebSocketLike>();
 const socketThreadFilter = new Map<WebSocketLike, string | null>();
 const codexHomeAuthFilePath = env.CODEX_HOME ? path.join(env.CODEX_HOME, "auth.json") : null;
@@ -460,6 +488,7 @@ const capabilitiesByMethod = new Map<string, CapabilityEntry>();
 let capabilitiesLastUpdatedAt: string | null = null;
 let capabilitiesInitialized = false;
 let capabilitiesRefreshInFlight: Promise<void> | null = null;
+let experimentalRawEventsCapability: "unknown" | "supported" | "unsupported" = "unknown";
 let projectOrchestratorsEnsureInFlight: Promise<void> | null = null;
 let suggestionHelpersCleanupInFlight: Promise<void> | null = null;
 
@@ -510,6 +539,248 @@ function sourceLabel(source: unknown): string {
   return "unknown";
 }
 
+function coerceEpochMs(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    if (value > 10_000_000_000) {
+      return Math.round(value);
+    }
+    return Math.round(value * 1000);
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    const numeric = Number(trimmed);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      if (numeric > 10_000_000_000) {
+        return Math.round(numeric);
+      }
+      return Math.round(numeric * 1000);
+    }
+
+    const parsed = Date.parse(trimmed);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function getSessionTurnTimingMap(sessionId: string): Record<string, TurnTimingRecord> {
+  let map = sessionMetadata.turnTimingBySessionId[sessionId];
+  if (map) {
+    return map;
+  }
+  map = {};
+  sessionMetadata.turnTimingBySessionId[sessionId] = map;
+  return map;
+}
+
+function clearSessionTurnTimings(sessionId: string): boolean {
+  if (!(sessionId in sessionMetadata.turnTimingBySessionId)) {
+    return false;
+  }
+  delete sessionMetadata.turnTimingBySessionId[sessionId];
+  return true;
+}
+
+function setTurnStartedAt(sessionId: string, turnId: string, startedAt: number): boolean {
+  const timings = getSessionTurnTimingMap(sessionId);
+  const existing = timings[turnId];
+  if (!existing) {
+    timings[turnId] = { startedAt };
+    return true;
+  }
+
+  let changed = false;
+  if (existing.startedAt !== startedAt) {
+    existing.startedAt = startedAt;
+    changed = true;
+  }
+
+  if (typeof existing.completedAt === "number" && existing.completedAt < existing.startedAt) {
+    delete existing.completedAt;
+    changed = true;
+  }
+
+  return changed;
+}
+
+function setTurnCompletedAt(sessionId: string, turnId: string, completedAt: number): boolean {
+  const timings = getSessionTurnTimingMap(sessionId);
+  const existing = timings[turnId];
+  if (!existing) {
+    timings[turnId] = {
+      startedAt: completedAt,
+      completedAt
+    };
+    return true;
+  }
+
+  const normalizedCompletedAt = completedAt >= existing.startedAt ? completedAt : existing.startedAt;
+  if (existing.completedAt === normalizedCompletedAt) {
+    return false;
+  }
+
+  existing.completedAt = normalizedCompletedAt;
+  return true;
+}
+
+function lookupTurnTiming(sessionId: string, turnId: string): TurnTimingRecord | null {
+  const sessionTiming = sessionMetadata.turnTimingBySessionId[sessionId];
+  if (!sessionTiming) {
+    return null;
+  }
+  return sessionTiming[turnId] ?? null;
+}
+
+function upsertSupplementalTranscriptEntry(threadId: string, entry: TranscriptEntry): void {
+  let entryMap = supplementalTranscriptByThread.get(threadId);
+  if (!entryMap) {
+    entryMap = new Map<string, SupplementalTranscriptEntry>();
+    supplementalTranscriptByThread.set(threadId, entryMap);
+  }
+
+  const existing = entryMap.get(entry.messageId);
+  if (existing) {
+    entryMap.set(entry.messageId, {
+      ...existing,
+      entry
+    });
+    return;
+  }
+
+  entryMap.set(entry.messageId, {
+    sequence: supplementalTranscriptSequence,
+    entry
+  });
+  supplementalTranscriptSequence += 1;
+
+  // Keep memory bounded for long-running sessions.
+  if (entryMap.size > 5000) {
+    const sortedEntries = Array.from(entryMap.values()).sort((left, right) => left.sequence - right.sequence);
+    const trimmed = sortedEntries.slice(sortedEntries.length - 5000);
+    const nextMap = new Map<string, SupplementalTranscriptEntry>();
+    for (const item of trimmed) {
+      nextMap.set(item.entry.messageId, item);
+    }
+    supplementalTranscriptByThread.set(threadId, nextMap);
+  }
+}
+
+function listSupplementalTranscriptEntries(threadId: string): Array<SupplementalTranscriptEntry> {
+  const entryMap = supplementalTranscriptByThread.get(threadId);
+  if (!entryMap || entryMap.size === 0) {
+    return [];
+  }
+
+  return Array.from(entryMap.values()).sort((left, right) => left.sequence - right.sequence);
+}
+
+function clearSupplementalTranscriptEntries(threadId: string): boolean {
+  return supplementalTranscriptByThread.delete(threadId);
+}
+
+function mergeTranscriptWithSupplemental(
+  threadId: string,
+  transcript: Array<TranscriptEntry>
+): Array<TranscriptEntry> {
+  const supplementalEntries = listSupplementalTranscriptEntries(threadId);
+  if (supplementalEntries.length === 0) {
+    return transcript;
+  }
+
+  const baseTurnOrder: Array<string> = [];
+  const baseEntriesByTurnId = new Map<string, Array<TranscriptEntry>>();
+  for (const entry of transcript) {
+    if (!baseEntriesByTurnId.has(entry.turnId)) {
+      baseEntriesByTurnId.set(entry.turnId, []);
+      baseTurnOrder.push(entry.turnId);
+    }
+    baseEntriesByTurnId.get(entry.turnId)?.push(entry);
+  }
+
+  const supplementalEntriesByTurnId = new Map<string, Array<SupplementalTranscriptEntry>>();
+  for (const supplemental of supplementalEntries) {
+    const turnId = supplemental.entry.turnId;
+    const bucket = supplementalEntriesByTurnId.get(turnId);
+    if (bucket) {
+      bucket.push(supplemental);
+    } else {
+      supplementalEntriesByTurnId.set(turnId, [supplemental]);
+    }
+  }
+
+  const merged: Array<TranscriptEntry> = [];
+  for (const turnId of baseTurnOrder) {
+    const baseTurnEntries = baseEntriesByTurnId.get(turnId) ?? [];
+    const supplementalTurnEntries = supplementalEntriesByTurnId.get(turnId);
+    if (!supplementalTurnEntries) {
+      merged.push(...baseTurnEntries);
+      continue;
+    }
+
+    const supplementalEntriesForTurn = supplementalTurnEntries.map((entry) => entry.entry);
+    const hasTurnAnchors = supplementalEntriesForTurn.some(
+      (entry) => entry.type === "userMessage" || entry.type === "agentMessage" || entry.type === "reasoning"
+    );
+
+    if (hasTurnAnchors) {
+      merged.push(...supplementalEntriesForTurn);
+      supplementalEntriesByTurnId.delete(turnId);
+      continue;
+    }
+
+    let insertionIndex = baseTurnEntries.length;
+    for (let index = baseTurnEntries.length - 1; index >= 0; index -= 1) {
+      if (baseTurnEntries[index].role === "assistant") {
+        insertionIndex = index;
+        break;
+      }
+    }
+
+    const seenMessageIds = new Set<string>();
+    for (const baseEntry of baseTurnEntries.slice(0, insertionIndex)) {
+      merged.push(baseEntry);
+      seenMessageIds.add(baseEntry.messageId);
+    }
+
+    for (const supplementalEntry of supplementalEntriesForTurn) {
+      if (!seenMessageIds.has(supplementalEntry.messageId)) {
+        merged.push(supplementalEntry);
+        seenMessageIds.add(supplementalEntry.messageId);
+      }
+    }
+
+    for (const baseEntry of baseTurnEntries.slice(insertionIndex)) {
+      if (!seenMessageIds.has(baseEntry.messageId)) {
+        merged.push(baseEntry);
+        seenMessageIds.add(baseEntry.messageId);
+      }
+    }
+
+    supplementalEntriesByTurnId.delete(turnId);
+  }
+
+  const remainingTurns = Array.from(supplementalEntriesByTurnId.entries()).sort((left, right) => {
+    const leftSequence = left[1][0]?.sequence ?? Number.MAX_SAFE_INTEGER;
+    const rightSequence = right[1][0]?.sequence ?? Number.MAX_SAFE_INTEGER;
+    return leftSequence - rightSequence;
+  });
+
+  for (const [, entries] of remainingTurns) {
+    for (const supplemental of entries) {
+      merged.push(supplemental.entry);
+    }
+  }
+
+  return merged;
+}
+
 async function loadSessionMetadata(): Promise<SessionMetadataStore> {
   try {
     const raw = await readFile(sessionMetadataPath, "utf8");
@@ -519,6 +790,7 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
     const sessionProjectById: Record<string, string> = {};
     const projectOrchestratorSessionById: Record<string, string> = {};
     const suggestionHelperSessionIds: Record<string, true> = {};
+    const turnTimingBySessionId: Record<string, Record<string, TurnTimingRecord>> = {};
     const now = new Date().toISOString();
 
     if (isObjectRecord(parsed) && isObjectRecord(parsed.titles)) {
@@ -582,12 +854,57 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
       }
     }
 
+    if (isObjectRecord(parsed) && isObjectRecord(parsed.turnTimingBySessionId)) {
+      for (const [sessionId, rawTurnTimingMap] of Object.entries(parsed.turnTimingBySessionId)) {
+        if (!isObjectRecord(rawTurnTimingMap)) {
+          continue;
+        }
+
+        const sessionTiming: Record<string, TurnTimingRecord> = {};
+        for (const [turnId, rawTiming] of Object.entries(rawTurnTimingMap)) {
+          if (!isObjectRecord(rawTiming)) {
+            continue;
+          }
+
+          const startedAt =
+            coerceEpochMs(rawTiming.startedAt) ??
+            coerceEpochMs(rawTiming.started_at) ??
+            coerceEpochMs(rawTiming.startTime) ??
+            coerceEpochMs(rawTiming.start_time);
+          if (startedAt === null) {
+            continue;
+          }
+
+          const completedAt =
+            coerceEpochMs(rawTiming.completedAt) ??
+            coerceEpochMs(rawTiming.completed_at) ??
+            coerceEpochMs(rawTiming.endTime) ??
+            coerceEpochMs(rawTiming.end_time);
+
+          sessionTiming[turnId] =
+            completedAt !== null && completedAt >= startedAt
+              ? {
+                  startedAt,
+                  completedAt
+                }
+              : {
+                  startedAt
+                };
+        }
+
+        if (Object.keys(sessionTiming).length > 0) {
+          turnTimingBySessionId[sessionId] = sessionTiming;
+        }
+      }
+    }
+
     return {
       titles,
       projects,
       sessionProjectById,
       projectOrchestratorSessionById,
-      suggestionHelperSessionIds
+      suggestionHelperSessionIds,
+      turnTimingBySessionId
     };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -599,7 +916,8 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
       projects: {},
       sessionProjectById: {},
       projectOrchestratorSessionById: {},
-      suggestionHelperSessionIds: {}
+      suggestionHelperSessionIds: {},
+      turnTimingBySessionId: {}
     };
   }
 }
@@ -735,11 +1053,10 @@ async function setSessionTitle(threadId: string, title: string): Promise<void> {
 }
 
 async function createProjectOrchestrationSession(projectId: string, projectName: string): Promise<CodexThread> {
-  const startResponse = await supervisor.call<{ thread: CodexThread }>("thread/start", {
+  const startResponse = await callThreadMethodWithRawEventsFallback<{ thread: CodexThread }>("thread/start", {
     cwd: env.WORKSPACE_ROOT,
     sandbox: env.DEFAULT_SANDBOX_MODE,
-    approvalPolicy: env.DEFAULT_APPROVAL_POLICY,
-    experimentalRawEvents: false
+    approvalPolicy: env.DEFAULT_APPROVAL_POLICY
   });
   const orchestrationThread = startResponse.thread;
   sessionMetadata.sessionProjectById[orchestrationThread.id] = projectId;
@@ -972,7 +1289,57 @@ function summarizeSystemItem(item: CodexThreadItem): { summary: string; details?
   };
 }
 
-function itemToTranscriptEntry(turnId: string, item: CodexThreadItem): TranscriptEntry {
+function resolveTurnTiming(sessionId: string, turn: CodexTurn): TurnTimingRecord | null {
+  const stored = lookupTurnTiming(sessionId, turn.id);
+  const startedAt =
+    coerceEpochMs(turn.startedAt) ??
+    coerceEpochMs(turn.started_at) ??
+    coerceEpochMs(turn.startTime) ??
+    coerceEpochMs(turn.start_time) ??
+    stored?.startedAt ??
+    null;
+  const completedAt =
+    coerceEpochMs(turn.completedAt) ??
+    coerceEpochMs(turn.completed_at) ??
+    coerceEpochMs(turn.endTime) ??
+    coerceEpochMs(turn.end_time) ??
+    stored?.completedAt ??
+    null;
+
+  if (startedAt === null && completedAt === null) {
+    return null;
+  }
+
+  if (startedAt === null && completedAt !== null) {
+    return {
+      startedAt: completedAt,
+      completedAt
+    };
+  }
+
+  if (startedAt !== null && completedAt !== null && completedAt >= startedAt) {
+    return {
+      startedAt,
+      completedAt
+    };
+  }
+
+  return startedAt !== null
+    ? {
+        startedAt
+      }
+    : null;
+}
+
+function itemToTranscriptEntry(turnId: string, item: CodexThreadItem, turnTiming?: TurnTimingRecord): TranscriptEntry {
+  const baseTiming =
+    turnTiming && typeof turnTiming.startedAt === "number"
+      ? {
+          startedAt: turnTiming.startedAt,
+          ...(typeof turnTiming.completedAt === "number" ? { completedAt: turnTiming.completedAt } : {})
+        }
+      : {};
+
   if (item.type === "userMessage") {
     const contentItems = Array.isArray(item.content)
       ? (item.content as Array<{ type?: unknown; text?: unknown; url?: unknown; path?: unknown }>)
@@ -983,6 +1350,7 @@ function itemToTranscriptEntry(turnId: string, item: CodexThreadItem): Transcrip
       turnId,
       role: "user",
       type: item.type,
+      ...baseTiming,
       content: contentItems
         .map((value) =>
           userInputToText({
@@ -1005,6 +1373,7 @@ function itemToTranscriptEntry(turnId: string, item: CodexThreadItem): Transcrip
       turnId,
       role: "assistant",
       type: item.type,
+      ...baseTiming,
       content: text,
       status: "complete"
     };
@@ -1016,18 +1385,20 @@ function itemToTranscriptEntry(turnId: string, item: CodexThreadItem): Transcrip
     turnId,
     role: "system",
     type: item.type,
+    ...baseTiming,
     content: systemSummary.summary,
     details: systemSummary.details,
     status: "complete"
   };
 }
 
-function turnsToTranscript(turns: Array<CodexTurn>): Array<TranscriptEntry> {
+function turnsToTranscript(sessionId: string, turns: Array<CodexTurn>): Array<TranscriptEntry> {
   const entries: Array<TranscriptEntry> = [];
 
   for (const turn of turns) {
+    const turnTiming = resolveTurnTiming(sessionId, turn) ?? undefined;
     for (const item of turn.items) {
-      entries.push(itemToTranscriptEntry(turn.id, item));
+      entries.push(itemToTranscriptEntry(turn.id, item, turnTiming));
     }
   }
 
@@ -1257,7 +1628,29 @@ function extractTurnId(params: unknown): string | null {
     return null;
   }
 
-  return typeof params.turnId === "string" ? params.turnId : null;
+  if (typeof params.turnId === "string" && params.turnId.trim().length > 0) {
+    return params.turnId;
+  }
+
+  if (typeof params.turn_id === "string" && params.turn_id.trim().length > 0) {
+    return params.turn_id;
+  }
+
+  if (isObjectRecord(params.turn)) {
+    if (typeof params.turn.id === "string" && params.turn.id.trim().length > 0) {
+      return params.turn.id;
+    }
+
+    if (typeof params.turn.turnId === "string" && params.turn.turnId.trim().length > 0) {
+      return params.turn.turnId;
+    }
+
+    if (typeof params.turn.turn_id === "string" && params.turn.turn_id.trim().length > 0) {
+      return params.turn.turn_id;
+    }
+  }
+
+  return null;
 }
 
 function extractItemId(params: unknown): string | null {
@@ -1271,6 +1664,10 @@ function extractItemId(params: unknown): string | null {
 
   if (typeof params.callId === "string") {
     return params.callId;
+  }
+
+  if (isObjectRecord(params.item) && typeof params.item.id === "string") {
+    return params.item.id;
   }
 
   return null;
@@ -1403,6 +1800,7 @@ function clearPendingApprovalsForThread(threadId: string): void {
       continue;
     }
 
+    upsertSupplementalTranscriptEntry(threadId, approvalResolutionToTranscriptEntry(approval, { status: "expired" }));
     pendingApprovals.delete(approvalId);
     publishToSockets(
       "approval_resolved",
@@ -1525,12 +1923,86 @@ function createPendingToolUserInput(serverRequest: JsonRpcServerRequest): Pendin
   };
 }
 
+function approvalToTranscriptEntry(approval: PendingApprovalRecord): TranscriptEntry {
+  return {
+    messageId: `approval-${approval.approvalId}`,
+    turnId: approval.turnId ?? "approval",
+    role: "system",
+    type: "approval.request",
+    content: approval.summary,
+    details: stringifyDetails({
+      method: approval.method,
+      createdAt: approval.createdAt,
+      ...approval.details
+    }),
+    status: "complete"
+  };
+}
+
+function approvalResolutionToTranscriptEntry(
+  approval: PendingApprovalRecord,
+  payload: { status: string; decision?: string; scope?: string }
+): TranscriptEntry {
+  const decisionText = typeof payload.decision === "string" ? ` (${payload.decision})` : "";
+  const statusText = typeof payload.status === "string" ? payload.status : "resolved";
+  return {
+    messageId: `approval-${approval.approvalId}`,
+    turnId: approval.turnId ?? "approval",
+    role: "system",
+    type: "approval.resolved",
+    content: `Approval ${statusText}${decisionText}`,
+    details: stringifyDetails({
+      approvalId: approval.approvalId,
+      ...payload
+    }),
+    status: "complete"
+  };
+}
+
+function toolInputToTranscriptEntry(request: PendingToolUserInputRecord): TranscriptEntry {
+  return {
+    messageId: `tool-input-${request.requestId}`,
+    turnId: request.turnId ?? "tool-input",
+    role: "system",
+    type: "tool_input.request",
+    content: request.summary,
+    details: stringifyDetails({
+      method: request.method,
+      createdAt: request.createdAt,
+      questions: request.questions,
+      ...request.details
+    }),
+    status: "complete"
+  };
+}
+
+function toolInputResolutionToTranscriptEntry(
+  request: PendingToolUserInputRecord,
+  payload: { status: string; decision?: string }
+): TranscriptEntry {
+  const decisionText = typeof payload.decision === "string" ? ` (${payload.decision})` : "";
+  const statusText = typeof payload.status === "string" ? payload.status : "resolved";
+  return {
+    messageId: `tool-input-${request.requestId}`,
+    turnId: request.turnId ?? "tool-input",
+    role: "system",
+    type: "tool_input.resolved",
+    content: `Tool input ${statusText}${decisionText}`,
+    details: stringifyDetails({
+      requestId: request.requestId,
+      ...payload
+    }),
+    status: "complete"
+  };
+}
+
 function clearPendingToolInputsForThread(threadId: string): void {
   for (const [requestId, pending] of pendingToolUserInputs.entries()) {
     if (pending.threadId !== threadId) {
       continue;
     }
 
+    upsertSupplementalTranscriptEntry(threadId, toolInputResolutionToTranscriptEntry(pending, { status: "expired" }));
     pendingToolUserInputs.delete(requestId);
     publishToSockets(
       "tool_user_input_resolved",
@@ -1549,6 +2021,7 @@ function clearPendingToolInputsForTurn(threadId: string, turnId: string): void {
       continue;
     }
 
+    upsertSupplementalTranscriptEntry(threadId, toolInputResolutionToTranscriptEntry(pending, { status: "expired" }));
     pendingToolUserInputs.delete(requestId);
     publishToSockets(
       "tool_user_input_resolved",
@@ -1617,6 +2090,41 @@ function isInvalidRequestStateError(error: unknown): boolean {
     lower.includes("turn is in progress") ||
     lower.includes("already in progress")
   );
+}
+
+function isExperimentalRawEventsUnsupportedError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const lower = error.message.toLowerCase();
+  return lower.includes("experimentalrawevents") && lower.includes("experimentalapi");
+}
+
+async function callThreadMethodWithRawEventsFallback<T>(
+  method: "thread/start" | "thread/resume" | "thread/fork",
+  params: Record<string, unknown>
+): Promise<T> {
+  const shouldTryRawEvents = experimentalRawEventsCapability !== "unsupported";
+  if (!shouldTryRawEvents) {
+    return supervisor.call<T>(method, params);
+  }
+
+  try {
+    const response = await supervisor.call<T>(method, {
+      ...params,
+      experimentalRawEvents: true
+    });
+    experimentalRawEventsCapability = "supported";
+    return response;
+  } catch (error) {
+    if (!isExperimentalRawEventsUnsupportedError(error)) {
+      throw error;
+    }
+
+    experimentalRawEventsCapability = "unsupported";
+    return supervisor.call<T>(method, params);
+  }
 }
 
 function isAuthRequiredError(error: unknown): boolean {
@@ -1952,7 +2460,10 @@ async function classifyProjectSessionAssignments(sessionIds: Array<string>): Pro
 
 async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOutcome> {
   if (isSessionPurged(sessionId)) {
-    if (setSuggestionHelperSession(sessionId, false)) {
+    const helperMetadataChanged = setSuggestionHelperSession(sessionId, false);
+    const turnTimingMetadataChanged = clearSessionTurnTimings(sessionId);
+    clearSupplementalTranscriptEntries(sessionId);
+    if (helperMetadataChanged || turnTimingMetadataChanged) {
       await persistSessionMetadata();
     }
     return {
@@ -2008,7 +2519,9 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
     const projectMetadataChanged = setSessionProjectAssignment(sessionId, null);
     const orchestratorMetadataChanged = clearProjectOrchestratorSessionForSession(sessionId);
     const helperMetadataChanged = setSuggestionHelperSession(sessionId, false);
-    if (titleMetadataChanged || projectMetadataChanged || orchestratorMetadataChanged || helperMetadataChanged) {
+    const turnTimingMetadataChanged = clearSessionTurnTimings(sessionId);
+    clearSupplementalTranscriptEntries(sessionId);
+    if (titleMetadataChanged || projectMetadataChanged || orchestratorMetadataChanged || helperMetadataChanged || turnTimingMetadataChanged) {
       await persistSessionMetadata();
     }
     return {
@@ -2027,6 +2540,7 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
   if (helperThreadId) {
     suggestionThreadIds.delete(helperThreadId);
   }
+  clearSupplementalTranscriptEntries(sessionId);
   clearPendingApprovalsForThread(sessionId);
   clearPendingToolInputsForThread(sessionId);
   purgedSessionIds.add(sessionId);
@@ -2035,7 +2549,8 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
   const projectMetadataChanged = setSessionProjectAssignment(sessionId, null);
   const orchestratorMetadataChanged = clearProjectOrchestratorSessionForSession(sessionId);
   const helperMetadataChanged = setSuggestionHelperSession(sessionId, false);
-  if (titleMetadataChanged || projectMetadataChanged || orchestratorMetadataChanged || helperMetadataChanged) {
+  const turnTimingMetadataChanged = clearSessionTurnTimings(sessionId);
+  if (titleMetadataChanged || projectMetadataChanged || orchestratorMetadataChanged || helperMetadataChanged || turnTimingMetadataChanged) {
     await persistSessionMetadata();
   }
 
@@ -2267,6 +2782,7 @@ function clearPendingApprovalsForTurn(threadId: string, turnId: string): void {
       continue;
     }
 
+    upsertSupplementalTranscriptEntry(threadId, approvalResolutionToTranscriptEntry(approval, { status: "expired" }));
     pendingApprovals.delete(approvalId);
     publishToSockets(
       "approval_resolved",
@@ -2304,15 +2820,51 @@ supervisor.on("notification", (notification: JsonRpcNotification) => {
     const params = notification.params as { threadId?: unknown; turn?: { id?: unknown } } | undefined;
     if (typeof params?.threadId === "string" && typeof params.turn?.id === "string") {
       activeTurnByThread.set(params.threadId, params.turn.id);
+      const turnRecord = params.turn as Record<string, unknown>;
+      const startedAt =
+        coerceEpochMs(turnRecord.startedAt) ??
+        coerceEpochMs(turnRecord.started_at) ??
+        coerceEpochMs(turnRecord.startTime) ??
+        coerceEpochMs(turnRecord.start_time) ??
+        Date.now();
+      if (setTurnStartedAt(params.threadId, params.turn.id, startedAt)) {
+        void persistSessionMetadata().catch((error) => {
+          app.log.warn({ error, threadId: params.threadId, turnId: params.turn?.id }, "failed to persist turn started timing");
+        });
+      }
     }
   }
 
-  if (notification.method === "turn/completed") {
+  if (notification.method === "turn/completed" || notification.method === "turn/failed") {
     const params = notification.params as { threadId?: unknown; turn?: { id?: unknown } } | undefined;
     if (typeof params?.threadId === "string") {
       activeTurnByThread.delete(params.threadId);
 
       if (typeof params.turn?.id === "string") {
+        const turnRecord = params.turn as Record<string, unknown>;
+        const startedAt =
+          coerceEpochMs(turnRecord.startedAt) ??
+          coerceEpochMs(turnRecord.started_at) ??
+          coerceEpochMs(turnRecord.startTime) ??
+          coerceEpochMs(turnRecord.start_time);
+        const completedAt =
+          coerceEpochMs(turnRecord.completedAt) ??
+          coerceEpochMs(turnRecord.completed_at) ??
+          coerceEpochMs(turnRecord.endTime) ??
+          coerceEpochMs(turnRecord.end_time) ??
+          Date.now();
+
+        let timingChanged = false;
+        if (startedAt !== null) {
+          timingChanged = setTurnStartedAt(params.threadId, params.turn.id, startedAt) || timingChanged;
+        }
+        timingChanged = setTurnCompletedAt(params.threadId, params.turn.id, completedAt) || timingChanged;
+        if (timingChanged) {
+          void persistSessionMetadata().catch((error) => {
+            app.log.warn({ error, threadId: params.threadId, turnId: params.turn?.id }, "failed to persist turn completed timing");
+          });
+        }
+
         clearPendingApprovalsForTurn(params.threadId, params.turn.id);
         clearPendingToolInputsForTurn(params.threadId, params.turn.id);
       }
@@ -2325,6 +2877,20 @@ supervisor.on("notification", (notification: JsonRpcNotification) => {
 
   if (notification.method === "turn/diff/updated") {
     publishToSockets("turn_diff_updated", notification.params ?? {}, threadId);
+  }
+
+  if (
+    (notification.method === "item/started" || notification.method === "item/completed") &&
+    threadId &&
+    isObjectRecord(notification.params) &&
+    isObjectRecord(notification.params.item) &&
+    typeof notification.params.item.id === "string"
+  ) {
+    const item = notification.params.item as CodexThreadItem;
+    const turnId = extractTurnId(notification.params) ?? activeTurnByThread.get(threadId) ?? "turn";
+    const transcriptEntry = itemToTranscriptEntry(turnId, item);
+    transcriptEntry.status = notification.method === "item/started" ? "streaming" : "complete";
+    upsertSupplementalTranscriptEntry(threadId, transcriptEntry);
   }
 
   if (notification.method === "thread/tokenUsage/updated") {
@@ -2407,6 +2973,7 @@ supervisor.on("serverRequest", (serverRequest: JsonRpcServerRequest) => {
 
   if (approval) {
     pendingApprovals.set(approval.approvalId, approval);
+    upsertSupplementalTranscriptEntry(approval.threadId, approvalToTranscriptEntry(approval));
     publishToSockets("approval", toPublicApproval(approval), approval.threadId);
     return;
   }
@@ -2414,6 +2981,7 @@ supervisor.on("serverRequest", (serverRequest: JsonRpcServerRequest) => {
   const toolUserInput = createPendingToolUserInput(serverRequest);
   if (toolUserInput) {
     pendingToolUserInputs.set(toolUserInput.requestId, toolUserInput);
+    upsertSupplementalTranscriptEntry(toolUserInput.threadId, toolInputToTranscriptEntry(toolUserInput));
     publishToSockets("tool_user_input_requested", toPublicToolUserInput(toolUserInput), toolUserInput.threadId);
     return;
   }
@@ -3338,14 +3906,13 @@ app.get("/api/sessions", async (request) => {
 app.post("/api/sessions", async (request) => {
   const body = createSessionBodySchema.parse(request.body);
 
-  const response = await supervisor.call<{
+  const response = await callThreadMethodWithRawEventsFallback<{
     thread: CodexThread;
   }>("thread/start", {
     cwd: body?.cwd ?? env.WORKSPACE_ROOT,
     model: body?.model,
     sandbox: env.DEFAULT_SANDBOX_MODE,
-    approvalPolicy: env.DEFAULT_APPROVAL_POLICY,
-    experimentalRawEvents: false
+    approvalPolicy: env.DEFAULT_APPROVAL_POLICY
   });
 
   await setSessionTitle(response.thread.id, defaultSessionTitle());
@@ -3372,7 +3939,7 @@ app.get("/api/sessions/:sessionId", async (request, reply) => {
       threadId: params.sessionId,
       includeTurns: true
     });
-    transcript = turnsToTranscript(Array.isArray(response.thread.turns) ? response.thread.turns : []);
+    transcript = turnsToTranscript(params.sessionId, Array.isArray(response.thread.turns) ? response.thread.turns : []);
   } catch (error) {
     if (!isIncludeTurnsUnavailableError(error)) {
       throw error;
@@ -3385,6 +3952,8 @@ app.get("/api/sessions/:sessionId", async (request, reply) => {
     transcript = [];
     materialized = false;
   }
+
+  transcript = mergeTranscriptWithSupplemental(params.sessionId, transcript);
 
   return {
     session: toSessionSummary(response.thread, materialized),
@@ -3401,7 +3970,7 @@ app.post("/api/sessions/:sessionId/fork", async (request, reply) => {
   }
 
   try {
-    const response = await supervisor.call<{ thread: CodexThread }>("thread/fork", {
+    const response = await callThreadMethodWithRawEventsFallback<{ thread: CodexThread }>("thread/fork", {
       threadId: params.sessionId,
       sandbox: env.DEFAULT_SANDBOX_MODE,
       approvalPolicy: env.DEFAULT_APPROVAL_POLICY
@@ -3752,7 +4321,7 @@ app.post("/api/sessions/:sessionId/resume", async (request, reply) => {
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
 
-  const response = await supervisor.call<{ thread: CodexThread }>("thread/resume", {
+  const response = await callThreadMethodWithRawEventsFallback<{ thread: CodexThread }>("thread/resume", {
     threadId: params.sessionId,
     sandbox: env.DEFAULT_SANDBOX_MODE,
     approvalPolicy: env.DEFAULT_APPROVAL_POLICY
@@ -3780,7 +4349,7 @@ app.post("/api/sessions/:sessionId/suggested-reply", async (request, reply) => {
       includeTurns: true
     });
     sourceThread = source.thread;
-    transcript = turnsToTranscript(Array.isArray(source.thread.turns) ? source.thread.turns : []);
+    transcript = turnsToTranscript(params.sessionId, Array.isArray(source.thread.turns) ? source.thread.turns : []);
   } catch (error) {
     if (!isIncludeTurnsUnavailableError(error)) {
       return sendMappedCodexError(reply, error, "failed to load suggestion context", {
@@ -3827,6 +4396,7 @@ app.post("/api/sessions/:sessionId/suggested-reply", async (request, reply) => {
     const turn = await supervisor.call<{ turn: { id: string } }>("turn/start", {
       threadId,
       model: body?.model,
+      effort: body?.effort as ReasoningEffort | undefined,
       sandboxPolicy: toTurnSandboxPolicy("read-only"),
       approvalPolicy: "never",
       input: [
@@ -3923,6 +4493,7 @@ app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
     supervisor.call<{ turn: { id: string } }>("turn/start", {
       threadId: params.sessionId,
       model: body.model,
+      effort: body.effort as ReasoningEffort | undefined,
       sandboxPolicy: toTurnSandboxPolicy(env.DEFAULT_SANDBOX_MODE),
       approvalPolicy: env.DEFAULT_APPROVAL_POLICY,
       input: [
@@ -3940,7 +4511,7 @@ app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
   } catch (error) {
     if (isNoRolloutFoundError(error)) {
       try {
-        await supervisor.call("thread/resume", {
+        await callThreadMethodWithRawEventsFallback("thread/resume", {
           threadId: params.sessionId,
           sandbox: env.DEFAULT_SANDBOX_MODE,
           approvalPolicy: env.DEFAULT_APPROVAL_POLICY
@@ -3961,6 +4532,12 @@ app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
   }
 
   activeTurnByThread.set(params.sessionId, turn.turn.id);
+  const startedAt = Date.now();
+  if (setTurnStartedAt(params.sessionId, turn.turn.id, startedAt)) {
+    void persistSessionMetadata().catch((error) => {
+      app.log.warn({ error, threadId: params.sessionId, turnId: turn.turn.id }, "failed to persist turn start timing after message send");
+    });
+  }
 
   reply.code(202);
   return {
@@ -4014,6 +4591,13 @@ app.post("/api/tool-input/:requestId/decision", async (request, reply) => {
 
   try {
     await supervisor.respond(pending.rpcId, toolUserInputResponsePayload(body));
+    upsertSupplementalTranscriptEntry(
+      pending.threadId,
+      toolInputResolutionToTranscriptEntry(pending, {
+        status: "resolved",
+        decision: body.decision
+      })
+    );
     pendingToolUserInputs.delete(params.requestId);
     publishToSockets(
       "tool_user_input_resolved",
@@ -4057,6 +4641,14 @@ app.post("/api/approvals/:approvalId/decision", async (request, reply) => {
     const payload = approvalDecisionPayload(approval, body.decision, body.scope ?? "turn");
     await supervisor.respond(approval.rpcId, payload);
 
+    upsertSupplementalTranscriptEntry(
+      approval.threadId,
+      approvalResolutionToTranscriptEntry(approval, {
+        status: "resolved",
+        decision: body.decision,
+        scope: body.scope ?? "turn"
+      })
+    );
     pendingApprovals.delete(params.approvalId);
     publishToSockets(
       "approval_resolved",

@@ -120,11 +120,13 @@ Codex Manager focuses on that layer while keeping Codex as the execution authori
   - loaded non-materialized chats are visible and movable
   - archive constraints enforced when rollout is not yet materialized
 - Live streaming transcript with category filters (`All`, `Chat`, `Tools`, `Approvals`)
-- Approval and tool input cards with decision actions and status updates
+- Turn-group transcript UX: one user request card plus one consolidated response bubble per turn, with a top thought area (`Working...` / `Worked for …`) and bottom final assistant response text
+- Approval and tool input actions surfaced inline in response thought details
+- Session transcript reload path merges streamed runtime tool/approval events so thought auditing remains visible even when `thread/read` omits raw tool items
 - Thread control surface:
   - `fork`, `steer`, `interrupt`, `compact`, `rollback`, `review/start`, `backgroundTerminals/clean`
 - Capability/integration settings:
-  - model selection, account state, MCP status/oauth, skills, config, collaboration modes, experimental features
+  - combined `Model -> Reasoning` selection (model-aware effort options), account state, MCP status/oauth, skills, config, collaboration modes, experimental features
 - Cross-client sidebar synchronization via websocket events
 - Right-pane blocking modal when an active session is deleted
 

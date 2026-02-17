@@ -37,6 +37,12 @@ const paginationParams = [
   queryParam("limit", { type: "integer", minimum: 1, maximum: 200 }, "Maximum rows to return.")
 ];
 
+const reasoningEffortValues = ["none", "minimal", "low", "medium", "high", "xhigh"];
+const reasoningEffortSchema = {
+  type: "string",
+  enum: reasoningEffortValues
+};
+
 const openApiDocument = {
   openapi: "3.1.0",
   info: {
@@ -791,6 +797,7 @@ const openApiDocument = {
             type: "object",
             properties: {
               model: { type: "string" },
+              effort: reasoningEffortSchema,
               draft: { type: "string", minLength: 1, maxLength: 4000 }
             }
           },
@@ -836,7 +843,8 @@ const openApiDocument = {
           required: ["text"],
           properties: {
             text: { type: "string" },
-            model: { type: "string" }
+            model: { type: "string" },
+            effort: reasoningEffortSchema
           }
         }),
         responses: responses([

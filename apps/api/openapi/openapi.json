@@ -1782,6 +1782,17 @@
                   "model": {
                     "type": "string"
                   },
+                  "effort": {
+                    "type": "string",
+                    "enum": [
+                      "none",
+                      "minimal",
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh"
+                    ]
+                  },
                   "draft": {
                     "type": "string",
                     "minLength": 1,
@@ -1886,6 +1897,17 @@
                   },
                   "model": {
                     "type": "string"
+                  },
+                  "effort": {
+                    "type": "string",
+                    "enum": [
+                      "none",
+                      "minimal",
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh"
+                    ]
                   }
                 }
               }

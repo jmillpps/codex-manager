@@ -13,7 +13,7 @@ Use this with:
 
 ## Last verified
 
-- Date: February 16, 2026
+- Date: February 17, 2026
 - Validation run:
   - `pnpm gen`
   - `pnpm test`
@@ -37,7 +37,10 @@ Use this with:
 - Messaging and turn control:
   - send message (`turn/start`) and interrupt.
   - new user-created chats are initialized with a short sticky default title (`New chat`) and remain renameable via existing rename flow.
+  - send message supports optional reasoning effort override (`effort`) and applies it to `turn/start`.
+  - thread lifecycle calls (`thread/start`, `thread/fork`, `thread/resume`) optimistically request `experimentalRawEvents` and automatically retry without it when unsupported (`requires experimentalApi capability`) so runtime compatibility is preserved across app-server versions.
   - suggested reply endpoint (`POST /api/sessions/:sessionId/suggested-reply`) that uses the project orchestration chat when the source chat belongs to a project (falls back to helper thread for unassigned chats), sanitizes orchestration scaffolding from model output, supports non-materialized chats by returning draft-based fallback text (or `409 no_context` when no draft/context exists), and hard-cleans helper sessions so they do not leak into user-visible chat lists.
+  - suggested reply also supports optional reasoning effort override (`effort`) for suggestion-generation turns.
   - thread actions: fork, compact, rollback, background terminals clean, review start.
   - turn steering endpoint for active turns.
 - Approvals + tool user-input:
@@ -74,6 +77,8 @@ Use this with:
   - `DELETE /api/projects/:projectId` returns HTTP `409` + `status: "project_not_empty"` only for live assigned chats after stale assignment metadata is pruned.
   - `POST /api/projects/:projectId/chats/move-all` with `destination: "archive"` returns HTTP `409` + `status: "not_materialized_sessions"` and explicit `sessionIds` when any assigned chat lacks rollout state.
   - `POST /api/sessions/:sessionId/project` supports loaded non-materialized sessions, so chats can be moved between projects before first message.
+  - Session transcript entries now include optional `startedAt`/`completedAt` turn-timing values (epoch ms) when available from live turn lifecycle capture or persisted session metadata.
+  - `GET /api/sessions/:sessionId` transcript now merges a supplemental runtime event ledger built from websocket `item/*` notifications and approval/tool-input server requests, preserving command/file/tool/approval audit rows when `thread/read(includeTurns)` omits them in non-experimental runtimes.
   - Suggested-reply helper sessions are persisted as harness metadata for cleanup, filtered out of `GET /api/sessions`, filtered from forwarded stream traffic, auto-declined/canceled for helper-thread approvals/tool-input requests, and cleaned on startup plus post-request finally cleanup.
 
 ### Web (`apps/web`)
@@ -89,19 +94,26 @@ Use this with:
   - create, rename, archive/unarchive, hard delete with confirmation.
   - project creation inserts an auto-created orchestration chat into the project chat list immediately.
   - project creation/rename/delete, bulk move/delete chats, session assignment and move flows.
+  - selected chat is persisted by `sessionId` in tab-scoped browser storage across page reloads/HMR so duplicate chat titles do not cause selection drift.
   - non-materialized session movement supported.
 - Chat runtime features:
   - websocket reconnect/backoff.
   - message send/cancel/retry flows.
-  - streamed transcript rendering with filters (All/Chat/Tools/Approvals).
-  - system/tool/approval activity cards with status chips and expandable details.
+  - streamed transcript rendering with filters (All/Chat/Tools/Approvals); filters control which turns are visible, while each visible turn card keeps full in-order thought activity (reasoning/tools/approvals) for auditability.
+  - transcript turn grouping renders one user request card plus one consolidated response card per turn.
+  - response card layout is a single bubble: top thought area (shown only when the turn has reasoning/tool/approval activity) plus bottom final assistant response text area.
+  - thought status uses turn-level timing (`Working...` while active; `Worked for <duration>` when complete, measured from user request start to final assistant completion when timestamps are available, with `<1s` fallback for legacy turns missing timing metadata).
+  - thought disclosure keeps per-turn open/closed state stable across stream/approval updates; when a new pending approval/tool-input arrives while the panel is closed it auto-opens in pending-only preview, and users can explicitly expand to full prior activity.
+  - expanded thought details render reasoning summary/content line rows and inline tool/approval/tool-input context with actions.
+  - command and file-change approvals render as compact action-first rows (`Approval required to run …`, `Approval required to create/modify/delete/move file …`) with inline decision actions; approval cards are shown only while pending and are hidden after resolution, pending file-change approvals include an inline dark-theme diff/content preview above decision buttons and suppress duplicate pending file-change item rows until approved, accepted approval-update noise is suppressed, command-execution rows render inline terminal-style dark blocks (no nested wrapper bubble) with prompt lines whose `~` prefix is mapped to inferred user home from runtime cwd paths, and file-change rows render structured dark-theme diffs with add/remove/hunk/context coloring where displayed file paths and absolute home-path text in diff lines are normalized to `~`.
   - composer uses a single message input; `Suggest Reply` populates that same draft box and `Ctrl+Enter` sends.
+  - header uses a combined nested selector (`Model -> Reasoning`): model rows open right-side reasoning submenus, users pick model+effort in one action, `Thread default` is removed from UI choices, and per-session effort/model selections are forwarded on send/suggest requests.
   - suggest-reply requests are race-guarded so late responses do not overwrite the draft after session switches or user edits.
   - pending approval cards and approval decisions.
   - tool-input request cards with answer submission.
   - active-turn controls (interrupt + steer).
   - thread actions menu (fork/compact/rollback/review/background-terminals clean).
-  - insight drawer (plan/diff/usage/tools).
+  - insight drawer (plan/diff/usage/tools), manually toggled by the user; incoming plan/diff events update stored insight data without auto-opening the drawer.
   - settings modal for capability/account/mcp/config/skills/apps visibility and actions.
 - Deleted active-session UX:
   - right pane blocks interaction and requires selecting/creating another chat.
@@ -113,7 +125,8 @@ Use this with:
   - project bulk operations,
   - project creation with optional `orchestrationSession` response payload,
   - thread-control endpoints,
-  - suggested-reply endpoint (`suggestSessionReply`),
+  - suggested-reply endpoint (`suggestSessionReply`) with optional `effort`,
+  - message send endpoint (`sendSessionMessage`) with optional `effort`,
   - capability/settings/account/integration endpoints,
   - tool-input decision endpoint,
   - existing session/message/approval operations.
