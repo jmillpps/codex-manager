@@ -180,7 +180,7 @@ Backend must:
 
 ## Sending a Message
 
-1. UI sends message via WebSocket
+1. UI sends message via `POST /api/sessions/:sessionId/messages`
 2. Backend calls `turn/start`
 3. Codex emits:
    - `turn/started`
@@ -188,7 +188,7 @@ Backend must:
    - `item/*/delta`
    - `item/completed`
    - `turn/completed`
-4. Backend forwards events
+4. Backend forwards streamed events over WebSocket
 5. UI renders progressively
 
 ---

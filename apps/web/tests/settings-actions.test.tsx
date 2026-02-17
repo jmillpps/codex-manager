@@ -213,7 +213,9 @@ describe("settings endpoint wiring", () => {
               turnId: "turn-1",
               itemId: "item-1",
               summary: "Approval needed for command execution",
-              details: {},
+              details: {
+                command: "echo test"
+              },
               createdAt: new Date().toISOString(),
               status: "pending"
             }
@@ -222,7 +224,7 @@ describe("settings endpoint wiring", () => {
       );
     });
 
-    await screen.findByText("Approval needed for command execution");
+    await screen.findByText("Approval required to run: echo test");
 
     await act(async () => {
       ws?.dispatchEvent(
@@ -240,6 +242,9 @@ describe("settings endpoint wiring", () => {
       );
     });
 
-    await screen.findByText(/Approved for this turn\./);
+    await waitFor(() => {
+      expect(screen.queryByText("Approval required to run: echo test")).not.toBeInTheDocument();
+    });
+    await screen.findByText("Idle");
   });
 });

@@ -47,6 +47,32 @@ async function waitForHealth(timeoutMs = 120_000) {
   throw new Error(`timed out waiting for API health on ${apiBase}`);
 }
 
+async function waitForSessionContext(sessionId, timeoutMs = 60_000) {
+  const started = Date.now();
+  const encodedSessionId = encodeURIComponent(sessionId);
+
+  while (Date.now() - started < timeoutMs) {
+    const detail = await request(`/sessions/${encodedSessionId}`);
+    if (detail.status === 200) {
+      const transcript = Array.isArray(detail.body?.transcript) ? detail.body.transcript : [];
+      const hasChatContext = transcript.some(
+        (entry) =>
+          (entry?.role === "user" || entry?.role === "assistant") &&
+          typeof entry?.content === "string" &&
+          entry.content.trim().length > 0
+      );
+
+      if (hasChatContext) {
+        return true;
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  return false;
+}
+
 function runNodeScript(scriptPath, env = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn("node", [scriptPath], {
@@ -142,27 +168,64 @@ async function main() {
     const activeCountAfterCreate = Array.isArray(sessionsAfterCreate.body?.data) ? sessionsAfterCreate.body.data.length : -1;
     assert.ok(activeCountAfterCreate >= 1, "expected at least one active session after create");
 
-    const suggestedReplyWithDraft = await request(`/sessions/${encodeURIComponent(sessionId)}/suggested-reply`, {
+    const sendSeedMessage = await request(`/sessions/${encodeURIComponent(sessionId)}/messages`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ draft: "Please improve this sentence." })
+      body: JSON.stringify({
+        text: "Seed context for suggested reply effort contract coverage.",
+        effort: "minimal"
+      })
     });
-    assert.equal(suggestedReplyWithDraft.status, 200);
-    assert.equal(typeof suggestedReplyWithDraft.body?.suggestion, "string");
-    assert.ok(suggestedReplyWithDraft.body.suggestion.length > 0);
+    assert.equal(sendSeedMessage.status, 202);
 
-    const suggestedReplyNoContext = await request(`/sessions/${encodeURIComponent(sessionId)}/suggested-reply`, {
+    const hasSuggestionContext = await waitForSessionContext(sessionId);
+
+    const suggestedReply = await request(`/sessions/${encodeURIComponent(sessionId)}/suggested-reply`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(hasSuggestionContext ? { effort: "minimal" } : { draft: "Please improve this sentence.", effort: "minimal" })
+    });
+    assert.equal(suggestedReply.status, 200);
+    assert.equal(typeof suggestedReply.body?.suggestion, "string");
+    assert.ok(suggestedReply.body.suggestion.length > 0);
+
+    if (hasSuggestionContext) {
+      assert.ok(
+        suggestedReply.body?.status === "ok" || suggestedReply.body?.status === "fallback",
+        `unexpected suggested-reply status with context: ${suggestedReply.body?.status}`
+      );
+    } else {
+      assert.equal(suggestedReply.body?.status, "fallback");
+    }
+
+    const suggestedReplyInvalidEffort = await request(`/sessions/${encodeURIComponent(sessionId)}/suggested-reply`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ draft: "Please improve this sentence.", effort: "invalid" })
+    });
+    assert.equal(suggestedReplyInvalidEffort.status, 400);
+
+    const sessionsAfterSuggest = await request("/sessions?archived=false&limit=200");
+    assert.equal(sessionsAfterSuggest.status, 200);
+    const activeCountAfterSuggest = Array.isArray(sessionsAfterSuggest.body?.data) ? sessionsAfterSuggest.body.data.length : -1;
+    assert.equal(activeCountAfterSuggest, activeCountAfterCreate, "suggested-reply should not leak helper sessions into session list");
+
+    const noContextSessionCreate = await request("/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    });
+    assert.equal(noContextSessionCreate.status, 200);
+    const noContextSessionId = noContextSessionCreate.body?.session?.sessionId;
+    assert.equal(typeof noContextSessionId, "string");
+
+    const suggestedReplyNoContext = await request(`/sessions/${encodeURIComponent(noContextSessionId)}/suggested-reply`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({})
     });
     assert.equal(suggestedReplyNoContext.status, 409);
     assert.equal(suggestedReplyNoContext.body?.status, "no_context");
-
-    const sessionsAfterSuggest = await request("/sessions?archived=false&limit=200");
-    assert.equal(sessionsAfterSuggest.status, 200);
-    const activeCountAfterSuggest = Array.isArray(sessionsAfterSuggest.body?.data) ? sessionsAfterSuggest.body.data.length : -1;
-    assert.equal(activeCountAfterSuggest, activeCountAfterCreate, "suggested-reply should not leak helper sessions into session list");
 
     const invalidRollback = await request(`/sessions/${encodeURIComponent(sessionId)}/rollback`, {
       method: "POST",

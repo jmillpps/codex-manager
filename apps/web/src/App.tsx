@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 type SessionSummary = {
@@ -28,6 +28,8 @@ type TranscriptEntry = {
   type: string;
   content: string;
   details?: string;
+  startedAt?: number;
+  completedAt?: number;
   status: "streaming" | "complete" | "canceled" | "error";
 };
 
@@ -44,6 +46,24 @@ type ChatMessage = {
   content: string;
   details?: string;
   status: "streaming" | "complete" | "canceled" | "error";
+};
+
+type MessageTiming = {
+  startedAt: number;
+  completedAt?: number;
+};
+
+type TurnMessageGroup = {
+  turnId: string;
+  messages: Array<ChatMessage>;
+};
+
+type ThoughtPanelMode = "full" | "pending-only";
+
+type ThoughtPanelState = {
+  open: boolean;
+  mode: ThoughtPanelMode;
+  lastPendingSignature: string;
 };
 
 type TranscriptFilter = "all" | "chat" | "tools" | "approvals";
@@ -158,12 +178,96 @@ type ProjectDeletedPayload = {
 
 type MoveProjectChatsDestination = "unassigned" | "archive";
 
+type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+type ReasoningEffortSelection = "" | ReasoningEffort;
+
 type ModelOption = {
   id: string;
   label: string;
   provider: string;
   isDefault: boolean;
+  supportedReasoningEfforts: Array<ReasoningEffort>;
+  defaultReasoningEffort: ReasoningEffortSelection;
 };
+
+const allReasoningEfforts: Array<ReasoningEffort> = ["none", "minimal", "low", "medium", "high", "xhigh"];
+const preferredReasoningEffortOrder: Array<ReasoningEffort> = ["xhigh", "high", "medium", "low", "minimal", "none"];
+const reasoningEffortLabelByValue: Record<ReasoningEffort, string> = {
+  none: "None",
+  minimal: "Minimal",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "XHigh"
+};
+
+function isReasoningEffortSupportedByModel(model: ModelOption | null, effort: ReasoningEffort): boolean {
+  if (!model) {
+    return true;
+  }
+
+  const supported = model.supportedReasoningEfforts;
+  return supported.length === 0 || supported.includes(effort);
+}
+
+function reasoningEffortsForModel(model: ModelOption | null): Array<ReasoningEffort> {
+  return model && model.supportedReasoningEfforts.length > 0 ? model.supportedReasoningEfforts : allReasoningEfforts;
+}
+
+function normalizeModelIdentifier(value: string): string {
+  return value.trim().toLowerCase().replace(/[_\s]+/g, "-");
+}
+
+function isCodexMaxModel(model: ModelOption): boolean {
+  const id = normalizeModelIdentifier(model.id);
+  const label = normalizeModelIdentifier(model.label);
+  return id === "codex-max" || label === "codex-max" || id.includes("codex-max") || label.includes("codex-max");
+}
+
+function preferredModelIdFromList(models: Array<ModelOption>): string {
+  if (models.length === 0) {
+    return "";
+  }
+
+  const codexMax = models.find((model) => isCodexMaxModel(model));
+  if (codexMax) {
+    return codexMax.id;
+  }
+
+  const preferred = models.find((model) => model.isDefault);
+  return preferred?.id ?? models[0].id;
+}
+
+function preferredReasoningEffortForModel(model: ModelOption | null): ReasoningEffortSelection {
+  if (!model) {
+    return "";
+  }
+
+  if (isReasoningEffortSupportedByModel(model, "xhigh")) {
+    return "xhigh";
+  }
+
+  if (model.defaultReasoningEffort && isReasoningEffortSupportedByModel(model, model.defaultReasoningEffort)) {
+    return model.defaultReasoningEffort;
+  }
+
+  const supported = reasoningEffortsForModel(model);
+  for (const candidate of preferredReasoningEffortOrder) {
+    if (supported.includes(candidate)) {
+      return candidate;
+    }
+  }
+
+  return supported[0] ?? "";
+}
+
+function modelDisplayLabel(model: ModelOption): string {
+  if (!model.provider || model.provider.toLowerCase() === "unknown") {
+    return model.label;
+  }
+
+  return `${model.label} (${model.provider})`;
+}
 
 type McpServerSummary = {
   name: string;
@@ -189,6 +293,62 @@ type SessionMenuAnchor = {
   bottom: number;
   left: number;
 };
+
+const selectedSessionStorageKeyPrefix = "codex-manager:selected-session-id";
+
+function selectedSessionStorageKey(): string {
+  return `${selectedSessionStorageKeyPrefix}:${window.location.pathname}`;
+}
+
+function readPersistedSelectedSessionId(): string | null {
+  const key = selectedSessionStorageKey();
+  try {
+    const fromSessionStorage = window.sessionStorage.getItem(key);
+    if (fromSessionStorage && fromSessionStorage.trim().length > 0) {
+      return fromSessionStorage.trim();
+    }
+  } catch {
+    // Continue to local storage fallback.
+  }
+
+  try {
+    const fromLocalStorage = window.localStorage.getItem(key);
+    if (fromLocalStorage && fromLocalStorage.trim().length > 0) {
+      const normalized = fromLocalStorage.trim();
+      try {
+        window.sessionStorage.setItem(key, normalized);
+      } catch {
+        // Ignore session storage failures.
+      }
+      return normalized;
+    }
+  } catch {
+    // Ignore local storage read failures.
+  }
+
+  return null;
+}
+
+function persistSelectedSessionId(sessionId: string | null): void {
+  const key = selectedSessionStorageKey();
+  try {
+    if (sessionId && sessionId.trim().length > 0) {
+      const normalized = sessionId.trim();
+      window.sessionStorage.setItem(key, normalized);
+    } else {
+      window.sessionStorage.removeItem(key);
+    }
+  } catch {
+    // Ignore session storage write failures (private mode, quota, etc.).
+  }
+
+  try {
+    // Keep local storage clean so stale cross-tab values do not override tab-local selection.
+    window.localStorage.removeItem(key);
+  } catch {
+    // Ignore local storage write failures.
+  }
+}
 
 function toWsUrl(apiBase: string, sessionId: string | null): string {
   const url = new URL(`${apiBase}/stream`, window.location.origin);
@@ -273,25 +433,89 @@ function extractLoginIdCandidate(accountStatus: AccountStatus | null): string {
   return "";
 }
 
+function isReasoningEffort(value: unknown): value is ReasoningEffort {
+  return (
+    typeof value === "string" &&
+    (value === "none" || value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh")
+  );
+}
+
+function reasoningEffortLabel(value: ReasoningEffort): string {
+  return reasoningEffortLabelByValue[value];
+}
+
+function extractReasoningEffort(input: unknown): ReasoningEffort | null {
+  if (isReasoningEffort(input)) {
+    return input;
+  }
+
+  const value = asRecord(input);
+  if (!value) {
+    return null;
+  }
+
+  const candidate =
+    typeof value.reasoningEffort === "string"
+      ? value.reasoningEffort
+      : typeof value.reasoning_effort === "string"
+        ? value.reasoning_effort
+        : typeof value.effort === "string"
+          ? value.effort
+          : null;
+  return isReasoningEffort(candidate) ? candidate : null;
+}
+
+function normalizeSupportedReasoningEfforts(input: unknown): Array<ReasoningEffort> {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  const normalized: Array<ReasoningEffort> = [];
+  const seen = new Set<ReasoningEffort>();
+  for (const entry of input) {
+    const effort = extractReasoningEffort(entry);
+    if (!effort || seen.has(effort)) {
+      continue;
+    }
+    seen.add(effort);
+    normalized.push(effort);
+  }
+  return normalized;
+}
+
 function normalizeModelOption(input: unknown): ModelOption | null {
   const value = asRecord(input);
   if (!value || typeof value.id !== "string" || value.id.length === 0) {
     return null;
   }
 
-  const provider = typeof value.provider === "string" ? value.provider : "unknown";
+  const provider =
+    typeof value.provider === "string" && value.provider.trim().length > 0
+      ? value.provider.trim()
+      : typeof value.modelProvider === "string" && value.modelProvider.trim().length > 0
+        ? value.modelProvider.trim()
+        : "";
   const label =
     typeof value.name === "string" && value.name.trim().length > 0
       ? value.name.trim()
       : typeof value.displayName === "string" && value.displayName.trim().length > 0
         ? value.displayName.trim()
         : value.id;
+  const supportedReasoningEfforts = normalizeSupportedReasoningEfforts(value.supportedReasoningEfforts);
+  const defaultReasoningEffortCandidate = extractReasoningEffort(value.defaultReasoningEffort ?? value.default_reasoning_effort);
+  const defaultReasoningEffort: ReasoningEffortSelection =
+    defaultReasoningEffortCandidate &&
+    (supportedReasoningEfforts.length === 0 || supportedReasoningEfforts.includes(defaultReasoningEffortCandidate))
+      ? defaultReasoningEffortCandidate
+      : "";
 
   return {
     id: value.id,
     label,
     provider,
-    isDefault: value.isDefault === true
+    isDefault: value.isDefault === true,
+    supportedReasoningEfforts,
+    defaultReasoningEffort
   };
 }
 
@@ -429,12 +653,18 @@ function messageCategory(message: ChatMessage): "chat" | "tools" | "approvals" {
   return "tools";
 }
 
-function shortTurnId(turnId: string): string {
-  if (turnId.length <= 12) {
-    return turnId;
+function approvalIdFromMessage(message: ChatMessage): string | null {
+  if (!message.type.startsWith("approval.") || !message.id.startsWith("approval-")) {
+    return null;
   }
+  return message.id.slice("approval-".length);
+}
 
-  return `${turnId.slice(0, 8)}…`;
+function toolInputRequestIdFromMessage(message: ChatMessage): string | null {
+  if (!message.type.startsWith("tool_input.") || !message.id.startsWith("tool-input-")) {
+    return null;
+  }
+  return message.id.slice("tool-input-".length);
 }
 
 function statusLabel(status: ChatMessage["status"]): string {
@@ -448,6 +678,706 @@ function statusLabel(status: ChatMessage["status"]): string {
     return "Canceled";
   }
   return "Error";
+}
+
+function toEpochMs(input: unknown): number | null {
+  if (typeof input === "number" && Number.isFinite(input)) {
+    if (input > 1_000_000_000_000) {
+      return input;
+    }
+    if (input > 1_000_000_000) {
+      return input * 1000;
+    }
+    return null;
+  }
+
+  if (typeof input === "string" && input.trim().length > 0) {
+    const parsed = Date.parse(input);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function parseMessageTimingFromDetails(details?: string): MessageTiming | null {
+  if (!details || details.trim().length === 0) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(details) as Record<string, unknown>;
+    const startedAt =
+      toEpochMs(parsed.startedAt) ??
+      toEpochMs(parsed.started_at) ??
+      toEpochMs(parsed.startTime) ??
+      toEpochMs(parsed.start_time) ??
+      null;
+    const completedAt =
+      toEpochMs(parsed.completedAt) ??
+      toEpochMs(parsed.completed_at) ??
+      toEpochMs(parsed.endTime) ??
+      toEpochMs(parsed.end_time) ??
+      null;
+
+    if (!startedAt && !completedAt) {
+      return null;
+    }
+
+    if (startedAt && completedAt) {
+      return completedAt >= startedAt ? { startedAt, completedAt } : { startedAt };
+    }
+
+    if (startedAt) {
+      return { startedAt };
+    }
+
+    return completedAt ? { startedAt: completedAt, completedAt } : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseDetailsRecord(details?: string): Record<string, unknown> | null {
+  if (!details || details.trim().length === 0) {
+    return null;
+  }
+
+  try {
+    return asRecord(JSON.parse(details));
+  } catch {
+    return null;
+  }
+}
+
+function parseEmbeddedRecord(value: unknown): Record<string, unknown> | null {
+  let current = value;
+  for (let depth = 0; depth < 6; depth += 1) {
+    if (typeof current === "string") {
+      const trimmed = current.trim();
+      if (trimmed.length === 0 || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
+        return null;
+      }
+
+      try {
+        current = JSON.parse(trimmed);
+      } catch {
+        return null;
+      }
+      continue;
+    }
+
+    return asRecord(current);
+  }
+
+  return null;
+}
+
+function findValueInRecordChain(root: Record<string, unknown> | null, key: string): unknown {
+  let cursor: unknown = root;
+  for (let depth = 0; depth < 8; depth += 1) {
+    const record = parseEmbeddedRecord(cursor);
+    if (!record) {
+      return undefined;
+    }
+
+    if (key in record) {
+      return record[key];
+    }
+
+    const detailsRecord = parseEmbeddedRecord(record.details);
+    if (detailsRecord && key in detailsRecord) {
+      return detailsRecord[key];
+    }
+
+    const resolutionRecord = parseEmbeddedRecord(record.resolution);
+    if (resolutionRecord && key in resolutionRecord) {
+      return resolutionRecord[key];
+    }
+
+    cursor = record.previous;
+  }
+
+  return undefined;
+}
+
+function findStringInRecordChain(root: Record<string, unknown> | null, key: string): string | null {
+  const value = findValueInRecordChain(root, key);
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value.trim();
+  }
+
+  return null;
+}
+
+function findNumberInRecordChain(root: Record<string, unknown> | null, key: string): number | null {
+  const value = findValueInRecordChain(root, key);
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function extractCountFromSummaryLine(content: string): number | null {
+  const match = content.match(/(\d+)\s+change/i);
+  if (!match) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatFileChangeLabel(changeCount: number | null): string {
+  if (typeof changeCount === "number") {
+    return `${changeCount} file change${changeCount === 1 ? "" : "s"}`;
+  }
+
+  return "file changes";
+}
+
+function extractCommandFromSummaryLine(content: string): string | null {
+  const firstLine = content.split("\n")[0]?.trim() ?? "";
+  if (!firstLine) {
+    return null;
+  }
+
+  const colonIndex = firstLine.indexOf(":");
+  if (colonIndex === -1) {
+    return null;
+  }
+
+  const candidate = firstLine.slice(colonIndex + 1).trim();
+  return candidate.length > 0 ? candidate : null;
+}
+
+function extractApprovalMethod(message: ChatMessage, pendingApproval?: PendingApproval): string | null {
+  if (pendingApproval?.method) {
+    return pendingApproval.method;
+  }
+
+  const parsedDetails = parseDetailsRecord(message.details);
+  return findStringInRecordChain(parsedDetails, "method");
+}
+
+function extractApprovalCommand(message: ChatMessage, pendingApproval?: PendingApproval): string | null {
+  const pendingDetails = asRecord(pendingApproval?.details);
+  const pendingCommand = typeof pendingDetails?.command === "string" ? pendingDetails.command.trim() : "";
+  if (pendingCommand.length > 0) {
+    return pendingCommand;
+  }
+
+  const parsedDetails = parseDetailsRecord(message.details);
+  const fromDetails = findStringInRecordChain(parsedDetails, "command");
+  if (fromDetails) {
+    return fromDetails;
+  }
+
+  return extractCommandFromSummaryLine(message.content);
+}
+
+function extractApprovalFileChangeCount(message: ChatMessage, pendingApproval?: PendingApproval): number | null {
+  const pendingDetails = asRecord(pendingApproval?.details);
+  if (pendingDetails) {
+    if (Array.isArray(pendingDetails.changes)) {
+      return pendingDetails.changes.length;
+    }
+
+    if (typeof pendingDetails.changeCount === "number" && Number.isFinite(pendingDetails.changeCount)) {
+      return pendingDetails.changeCount;
+    }
+  }
+
+  const parsedDetails = parseDetailsRecord(message.details);
+  const fromCount = findNumberInRecordChain(parsedDetails, "changeCount");
+  if (fromCount !== null) {
+    return fromCount;
+  }
+
+  const changesValue = findValueInRecordChain(parsedDetails, "changes");
+  if (Array.isArray(changesValue)) {
+    return changesValue.length;
+  }
+
+  return extractCountFromSummaryLine(message.content);
+}
+
+function extractApprovalDecision(message: ChatMessage): "accept" | "decline" | "cancel" | null {
+  const parsedDetails = parseDetailsRecord(message.details);
+  const decision = findStringInRecordChain(parsedDetails, "decision");
+  if (!decision) {
+    return null;
+  }
+
+  const normalized = decision.toLowerCase();
+  if (normalized === "accept" || normalized === "decline" || normalized === "cancel") {
+    return normalized;
+  }
+
+  return null;
+}
+
+function extractApprovalStatus(message: ChatMessage): string | null {
+  const parsedDetails = parseDetailsRecord(message.details);
+  const status = findStringInRecordChain(parsedDetails, "status");
+  return status ? status.toLowerCase() : null;
+}
+
+function normalizeProjectRootPath(path: string | null | undefined): string | null {
+  if (!path) {
+    return null;
+  }
+
+  const trimmed = path.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
+}
+
+function deriveUserHomePath(path: string | null): string | null {
+  const normalized = normalizeProjectRootPath(path);
+  if (!normalized) {
+    return null;
+  }
+
+  const unixHomeMatch = normalized.match(/^\/home\/([^/]+)/);
+  if (unixHomeMatch) {
+    return `/home/${unixHomeMatch[1]}`;
+  }
+
+  const macHomeMatch = normalized.match(/^\/Users\/([^/]+)/);
+  if (macHomeMatch) {
+    return `/Users/${macHomeMatch[1]}`;
+  }
+
+  const windowsHomeMatch = normalized.match(/^([a-zA-Z]:\\Users\\[^\\]+)/);
+  if (windowsHomeMatch) {
+    return windowsHomeMatch[1];
+  }
+
+  return null;
+}
+
+function toProjectRelativePath(path: string, projectRoot: string | null): string {
+  const normalizedPath = normalizeProjectRootPath(path) ?? path;
+  const normalizedRoot = normalizeProjectRootPath(projectRoot);
+  const userHome = deriveUserHomePath(normalizedRoot);
+  const baseRoot = userHome ?? normalizedRoot;
+  if (!baseRoot) {
+    return normalizedPath;
+  }
+
+  if (normalizedPath === baseRoot) {
+    return "~";
+  }
+
+  if (normalizedPath.startsWith(`${baseRoot}/`)) {
+    return `~/${normalizedPath.slice(baseRoot.length + 1)}`;
+  }
+
+  if (windowsHomeMatchSupported(baseRoot, normalizedPath)) {
+    return `~\\${normalizedPath.slice(baseRoot.length + 1)}`;
+  }
+
+  return normalizedPath;
+}
+
+function windowsHomeMatchSupported(baseRoot: string, normalizedPath: string): boolean {
+  return baseRoot.includes("\\") && normalizedPath.startsWith(`${baseRoot}\\`);
+}
+
+function replaceProjectRootInCommand(command: string, projectRoot: string | null): string {
+  const normalizedRoot = normalizeProjectRootPath(projectRoot);
+  const userHome = deriveUserHomePath(normalizedRoot);
+  const baseRoot = userHome ?? normalizedRoot;
+  if (!baseRoot || command.length === 0) {
+    return command;
+  }
+
+  return command.split(baseRoot).join("~");
+}
+
+function replaceDisplayHomePath(text: string, projectRoot: string | null): string {
+  const normalizedRoot = normalizeProjectRootPath(projectRoot);
+  const userHome = deriveUserHomePath(normalizedRoot);
+  if (!userHome || text.length === 0) {
+    return text;
+  }
+
+  return text.split(userHome).join("~");
+}
+
+function unwrapShellCommand(command: string): string {
+  const trimmed = command.trim();
+  const match = trimmed.match(/^(?:\/bin\/bash|\/usr\/bin\/bash|bash)\s+-lc\s+(['"])([\s\S]*)\1$/);
+  if (!match) {
+    return trimmed;
+  }
+
+  return match[2].trim();
+}
+
+function parseLeadingCd(command: string): {
+  command: string;
+  cwd: string | null;
+} {
+  const match = command.match(/^\s*cd\s+(.+?)\s*&&\s*([\s\S]+)$/);
+  if (!match) {
+    return {
+      command: command.trim(),
+      cwd: null
+    };
+  }
+
+  let rawPath = match[1].trim();
+  if (
+    (rawPath.startsWith("\"") && rawPath.endsWith("\"")) ||
+    (rawPath.startsWith("'") && rawPath.endsWith("'"))
+  ) {
+    rawPath = rawPath.slice(1, -1);
+  }
+
+  return {
+    command: match[2].trim(),
+    cwd: rawPath.length > 0 ? rawPath : null
+  };
+}
+
+function formatTerminalCommandLine(input: {
+  command: string;
+  cwd: string | null;
+  projectRoot: string | null;
+}): {
+  promptPath: string;
+  commandText: string;
+} {
+  const normalizedRoot = normalizeProjectRootPath(input.projectRoot);
+  const unwrappedCommand = unwrapShellCommand(input.command);
+  const parsed = parseLeadingCd(unwrappedCommand);
+  const effectiveCwd = parsed.cwd ?? input.cwd ?? normalizedRoot ?? "~";
+  const promptPath = toProjectRelativePath(effectiveCwd, normalizedRoot);
+  const commandText = replaceProjectRootInCommand(parsed.command, normalizedRoot);
+
+  return {
+    promptPath,
+    commandText: commandText.length > 0 ? commandText : input.command
+  };
+}
+
+function summarizeCommandExecutionMessage(message: ChatMessage): {
+  command: string;
+  aggregatedOutput: string | null;
+  exitCode: number | null;
+  cwd: string | null;
+} {
+  const parsedDetails = parseDetailsRecord(message.details);
+  const fromDetails = parsedDetails && typeof parsedDetails.command === "string" ? parsedDetails.command.trim() : "";
+  const command = fromDetails.length > 0 ? fromDetails : (extractCommandFromSummaryLine(message.content) ?? "(unknown command)");
+  const aggregatedOutput =
+    parsedDetails && typeof parsedDetails.aggregatedOutput === "string" && parsedDetails.aggregatedOutput.length > 0
+      ? parsedDetails.aggregatedOutput
+      : null;
+  const exitCode = parsedDetails && typeof parsedDetails.exitCode === "number" ? parsedDetails.exitCode : null;
+  const cwd = parsedDetails && typeof parsedDetails.cwd === "string" && parsedDetails.cwd.trim().length > 0 ? parsedDetails.cwd.trim() : null;
+
+  return {
+    command,
+    aggregatedOutput,
+    exitCode,
+    cwd
+  };
+}
+
+type FileChangeDiffEntry = {
+  path: string | null;
+  lines: Array<string>;
+  kind: "create" | "update" | "delete" | "move" | "unknown";
+  movePath: string | null;
+};
+
+type FileChangeEntrySummary = {
+  path: string | null;
+  kind: "create" | "update" | "delete" | "move" | "unknown";
+  movePath: string | null;
+};
+
+function normalizeFileChangeKind(value: unknown): {
+  kind: "create" | "update" | "delete" | "move" | "unknown";
+  movePath: string | null;
+} {
+  if (typeof value === "string") {
+    const normalized = value.toLowerCase();
+    if (normalized === "create" || normalized === "update" || normalized === "delete" || normalized === "move") {
+      return { kind: normalized, movePath: null };
+    }
+    return { kind: "unknown", movePath: null };
+  }
+
+  const record = asRecord(value);
+  if (!record) {
+    return { kind: "unknown", movePath: null };
+  }
+
+  const typeValue = typeof record.type === "string" ? record.type.toLowerCase() : "unknown";
+  const movePath =
+    typeof record.move_path === "string" && record.move_path.trim().length > 0
+      ? record.move_path.trim()
+      : typeof record.movePath === "string" && record.movePath.trim().length > 0
+        ? record.movePath.trim()
+        : null;
+
+  if (typeValue === "create" || typeValue === "update" || typeValue === "delete" || typeValue === "move") {
+    return { kind: typeValue, movePath };
+  }
+
+  return { kind: "unknown", movePath };
+}
+
+function collectFileChangeDiffData(changes: unknown): {
+  files: Array<string>;
+  diffs: Array<FileChangeDiffEntry>;
+  entries: Array<FileChangeEntrySummary>;
+} {
+  const entries = Array.isArray(changes) ? changes : [];
+  const files: Array<string> = [];
+  const diffs: Array<FileChangeDiffEntry> = [];
+  const summaries: Array<FileChangeEntrySummary> = [];
+
+  for (const entry of entries) {
+    const record = asRecord(entry);
+    if (!record) {
+      continue;
+    }
+
+    const path = typeof record.path === "string" && record.path.trim().length > 0 ? record.path.trim() : null;
+    const { kind, movePath } = normalizeFileChangeKind(record.kind);
+    summaries.push({
+      path,
+      kind,
+      movePath
+    });
+    if (path) {
+      files.push(path);
+    }
+
+    const diff = typeof record.diff === "string" ? record.diff : null;
+    if (diff && diff.length > 0) {
+      diffs.push({
+        path,
+        lines: diff.split("\n"),
+        kind,
+        movePath
+      });
+    }
+  }
+
+  return { files, diffs, entries: summaries };
+}
+
+function summarizeFileChangeMessage(message: ChatMessage): {
+  status: string;
+  changeCount: number | null;
+  files: Array<string>;
+  diffs: Array<FileChangeDiffEntry>;
+  entries: Array<FileChangeEntrySummary>;
+} {
+  const parsedDetails = parseDetailsRecord(message.details);
+  const status = parsedDetails && typeof parsedDetails.status === "string" ? parsedDetails.status : message.status;
+  const changeEntries = parsedDetails?.changes;
+  const { files, diffs, entries } = collectFileChangeDiffData(changeEntries);
+  const changeCount = Array.isArray(changeEntries) && changeEntries.length > 0 ? changeEntries.length : extractCountFromSummaryLine(message.content);
+
+  return {
+    status,
+    changeCount,
+    files,
+    diffs,
+    entries
+  };
+}
+
+function classifyDiffLineTone(line: string): "add" | "remove" | "hunk" | "meta" | "context" {
+  if (line.startsWith("@@")) {
+    return "hunk";
+  }
+
+  if (line.startsWith("diff ") || line.startsWith("index ") || line.startsWith("---") || line.startsWith("+++")) {
+    return "meta";
+  }
+
+  if (line.startsWith("+")) {
+    return "add";
+  }
+
+  if (line.startsWith("-")) {
+    return "remove";
+  }
+
+  return "context";
+}
+
+function summarizePendingFileChangeApproval(approval: PendingApproval): {
+  files: Array<string>;
+  diffs: Array<FileChangeDiffEntry>;
+  entries: Array<FileChangeEntrySummary>;
+  changeCount: number | null;
+} {
+  const details = asRecord(approval.details);
+  if (!details) {
+    return { files: [], diffs: [], entries: [], changeCount: extractCountFromSummaryLine(approval.summary) };
+  }
+
+  const collected = collectFileChangeDiffData(details.changes);
+  return {
+    ...collected,
+    changeCount: collected.entries.length > 0 ? collected.entries.length : extractCountFromSummaryLine(approval.summary)
+  };
+}
+
+function summarizePendingFileChangeApprovalText(preview: {
+  entries: Array<FileChangeEntrySummary>;
+  changeCount: number | null;
+  projectRoot: string | null;
+}): string {
+  if (preview.entries.length === 1) {
+    const entry = preview.entries[0];
+    const path = entry.path ? toProjectRelativePath(entry.path, preview.projectRoot) : "file";
+    if (entry.kind === "create") {
+      return `Approval required to create file ${path}`;
+    }
+    if (entry.kind === "update") {
+      return `Approval required to modify file ${path}`;
+    }
+    if (entry.kind === "delete") {
+      return `Approval required to delete file ${path}`;
+    }
+    if (entry.kind === "move") {
+      if (entry.movePath) {
+        return `Approval required to move file ${path} -> ${toProjectRelativePath(entry.movePath, preview.projectRoot)}`;
+      }
+      return `Approval required to move file ${path}`;
+    }
+  }
+
+  return `Approval required to apply: ${formatFileChangeLabel(preview.changeCount)}`;
+}
+
+function shouldHidePathHeaderForCreatePreview(preview: {
+  entries: Array<FileChangeEntrySummary>;
+}): boolean {
+  return preview.entries.length === 1 && preview.entries[0].kind === "create";
+}
+
+function parseReasoningLines(details?: string, fallbackContent?: string): {
+  summaryLines: Array<string>;
+  contentLines: Array<string>;
+} {
+  const trimWrappingAsterisks = (line: string): string => {
+    let normalized = line.trim();
+    while (normalized.length > 0) {
+      const match = normalized.match(/^(\*{1,3})(.+)\1$/);
+      if (!match) {
+        break;
+      }
+
+      const inner = match[2].trim();
+      if (!inner) {
+        break;
+      }
+
+      normalized = inner;
+    }
+
+    return normalized;
+  };
+
+  const normalizeLines = (value: unknown): Array<string> => {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    const lines: Array<string> = [];
+    for (const entry of value) {
+      if (typeof entry === "string") {
+        const trimmed = trimWrappingAsterisks(entry);
+        if (trimmed.length > 0) {
+          lines.push(trimmed);
+        }
+        continue;
+      }
+
+      const record = asRecord(entry);
+      if (!record) {
+        continue;
+      }
+
+      const textCandidate =
+        typeof record.text === "string"
+          ? record.text
+          : typeof record.value === "string"
+            ? record.value
+            : typeof record.summary === "string"
+              ? record.summary
+              : null;
+
+      if (textCandidate && textCandidate.trim().length > 0) {
+        lines.push(trimWrappingAsterisks(textCandidate));
+      }
+    }
+    return lines.filter((line) => line.length > 0);
+  };
+
+  if (!details || details.trim().length === 0) {
+    const fallback = typeof fallbackContent === "string" ? trimWrappingAsterisks(fallbackContent) : "";
+    return {
+      summaryLines: fallback && fallback !== "[reasoning]" ? [fallback] : [],
+      contentLines: []
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(details) as Record<string, unknown>;
+    const summaryLines = normalizeLines(parsed.summary);
+    const contentLines = normalizeLines(parsed.content);
+
+    if (summaryLines.length === 0 && contentLines.length === 0) {
+      const fallback = typeof fallbackContent === "string" ? trimWrappingAsterisks(fallbackContent) : "";
+      return {
+        summaryLines: fallback && fallback !== "[reasoning]" ? [fallback] : [],
+        contentLines: []
+      };
+    }
+
+    return {
+      summaryLines,
+      contentLines
+    };
+  } catch {
+    const fallback = typeof fallbackContent === "string" ? trimWrappingAsterisks(fallbackContent) : "";
+    return {
+      summaryLines: fallback && fallback !== "[reasoning]" ? [fallback] : [],
+      contentLines: []
+    };
+  }
+}
+
+function formatElapsedLabel(durationMs: number): string {
+  if (durationMs < 1000) {
+    return "<1s";
+  }
+
+  const roundedSeconds = Math.round(durationMs / 1000);
+  if (roundedSeconds < 60) {
+    return `${roundedSeconds}s`;
+  }
+
+  const minutes = Math.floor(roundedSeconds / 60);
+  const seconds = roundedSeconds % 60;
+  if (seconds === 0) {
+    return `${minutes}m`;
+  }
+
+  return `${minutes}m ${seconds}s`;
 }
 
 function approvalResolutionStatus(payload: {
@@ -491,6 +1421,60 @@ function approvalResolutionSummary(payload: {
   }
 
   return "Approval resolved.";
+}
+
+function commandApprovalResolutionSummary(
+  payload: {
+    status?: string;
+    decision?: "accept" | "decline" | "cancel";
+    scope?: "turn" | "session";
+  },
+  command: string
+): string {
+  if (payload.status === "expired") {
+    return `Command approval expired: ${command}`;
+  }
+
+  if (payload.decision === "accept") {
+    return `Approved to run: ${command}`;
+  }
+
+  if (payload.decision === "decline") {
+    return `Command denied: ${command}`;
+  }
+
+  if (payload.decision === "cancel") {
+    return `Command approval canceled: ${command}`;
+  }
+
+  return `Command approval updated: ${command}`;
+}
+
+function fileChangeApprovalResolutionSummary(
+  payload: {
+    status?: string;
+    decision?: "accept" | "decline" | "cancel";
+    scope?: "turn" | "session";
+  },
+  label: string
+): string {
+  if (payload.status === "expired") {
+    return `File-change approval expired: ${label}`;
+  }
+
+  if (payload.decision === "accept") {
+    return `Approved file changes: ${label}`;
+  }
+
+  if (payload.decision === "decline") {
+    return `File changes denied: ${label}`;
+  }
+
+  if (payload.decision === "cancel") {
+    return `File-change approval canceled: ${label}`;
+  }
+
+  return `File-change approval updated: ${label}`;
 }
 
 function toolInputMessageId(requestId: string): string {
@@ -543,7 +1527,7 @@ export function App() {
   const apiBase = useMemo(() => import.meta.env.VITE_API_BASE || "/api", []);
   const [sessions, setSessions] = useState<Array<SessionSummary>>([]);
   const [projects, setProjects] = useState<Array<ProjectSummary>>([]);
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(() => readPersistedSelectedSessionId());
   const [showArchived, setShowArchived] = useState(false);
   const [showProjects, setShowProjects] = useState(true);
   const [showSessionList, setShowSessionList] = useState(true);
@@ -563,6 +1547,8 @@ export function App() {
   const [projectActionProjectId, setProjectActionProjectId] = useState<string | null>(null);
   const [transcriptFilter, setTranscriptFilter] = useState<TranscriptFilter>("all");
   const [messages, setMessages] = useState<Array<ChatMessage>>([]);
+  const [messageTimingById, setMessageTimingById] = useState<Record<string, MessageTiming>>({});
+  const [thoughtPanelStateByTurnId, setThoughtPanelStateByTurnId] = useState<Record<string, ThoughtPanelState>>({});
   const [pendingApprovals, setPendingApprovals] = useState<Array<PendingApproval>>([]);
   const [pendingToolInputs, setPendingToolInputs] = useState<Array<PendingToolInput>>([]);
   const [toolInputDraftById, setToolInputDraftById] = useState<Record<string, Record<string, string>>>({});
@@ -576,6 +1562,8 @@ export function App() {
   const [models, setModels] = useState<Array<ModelOption>>([]);
   const [selectedModelId, setSelectedModelId] = useState<string>("");
   const [sessionModelById, setSessionModelById] = useState<Record<string, string>>({});
+  const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<ReasoningEffortSelection>("");
+  const [sessionReasoningEffortById, setSessionReasoningEffortById] = useState<Record<string, ReasoningEffort>>({});
   const [capabilities, setCapabilities] = useState<CapabilitiesResponse | null>(null);
   const [loadingCapabilities, setLoadingCapabilities] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -596,6 +1584,9 @@ export function App() {
   const [diffBySession, setDiffBySession] = useState<Record<string, Array<Record<string, unknown>>>>({});
   const [usageBySession, setUsageBySession] = useState<Record<string, Array<Record<string, unknown>>>>({});
   const [threadMenuOpen, setThreadMenuOpen] = useState(false);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [modelMenuPosition, setModelMenuPosition] = useState<SessionMenuPosition | null>(null);
+  const [modelMenuAnchor, setModelMenuAnchor] = useState<SessionMenuAnchor | null>(null);
   const [threadActionPending, setThreadActionPending] = useState<string | null>(null);
   const [loadingModels, setLoadingModels] = useState(false);
   const [mcpServers, setMcpServers] = useState<Array<McpServerSummary>>([]);
@@ -632,12 +1623,17 @@ export function App() {
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const threadMenuRef = useRef<HTMLDivElement | null>(null);
   const threadMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const modelMenuRef = useRef<HTMLDivElement | null>(null);
+  const modelMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const suggestedReplyAbortRef = useRef<AbortController | null>(null);
   const suggestedReplyRequestIdRef = useRef(0);
   const selectedSessionIdRef = useRef<string | null>(null);
   const draftRef = useRef("");
   selectedSessionIdRef.current = selectedSessionId;
   draftRef.current = draft;
+  useEffect(() => {
+    persistSelectedSessionId(selectedSessionId);
+  }, [selectedSessionId]);
   const selectedSession = useMemo(
     () => sessions.find((session) => session.sessionId === selectedSessionId) ?? null,
     [sessions, selectedSessionId]
@@ -681,12 +1677,53 @@ export function App() {
   }, [projects, sessionsByProjectId, showArchived]);
   const showProjectsSection = !showArchived || visibleProjects.length > 0;
   const showYourChatsSection = !showArchived || unassignedSessions.length > 0;
-  const defaultModelId = useMemo(() => {
-    const preferred = models.find((model) => model.isDefault);
-    return preferred?.id ?? models[0]?.id ?? "";
-  }, [models]);
+  const defaultModelId = useMemo(() => preferredModelIdFromList(models), [models]);
+  const selectedModelOption = useMemo(() => {
+    if (selectedModelId) {
+      const selected = models.find((model) => model.id === selectedModelId);
+      if (selected) {
+        return selected;
+      }
+    }
+
+    if (defaultModelId) {
+      const fallback = models.find((model) => model.id === defaultModelId);
+      if (fallback) {
+        return fallback;
+      }
+    }
+
+    return models[0] ?? null;
+  }, [defaultModelId, models, selectedModelId]);
+  const selectedModelMenuLabel = useMemo(() => {
+    if (loadingModels) {
+      return "Loading models...";
+    }
+
+    if (!selectedModelOption) {
+      return "No models available";
+    }
+
+    const effortLabel = selectedReasoningEffort ? reasoningEffortLabel(selectedReasoningEffort) : "Unavailable";
+    return `${modelDisplayLabel(selectedModelOption)} · ${effortLabel}`;
+  }, [loadingModels, selectedModelOption, selectedReasoningEffort]);
   const pendingApprovalsById = useMemo(() => {
     return new Map(pendingApprovals.map((approval) => [approval.approvalId, approval]));
+  }, [pendingApprovals]);
+  const pendingFileChangeApprovalsByItemId = useMemo(() => {
+    const byItemId = new Map<string, PendingApproval>();
+    for (const approval of pendingApprovals) {
+      if (approval.method !== "item/fileChange/requestApproval") {
+        continue;
+      }
+
+      if (!approval.itemId || approval.itemId.trim().length === 0) {
+        continue;
+      }
+
+      byItemId.set(approval.itemId, approval);
+    }
+    return byItemId;
   }, [pendingApprovals]);
   const pendingToolInputsById = useMemo(() => {
     return new Map(pendingToolInputs.map((request) => [request.requestId, request]));
@@ -766,16 +1803,138 @@ export function App() {
     return counts;
   }, [messages]);
 
-  const visibleMessages = useMemo(() => {
-    if (transcriptFilter === "all") {
-      return messages;
+  const allTurnGroups = useMemo(() => {
+    const byTurnId = new Map<string, Array<ChatMessage>>();
+
+    for (const message of messages) {
+      const turnKey = message.turnId?.trim().length > 0 ? message.turnId : `turn-${message.id}`;
+      const bucket = byTurnId.get(turnKey);
+      if (bucket) {
+        bucket.push(message);
+      } else {
+        byTurnId.set(turnKey, [message]);
+      }
     }
 
-    return messages.filter((message) => {
-      const category = messageCategory(message);
-      return category === transcriptFilter;
+    const groups: Array<TurnMessageGroup> = [];
+    for (const [turnId, groupedMessages] of byTurnId.entries()) {
+      groups.push({
+        turnId,
+        messages: groupedMessages
+      });
+    }
+    return groups;
+  }, [messages]);
+  const visibleTurnGroups = useMemo(() => {
+    if (transcriptFilter === "all") {
+      return allTurnGroups;
+    }
+
+    return allTurnGroups.filter((group) =>
+      group.messages.some((message) => {
+        const category = messageCategory(message);
+        return category === transcriptFilter;
+      })
+    );
+  }, [allTurnGroups, transcriptFilter]);
+  const inspectTurnGroupState = (group: TurnMessageGroup): {
+    responseMessages: Array<ChatMessage>;
+    thoughtMessages: Array<ChatMessage>;
+    finalAssistantMessage: ChatMessage | null;
+    thinkingActive: boolean;
+    pendingSignature: string;
+    hasPending: boolean;
+  } => {
+    const responseMessages = group.messages.filter((message) => message.role !== "user");
+    const finalAssistantIndex = (() => {
+      for (let index = responseMessages.length - 1; index >= 0; index -= 1) {
+        if (responseMessages[index].role === "assistant") {
+          return index;
+        }
+      }
+      return -1;
+    })();
+    const finalAssistantMessage = finalAssistantIndex >= 0 ? responseMessages[finalAssistantIndex] : null;
+    const thoughtMessages = responseMessages.filter((_message, index) => index !== finalAssistantIndex);
+    const thinkingActive =
+      thoughtMessages.some((message) => message.status === "streaming") ||
+      finalAssistantMessage?.status === "streaming";
+    const pendingIds = new Set<string>();
+    for (const message of thoughtMessages) {
+      const approvalId = approvalIdFromMessage(message);
+      if (approvalId && pendingApprovalsById.has(approvalId)) {
+        pendingIds.add(`approval:${approvalId}`);
+      }
+
+      const toolInputRequestId = toolInputRequestIdFromMessage(message);
+      if (toolInputRequestId && pendingToolInputsById.has(toolInputRequestId)) {
+        pendingIds.add(`tool-input:${toolInputRequestId}`);
+      }
+    }
+    const pendingSignature = Array.from(pendingIds).sort().join("|");
+
+    return {
+      responseMessages,
+      thoughtMessages,
+      finalAssistantMessage,
+      thinkingActive,
+      pendingSignature,
+      hasPending: pendingIds.size > 0
+    };
+  };
+
+  useEffect(() => {
+    setThoughtPanelStateByTurnId((current) => {
+      const next: Record<string, ThoughtPanelState> = {};
+      let changed = false;
+
+      for (const group of visibleTurnGroups) {
+        const { thinkingActive, pendingSignature, hasPending } = inspectTurnGroupState(group);
+        const existing = current[group.turnId];
+        if (!existing) {
+          next[group.turnId] = {
+            open: thinkingActive || hasPending,
+            mode: hasPending && !thinkingActive ? "pending-only" : "full",
+            lastPendingSignature: pendingSignature
+          };
+          changed = true;
+          continue;
+        }
+
+        let open = existing.open;
+        let mode = existing.mode;
+        let lastPendingSignature = existing.lastPendingSignature;
+
+        if (pendingSignature !== existing.lastPendingSignature) {
+          lastPendingSignature = pendingSignature;
+          if (pendingSignature.length > 0 && !existing.open) {
+            // If the panel is closed when a new pending interaction arrives, auto-open a focused view.
+            open = true;
+            mode = "pending-only";
+          }
+        }
+
+        if (pendingSignature.length === 0 && mode === "pending-only") {
+          mode = "full";
+        }
+
+        next[group.turnId] = {
+          open,
+          mode,
+          lastPendingSignature
+        };
+        if (open !== existing.open || mode !== existing.mode || lastPendingSignature !== existing.lastPendingSignature) {
+          changed = true;
+        }
+      }
+
+      if (Object.keys(current).length !== Object.keys(next).length) {
+        changed = true;
+      }
+
+      return changed ? next : current;
     });
-  }, [messages, transcriptFilter]);
+  }, [visibleTurnGroups, pendingApprovalsById, pendingToolInputsById]);
 
   const upsertMessage = (nextMessage: ChatMessage): void => {
     setMessages((current) => {
@@ -794,17 +1953,47 @@ export function App() {
   };
 
   const upsertPendingApprovalMessage = (approval: PendingApproval): void => {
+    const detailsRecord = asRecord(approval.details);
+    const command = typeof detailsRecord?.command === "string" ? detailsRecord.command.trim() : "";
+    const reason = typeof detailsRecord?.reason === "string" ? detailsRecord.reason.trim() : "";
+    const fileChangeCount =
+      detailsRecord && Array.isArray(detailsRecord.changes)
+        ? detailsRecord.changes.length
+        : detailsRecord && typeof detailsRecord.changeCount === "number" && Number.isFinite(detailsRecord.changeCount)
+          ? detailsRecord.changeCount
+          : extractCountFromSummaryLine(approval.summary);
+    const isCommandApproval = approval.method === "item/commandExecution/requestApproval" || command.length > 0;
+    const isFileChangeApproval = approval.method === "item/fileChange/requestApproval";
+
+    const compactDetails: Record<string, unknown> = {
+      method: approval.method,
+      createdAt: approval.createdAt,
+      itemId: approval.itemId
+    };
+    if (command.length > 0) {
+      compactDetails.command = command;
+    }
+    if (reason.length > 0) {
+      compactDetails.reason = reason;
+    }
+    if (isFileChangeApproval && fileChangeCount !== null) {
+      compactDetails.changeCount = fileChangeCount;
+    }
+
+    const fileChangeLabel = formatFileChangeLabel(fileChangeCount);
+    const content = isCommandApproval && command.length > 0
+      ? `Approval required to run: ${command}`
+      : isFileChangeApproval
+        ? `Approval required to apply: ${fileChangeLabel}`
+        : approval.summary;
+
     upsertMessage({
       id: approvalMessageId(approval.approvalId),
       turnId: approval.turnId ?? "approval",
       role: "system",
       type: "approval.request",
-      content: approval.summary,
-      details: safePrettyJson({
-        method: approval.method,
-        createdAt: approval.createdAt,
-        ...approval.details
-      }),
+      content,
+      details: safePrettyJson(compactDetails),
       status: "streaming"
     });
   };
@@ -837,19 +2026,42 @@ export function App() {
 
       const next = [...current];
       const existing = next[existingIndex];
-      const mergedContent = existing.content.includes(summary)
-        ? existing.content
-        : existing.type === "approval.request"
-          ? `${existing.content}\n${summary}`.trim()
-          : `${existing.content}\n${summary}`.trim();
+      const method = extractApprovalMethod(existing);
+      const command = extractApprovalCommand(existing);
+      const isCommandApproval = method === "item/commandExecution/requestApproval" || Boolean(command);
+      const isFileChangeApproval = method === "item/fileChange/requestApproval";
+      const fileChangeCount = extractApprovalFileChangeCount(existing);
+      const fileChangeLabel = formatFileChangeLabel(fileChangeCount);
+      const resolvedSummary =
+        isCommandApproval && command
+          ? commandApprovalResolutionSummary(payload, command)
+          : isFileChangeApproval
+            ? fileChangeApprovalResolutionSummary(payload, fileChangeLabel)
+            : summary;
+      const compactDetails: Record<string, unknown> = {
+        approvalId: payload.approvalId,
+        status: payload.status ?? "resolved"
+      };
+      if (payload.decision) {
+        compactDetails.decision = payload.decision;
+      }
+      if (payload.scope) {
+        compactDetails.scope = payload.scope;
+      }
+      if (method) {
+        compactDetails.method = method;
+      }
+      if (command) {
+        compactDetails.command = command;
+      }
+      if (isFileChangeApproval && fileChangeCount !== null) {
+        compactDetails.changeCount = fileChangeCount;
+      }
       next[existingIndex] = {
         ...existing,
         type: "approval.resolved",
-        content: mergedContent,
-        details: safePrettyJson({
-          previous: existing.details ?? null,
-          resolution: payload
-        }),
+        content: resolvedSummary,
+        details: safePrettyJson(compactDetails),
         status: approvalResolutionStatus(payload)
       };
       return next;
@@ -967,6 +2179,13 @@ export function App() {
       const { [sessionId]: _deleted, ...rest } = current;
       return rest;
     });
+    setSessionReasoningEffortById((current) => {
+      if (!(sessionId in current)) {
+        return current;
+      }
+      const { [sessionId]: _deleted, ...rest } = current;
+      return rest;
+    });
     setSessionMenuSessionId((current) => {
       if (current === sessionId) {
         setSessionMenuPosition(null);
@@ -983,6 +2202,8 @@ export function App() {
     if (selectedSessionId === sessionId) {
       setSelectedSessionId(null);
       setMessages([]);
+      setMessageTimingById({});
+      setThoughtPanelStateByTurnId({});
       setPendingApprovals([]);
       setStreaming(false);
       setDraft("");
@@ -1063,7 +2284,7 @@ export function App() {
       } else {
         setSessions(payload.data);
         setSelectedSessionId((current) => {
-          const target = preferredSessionId ?? current;
+          const target = preferredSessionId ?? current ?? readPersistedSelectedSessionId();
           if (target && payload.data.some((session) => session.sessionId === target)) {
             return target;
           }
@@ -1095,26 +2316,64 @@ export function App() {
       if (!response.ok) {
         if (await handleDeletedSessionResponse(response, sessionId)) {
           setMessages([]);
+          setThoughtPanelStateByTurnId({});
           return;
         }
         throw new Error(`failed to load session (${response.status})`);
       }
 
       const payload = (await response.json()) as SessionDetailResponse;
-      setMessages(
-        payload.transcript.map((entry) => ({
-          id: entry.messageId,
-          turnId: entry.turnId,
-          role: entry.role,
-          type: entry.type,
-          content: entry.content,
-          details: entry.details,
-          status: entry.status
-        }))
-      );
+      const nextTranscriptMessages: Array<ChatMessage> = payload.transcript.map((entry) => ({
+        id: entry.messageId,
+        turnId: entry.turnId,
+        role: entry.role,
+        type: entry.type,
+        content: entry.content,
+        details: entry.details,
+        status: entry.status
+      }));
+      setMessages((current) => {
+        const optimistic = current.filter((message) => message.id.startsWith("local-user-"));
+        if (optimistic.length === 0) {
+          return nextTranscriptMessages;
+        }
+
+        const byId = new Map(nextTranscriptMessages.map((message) => [message.id, message]));
+        for (const message of optimistic) {
+          if (!byId.has(message.id)) {
+            byId.set(message.id, message);
+          }
+        }
+        return Array.from(byId.values());
+      });
+      setMessageTimingById(() => {
+        const next: Record<string, MessageTiming> = {};
+        for (const entry of payload.transcript) {
+          const startedAt = toEpochMs(entry.startedAt);
+          const completedAt = toEpochMs(entry.completedAt);
+          if (startedAt !== null || completedAt !== null) {
+            if (startedAt !== null && completedAt !== null) {
+              next[entry.messageId] = completedAt >= startedAt ? { startedAt, completedAt } : { startedAt };
+            } else if (startedAt !== null) {
+              next[entry.messageId] = { startedAt };
+            } else if (completedAt !== null) {
+              next[entry.messageId] = { startedAt: completedAt, completedAt };
+            }
+            continue;
+          }
+
+          const timing = parseMessageTimingFromDetails(entry.details);
+          if (timing) {
+            next[entry.messageId] = timing;
+          }
+        }
+        return next;
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed to load transcript");
       setMessages([]);
+      setMessageTimingById({});
+      setThoughtPanelStateByTurnId({});
     } finally {
       setLoadingTranscript(false);
     }
@@ -1259,8 +2518,7 @@ export function App() {
             return current;
           }
 
-          const preferred = normalized.find((model) => model.isDefault);
-          return preferred?.id ?? normalized[0].id;
+          return preferredModelIdFromList(normalized);
         });
       }
     } catch (err) {
@@ -1693,7 +2951,14 @@ export function App() {
           [payload.session.sessionId]: selectedModelId
         }));
       }
+      if (selectedReasoningEffort) {
+        setSessionReasoningEffortById((current) => ({
+          ...current,
+          [payload.session.sessionId]: selectedReasoningEffort
+        }));
+      }
       setMessages([]);
+      setThoughtPanelStateByTurnId({});
       setPendingApprovals([]);
       setRenamingSessionId(null);
       setRenameDraft("");
@@ -1788,6 +3053,13 @@ export function App() {
     projectsHeaderMenuTriggerRef.current = null;
   };
 
+  const closeModelMenu = (): void => {
+    setModelMenuOpen(false);
+    setModelMenuPosition(null);
+    setModelMenuAnchor(null);
+    modelMenuTriggerRef.current = null;
+  };
+
   const toggleSessionMenu = (sessionId: string, trigger: HTMLButtonElement): void => {
     if (sessionMenuSessionId === sessionId) {
       closeSessionMenu();
@@ -1796,6 +3068,7 @@ export function App() {
 
     closeProjectMenu();
     closeProjectsHeaderMenu();
+    closeModelMenu();
     const anchor = toMenuAnchor(trigger);
 
     sessionMenuTriggerRef.current = trigger;
@@ -1812,6 +3085,7 @@ export function App() {
 
     closeProjectMenu();
     closeSessionMenu();
+    closeModelMenu();
     const anchor = toMenuAnchor(trigger);
     projectsHeaderMenuTriggerRef.current = trigger;
     setProjectsHeaderMenuAnchor(anchor);
@@ -1827,11 +3101,29 @@ export function App() {
 
     closeSessionMenu();
     closeProjectsHeaderMenu();
+    closeModelMenu();
     const anchor = toMenuAnchor(trigger);
     projectMenuTriggerRef.current = trigger;
     setProjectMenuAnchor(anchor);
     setProjectMenuPosition(resolveSessionMenuPosition(anchor));
     setProjectMenuProjectId(projectId);
+  };
+
+  const toggleModelMenu = (trigger: HTMLButtonElement): void => {
+    if (modelMenuOpen) {
+      closeModelMenu();
+      return;
+    }
+
+    closeSessionMenu();
+    closeProjectMenu();
+    closeProjectsHeaderMenu();
+    setThreadMenuOpen(false);
+    const anchor = toMenuAnchor(trigger);
+    modelMenuTriggerRef.current = trigger;
+    setModelMenuAnchor(anchor);
+    setModelMenuPosition(resolveSessionMenuPosition(anchor));
+    setModelMenuOpen(true);
   };
 
   const submitRenameSession = async (sessionId: string): Promise<void> => {
@@ -2170,11 +3462,25 @@ export function App() {
     };
 
     setMessages((current) => [...current, optimisticMessage]);
+    const optimisticStartedAt = Date.now();
+    setMessageTimingById((current) => ({
+      ...current,
+      [optimisticId]: {
+        startedAt: optimisticStartedAt,
+        completedAt: optimisticStartedAt
+      }
+    }));
     setStreaming(true);
     if (selectedModelId) {
       setSessionModelById((current) => ({
         ...current,
         [selectedSessionId]: selectedModelId
+      }));
+    }
+    if (selectedReasoningEffort) {
+      setSessionReasoningEffortById((current) => ({
+        ...current,
+        [selectedSessionId]: selectedReasoningEffort
       }));
     }
 
@@ -2184,7 +3490,11 @@ export function App() {
         headers: {
           "content-type": "application/json"
         },
-        body: JSON.stringify({ text, model: selectedModelId || undefined })
+        body: JSON.stringify({
+          text,
+          model: selectedModelId || undefined,
+          effort: selectedReasoningEffort || undefined
+        })
       });
 
       if (!response.ok) {
@@ -2202,11 +3512,28 @@ export function App() {
           ...current,
           [selectedSessionId]: payload.turnId as string
         }));
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === optimisticId
+              ? {
+                  ...message,
+                  turnId: payload.turnId as string
+                }
+              : message
+          )
+        );
       }
       startPendingSendAck(selectedSessionId, typeof payload.turnId === "string" ? payload.turnId : null);
     } catch (err) {
       setStreaming(false);
       setMessages((current) => current.filter((message) => message.id !== optimisticId));
+      setMessageTimingById((current) => {
+        if (!(optimisticId in current)) {
+          return current;
+        }
+        const { [optimisticId]: _removed, ...rest } = current;
+        return rest;
+      });
       setDraft(text);
       clearPendingSendAck();
       setError(err instanceof Error ? err.message : "failed to send message");
@@ -2256,6 +3583,7 @@ export function App() {
         },
         body: JSON.stringify({
           model: selectedModelId || undefined,
+          effort: selectedReasoningEffort || undefined,
           draft: draftAtStart || undefined
         }),
         signal: controller.signal
@@ -2306,15 +3634,33 @@ export function App() {
     void sendMessage();
   };
 
-  const handleModelSelection = (modelId: string): void => {
-    setSelectedModelId(modelId);
-
-    if (selectedSessionId && modelId) {
-      setSessionModelById((current) => ({
-        ...current,
-        [selectedSessionId]: modelId
-      }));
+  const applyModelReasoningSelection = (modelId: string, effort: ReasoningEffort): void => {
+    const targetModel = models.find((model) => model.id === modelId) ?? null;
+    if (!targetModel) {
+      return;
     }
+
+    if (!isReasoningEffortSupportedByModel(targetModel, effort)) {
+      return;
+    }
+
+    setSelectedModelId(modelId);
+    setSelectedReasoningEffort(effort);
+    closeModelMenu();
+
+    if (!selectedSessionId || !modelId) {
+      return;
+    }
+
+    setSessionModelById((current) => ({
+      ...current,
+      [selectedSessionId]: modelId
+    }));
+
+    setSessionReasoningEffortById((current) => ({
+      ...current,
+      [selectedSessionId]: effort
+    }));
   };
 
   const interruptTurn = async (): Promise<void> => {
@@ -2771,6 +4117,44 @@ export function App() {
   };
 
   useEffect(() => {
+    if (!modelMenuOpen) {
+      return;
+    }
+
+    const handleClickOutside = (event: MouseEvent): void => {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+
+      const insideMenu = modelMenuRef.current?.contains(target) ?? false;
+      const insideTrigger = modelMenuTriggerRef.current?.contains(target) ?? false;
+      if (!insideMenu && !insideTrigger) {
+        closeModelMenu();
+      }
+    };
+
+    const handleEscape = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        closeModelMenu();
+      }
+    };
+
+    const handleResize = (): void => {
+      closeModelMenu();
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleEscape);
+    window.addEventListener("resize", handleResize);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleEscape);
+      window.removeEventListener("resize", handleResize);
+    };
+  }, [modelMenuOpen]);
+
+  useEffect(() => {
     if (!sessionMenuSessionId) {
       return;
     }
@@ -2920,8 +4304,28 @@ export function App() {
     closeSessionMenu();
     closeProjectMenu();
     closeProjectsHeaderMenu();
+    closeModelMenu();
     setThreadMenuOpen(false);
   }, [selectedSessionId, showArchived]);
+
+  useEffect(() => {
+    if (!modelMenuOpen || !modelMenuAnchor || !modelMenuRef.current) {
+      return;
+    }
+
+    const measured = modelMenuRef.current.getBoundingClientRect();
+    const next = resolveSessionMenuPosition(modelMenuAnchor, {
+      width: measured.width,
+      height: measured.height
+    });
+
+    setModelMenuPosition((current) => {
+      if (current && Math.abs(current.top - next.top) < 0.5 && Math.abs(current.left - next.left) < 0.5) {
+        return current;
+      }
+      return next;
+    });
+  }, [modelMenuOpen, modelMenuAnchor, models, selectedModelId, selectedReasoningEffort]);
 
   useEffect(() => {
     if (!sessionMenuSessionId || !sessionMenuAnchor || !openSessionMenuRef.current) {
@@ -2998,6 +4402,12 @@ export function App() {
   }, [showProjectsSection]);
 
   useEffect(() => {
+    if (modelMenuOpen && models.length === 0) {
+      closeModelMenu();
+    }
+  }, [modelMenuOpen, models.length]);
+
+  useEffect(() => {
     void loadSessions(showArchived);
   }, [showArchived]);
 
@@ -3016,6 +4426,8 @@ export function App() {
 
     if (!selectedSessionId) {
       setMessages([]);
+      setMessageTimingById({});
+      setThoughtPanelStateByTurnId({});
       setPendingApprovals([]);
       setPendingToolInputs([]);
       setFollowTranscriptTail(true);
@@ -3054,7 +4466,7 @@ export function App() {
   useEffect(() => {
     if (selectedSessionId) {
       const sessionModel = sessionModelById[selectedSessionId];
-      if (sessionModel) {
+      if (sessionModel && models.some((model) => model.id === sessionModel)) {
         setSelectedModelId(sessionModel);
         return;
       }
@@ -3064,7 +4476,51 @@ export function App() {
     }
 
     setSelectedModelId(defaultModelId || "");
-  }, [selectedSessionId, sessionModelById, defaultModelId]);
+  }, [selectedSessionId, sessionModelById, defaultModelId, models]);
+
+  useEffect(() => {
+    const fallbackEffort = preferredReasoningEffortForModel(selectedModelOption);
+    if (!selectedSessionId) {
+      setSelectedReasoningEffort((current) => {
+        if (current && isReasoningEffortSupportedByModel(selectedModelOption, current)) {
+          return current;
+        }
+        return current === fallbackEffort ? current : fallbackEffort;
+      });
+      return;
+    }
+
+    const sessionEffort = sessionReasoningEffortById[selectedSessionId];
+    const nextEffort =
+      sessionEffort && isReasoningEffortSupportedByModel(selectedModelOption, sessionEffort) ? sessionEffort : fallbackEffort;
+    setSelectedReasoningEffort((current) => (current === nextEffort ? current : nextEffort));
+  }, [selectedSessionId, sessionReasoningEffortById, selectedModelOption]);
+
+  useEffect(() => {
+    if (!selectedSessionId) {
+      return;
+    }
+
+    setSessionReasoningEffortById((current) => {
+      if (!selectedReasoningEffort) {
+        if (!(selectedSessionId in current)) {
+          return current;
+        }
+
+        const { [selectedSessionId]: _removed, ...rest } = current;
+        return rest;
+      }
+
+      if (current[selectedSessionId] === selectedReasoningEffort) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [selectedSessionId]: selectedReasoningEffort
+      };
+    });
+  }, [selectedSessionId, selectedReasoningEffort]);
 
   useEffect(() => {
     if (!deletedSessionNotice) {
@@ -3301,8 +4757,6 @@ export function App() {
             ...current,
             [threadId]: [...(current[threadId] ?? []), payload].slice(-100)
           }));
-
-          setInsightDrawerOpen(true);
           return;
         }
 
@@ -3317,8 +4771,6 @@ export function App() {
             ...current,
             [threadId]: [...(current[threadId] ?? []), payload].slice(-100)
           }));
-
-          setInsightDrawerOpen(true);
           return;
         }
 
@@ -3503,6 +4955,20 @@ export function App() {
             return;
           }
           const itemId = deltaPayload.itemId;
+          const now = Date.now();
+
+          setMessageTimingById((current) => {
+            const existing = current[itemId];
+            if (existing?.startedAt) {
+              return current;
+            }
+            return {
+              ...current,
+              [itemId]: {
+                startedAt: now
+              }
+            };
+          });
 
           setMessages((current) => {
             const existingIndex = current.findIndex((message) => message.id === itemId);
@@ -3562,6 +5028,24 @@ export function App() {
 
           if (itemType === "agentMessage" && method === "item/completed") {
             const text = typeof item.text === "string" ? item.text : "";
+            const now = Date.now();
+
+            setMessageTimingById((current) => {
+              const existing = current[itemId];
+              const startedAt = existing?.startedAt ?? now;
+              const completedAt = now;
+              if (existing && existing.startedAt === startedAt && existing.completedAt === completedAt) {
+                return current;
+              }
+              return {
+                ...current,
+                [itemId]: {
+                  startedAt,
+                  completedAt
+                }
+              };
+            });
+
             setMessages((current) => {
               const existingIndex = current.findIndex((message) => message.id === itemId);
               if (existingIndex === -1) {
@@ -3592,6 +5076,36 @@ export function App() {
           if (itemType !== "agentMessage") {
             const described = summarizeToolEvent(item);
             const nextStatus = method === "item/started" ? "streaming" : "complete";
+            const now = Date.now();
+
+            setMessageTimingById((current) => {
+              const existing = current[itemId];
+              if (method === "item/started") {
+                if (existing?.startedAt && existing.completedAt === undefined) {
+                  return current;
+                }
+                return {
+                  ...current,
+                  [itemId]: {
+                    startedAt: existing?.startedAt ?? now
+                  }
+                };
+              }
+
+              const startedAt = existing?.startedAt ?? now;
+              const completedAt = existing?.completedAt ?? now;
+              if (existing && existing.startedAt === startedAt && existing.completedAt === completedAt) {
+                return current;
+              }
+
+              return {
+                ...current,
+                [itemId]: {
+                  startedAt,
+                  completedAt
+                }
+              };
+            });
 
             setMessages((current) => {
               const existingIndex = current.findIndex((message) => message.id === itemId);
@@ -3675,7 +5189,505 @@ export function App() {
     element.scrollTo({
       top: element.scrollHeight
     });
-  }, [visibleMessages, followTranscriptTail, loadingTranscript, selectedSessionId]);
+  }, [visibleTurnGroups, followTranscriptTail, loadingTranscript, selectedSessionId]);
+
+  const renderTurnGroup = (group: TurnMessageGroup) => {
+    const userMessages = group.messages.filter((message) => message.role === "user");
+    const { responseMessages, thoughtMessages, finalAssistantMessage, thinkingActive } = inspectTurnGroupState(group);
+
+    const resolveMessageTiming = (message: ChatMessage): MessageTiming | null => {
+      return messageTimingById[message.id] ?? parseMessageTimingFromDetails(message.details);
+    };
+
+    const thoughtLabel = (() => {
+      if (thinkingActive) {
+        return "Working...";
+      }
+
+      const userStartCandidates = userMessages
+        .map((message) => {
+          const timing = resolveMessageTiming(message);
+          return timing?.startedAt ?? timing?.completedAt ?? null;
+        })
+        .filter((value): value is number => typeof value === "number");
+
+      const allStartCandidates =
+        userStartCandidates.length > 0
+          ? userStartCandidates
+          : group.messages
+              .map((message) => {
+                const timing = resolveMessageTiming(message);
+                return timing?.startedAt ?? timing?.completedAt ?? null;
+              })
+              .filter((value): value is number => typeof value === "number");
+
+      const startAt = allStartCandidates.length > 0 ? Math.min(...allStartCandidates) : null;
+
+      const finalTiming = finalAssistantMessage ? resolveMessageTiming(finalAssistantMessage) : null;
+      const endCandidates: Array<number> = [];
+      if (finalTiming?.completedAt) {
+        endCandidates.push(finalTiming.completedAt);
+      } else if (finalTiming?.startedAt && finalAssistantMessage?.status !== "streaming") {
+        endCandidates.push(finalTiming.startedAt);
+      }
+
+      if (endCandidates.length === 0) {
+        for (const message of thoughtMessages) {
+          const timing = resolveMessageTiming(message);
+          if (timing?.completedAt) {
+            endCandidates.push(timing.completedAt);
+          }
+        }
+      }
+
+      const endAt = endCandidates.length > 0 ? Math.max(...endCandidates) : null;
+      if (startAt !== null && endAt !== null && endAt >= startAt) {
+        return `Worked for ${formatElapsedLabel(endAt - startAt)}`;
+      }
+
+      return "Worked for <1s";
+    })();
+
+    const thoughtRows: Array<ReactNode> = [];
+    const pendingThoughtRows: Array<ReactNode> = [];
+    const fileChangeMessagesById = new Map<string, ChatMessage>();
+    for (const thoughtMessage of thoughtMessages) {
+      if (thoughtMessage.type === "fileChange") {
+        fileChangeMessagesById.set(thoughtMessage.id, thoughtMessage);
+      }
+    }
+    for (const message of thoughtMessages) {
+      if (message.type === "reasoning") {
+        const { summaryLines, contentLines } = parseReasoningLines(message.details, message.content);
+        const mergedLines = [...summaryLines, ...contentLines];
+
+        if (mergedLines.length === 0) {
+          thoughtRows.push(
+            <div key={`reasoning-empty-${message.id}`} className="thought-row-line summary">
+              <span>thinking</span>
+              <span className="thinking-ellipsis" aria-label="thinking">
+                ...
+              </span>
+            </div>
+          );
+          continue;
+        }
+
+        for (const [index, line] of summaryLines.entries()) {
+          thoughtRows.push(
+            <div key={`reasoning-summary-${message.id}-${index}`} className="thought-row-line summary">
+              {line}
+            </div>
+          );
+        }
+
+        for (const [index, line] of contentLines.entries()) {
+          thoughtRows.push(
+            <div key={`reasoning-content-${message.id}-${index}`} className="thought-row-line content">
+              {line}
+            </div>
+          );
+        }
+        continue;
+      }
+
+      const maybeApprovalId = approvalIdFromMessage(message);
+      const pendingApproval = maybeApprovalId ? pendingApprovalsById.get(maybeApprovalId) : undefined;
+      const maybeToolInputId = toolInputRequestIdFromMessage(message);
+      const pendingToolInput = maybeToolInputId ? pendingToolInputsById.get(maybeToolInputId) : undefined;
+
+      if (message.type === "commandExecution") {
+        const { command, aggregatedOutput, exitCode, cwd } = summarizeCommandExecutionMessage(message);
+        const terminalLine = formatTerminalCommandLine({
+          command,
+          cwd,
+          projectRoot: selectedSession?.cwd ?? null
+        });
+        const eventRow = (
+          <div key={`event-${message.id}`} className="thought-row-event inline">
+            <div className="thought-command-output">
+              <p className="thought-command-line">
+                <span className="thought-command-prompt">{terminalLine.promptPath}$</span>{" "}
+                <span className="thought-command-text">{terminalLine.commandText}</span>
+              </p>
+              {aggregatedOutput ? <pre className="thought-command-result">{aggregatedOutput}</pre> : null}
+            </div>
+            {exitCode !== null && exitCode !== 0 ? <p className="thought-row-meta error">Exit code {exitCode}</p> : null}
+          </div>
+        );
+        thoughtRows.push(eventRow);
+        continue;
+      }
+
+      if (message.type === "fileChange") {
+        const pendingFileChangeApproval = pendingFileChangeApprovalsByItemId.get(message.id);
+        if (pendingFileChangeApproval) {
+          // Approval row is the source of truth while file changes are pending.
+          continue;
+        }
+
+        const { status, changeCount, files, diffs } = summarizeFileChangeMessage(message);
+        const fileChangeLabel = formatFileChangeLabel(changeCount);
+        const actionText =
+          status === "streaming"
+            ? `Applying: ${fileChangeLabel}`
+            : status === "completed"
+              ? null
+            : status === "failed"
+                ? `Failed to apply: ${fileChangeLabel}`
+                : null;
+        const fileListPreview =
+          diffs.length === 0 && files.length > 0
+            ? `${files
+                .slice(0, 3)
+                .map((path) => toProjectRelativePath(path, selectedSession?.cwd ?? null))
+                .join(", ")}${files.length > 3 ? ` (+${files.length - 3} more)` : ""}`
+            : null;
+
+        const eventRow = (
+          <div key={`event-${message.id}`} className="thought-row-event inline">
+            {actionText ? <p className="thought-row-text">{actionText}</p> : null}
+            {fileListPreview ? <p className="thought-row-meta">{fileListPreview}</p> : null}
+            {diffs.map((diffEntry, diffIndex) => (
+              <div key={`diff-${message.id}-${diffIndex}`} className="thought-diff-section">
+                <pre className="thought-diff-block">
+                  {diffEntry.path ? (
+                    <span className="thought-diff-line hunk">{toProjectRelativePath(diffEntry.path, selectedSession?.cwd ?? null)}</span>
+                  ) : null}
+                  {diffEntry.lines.map((line, lineIndex) => (
+                    <span key={`diff-line-${message.id}-${diffIndex}-${lineIndex}`} className={`thought-diff-line ${classifyDiffLineTone(line)}`}>
+                      {line.length > 0 ? replaceDisplayHomePath(line, selectedSession?.cwd ?? null) : " "}
+                    </span>
+                  ))}
+                </pre>
+              </div>
+            ))}
+          </div>
+        );
+        thoughtRows.push(eventRow);
+        continue;
+      }
+
+      if (message.type.startsWith("approval.")) {
+        if (!pendingApproval) {
+          // Keep approval rows visible only while action is still pending.
+          continue;
+        }
+
+        const method = extractApprovalMethod(message, pendingApproval);
+        const command = extractApprovalCommand(message, pendingApproval) ?? "(unknown command)";
+        const fileChangeCount = extractApprovalFileChangeCount(message, pendingApproval);
+        const fileChangeLabel = formatFileChangeLabel(fileChangeCount);
+        const decision = extractApprovalDecision(message);
+        const resolutionStatus = extractApprovalStatus(message);
+        const lowerContent = message.content.toLowerCase();
+        const isCommandApproval =
+          method === "item/commandExecution/requestApproval" ||
+          method === "commandExecution/requestApproval" ||
+          lowerContent.includes("command approval required") ||
+          lowerContent.includes("approval required to run:");
+        const isFileChangeApproval =
+          method === "item/fileChange/requestApproval" ||
+          lowerContent.includes("file change approval required") ||
+          lowerContent.includes("approval required to apply:");
+        const pendingFileChangePreview = pendingApproval && isFileChangeApproval ? summarizePendingFileChangeApproval(pendingApproval) : null;
+        const linkedFileChangeMessage =
+          pendingApproval && isFileChangeApproval && pendingApproval.itemId ? fileChangeMessagesById.get(pendingApproval.itemId) ?? null : null;
+        const linkedFileChangePreview = linkedFileChangeMessage ? summarizeFileChangeMessage(linkedFileChangeMessage) : null;
+        const effectiveFileChangePreview = (() => {
+          if (!isFileChangeApproval) {
+            return null;
+          }
+
+          const pendingHasRenderablePreview =
+            pendingFileChangePreview !== null && (pendingFileChangePreview.diffs.length > 0 || pendingFileChangePreview.files.length > 0);
+          if (pendingHasRenderablePreview) {
+            return pendingFileChangePreview;
+          }
+
+          if (linkedFileChangePreview) {
+            return {
+              files: linkedFileChangePreview.files,
+              diffs: linkedFileChangePreview.diffs,
+              entries: linkedFileChangePreview.entries,
+              changeCount: linkedFileChangePreview.changeCount
+            };
+          }
+
+          return pendingFileChangePreview;
+        })();
+
+        if (isCommandApproval || isFileChangeApproval) {
+          const acceptedUpdate =
+            !pendingApproval &&
+            (decision === "accept" ||
+              lowerContent.includes("approved for") ||
+              lowerContent.includes("approved to run") ||
+              lowerContent.includes("approved file changes") ||
+              lowerContent.includes("approved to apply"));
+
+          // Keep approval timeline lean: once accepted, downstream execution/file-change rows own visible outcome.
+          if (acceptedUpdate) {
+            continue;
+          }
+
+          const approvalText = (() => {
+            if (isCommandApproval) {
+              return pendingApproval
+                ? `Approval required to run: ${command}`
+                : commandApprovalResolutionSummary(
+                    {
+                      status: resolutionStatus ?? undefined,
+                      decision: decision ?? undefined
+                    },
+                    command
+                  );
+            }
+
+            return pendingApproval
+              ? effectiveFileChangePreview
+                ? summarizePendingFileChangeApprovalText({
+                    ...effectiveFileChangePreview,
+                    projectRoot: selectedSession?.cwd ?? null
+                  })
+                : `Approval required to apply: ${fileChangeLabel}`
+              : fileChangeApprovalResolutionSummary(
+                  {
+                    status: resolutionStatus ?? undefined,
+                    decision: decision ?? undefined
+                  },
+                  fileChangeLabel
+                );
+          })();
+
+          const eventRow = (
+            <div key={`event-${message.id}`} className="thought-row-event">
+              <p className="thought-row-text">{approvalText}</p>
+              {pendingApproval ? <p className="approval-time">Requested: {formatApprovalDate(pendingApproval.createdAt)}</p> : null}
+              {pendingApproval && isFileChangeApproval && effectiveFileChangePreview ? (
+                effectiveFileChangePreview.diffs.length > 0 ? (
+                  effectiveFileChangePreview.diffs.map((diffEntry, diffIndex) => (
+                    <div key={`approval-diff-${message.id}-${diffIndex}`} className="thought-diff-section">
+                      <pre className="thought-diff-block">
+                        {diffEntry.path && !shouldHidePathHeaderForCreatePreview(effectiveFileChangePreview) ? (
+                          <span className="thought-diff-line hunk">{toProjectRelativePath(diffEntry.path, selectedSession?.cwd ?? null)}</span>
+                        ) : null}
+                        {diffEntry.lines.map((line, lineIndex) => (
+                          <span
+                            key={`approval-diff-line-${message.id}-${diffIndex}-${lineIndex}`}
+                            className={`thought-diff-line ${classifyDiffLineTone(line)}`}
+                          >
+                            {line.length > 0 ? replaceDisplayHomePath(line, selectedSession?.cwd ?? null) : " "}
+                          </span>
+                        ))}
+                      </pre>
+                    </div>
+                  ))
+                ) : effectiveFileChangePreview.files.length > 0 ? (
+                  <p className="thought-row-meta">
+                    {effectiveFileChangePreview.files
+                      .slice(0, 3)
+                      .map((path) => toProjectRelativePath(path, selectedSession?.cwd ?? null))
+                      .join(", ")}
+                    {effectiveFileChangePreview.files.length > 3 ? ` (+${effectiveFileChangePreview.files.length - 3} more)` : ""}
+                  </p>
+                ) : null
+              ) : null}
+              {pendingApproval ? (
+                <div className="approval-actions">
+                  <button type="button" onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "accept", "turn")}>
+                    Approve
+                  </button>
+                  <button type="button" onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "accept", "session")}>
+                    Approve for Session
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "decline", "turn")}
+                  >
+                    Deny
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          );
+          thoughtRows.push(eventRow);
+          if (pendingApproval) {
+            pendingThoughtRows.push(eventRow);
+          }
+          continue;
+        }
+      }
+
+      const title = message.type.startsWith("tool_input.")
+        ? message.type === "tool_input.request"
+          ? "Input Required"
+          : "Input Update"
+        : message.type.startsWith("approval.")
+          ? message.type === "approval.request"
+            ? "Approval Required"
+            : "Approval Update"
+          : message.type;
+      const showEventTitle = message.type !== "agentMessage";
+      const showDetails = Boolean(message.details) && !message.type.startsWith("approval.");
+
+      const eventRow = (
+        <div key={`event-${message.id}`} className="thought-row-event">
+          {showEventTitle ? <p className="thought-row-title">{title}</p> : null}
+          <p className="thought-row-text">{message.content}</p>
+          {pendingApproval ? <p className="approval-time">Requested: {formatApprovalDate(pendingApproval.createdAt)}</p> : null}
+          {pendingToolInput ? <p className="approval-time">Requested: {formatApprovalDate(pendingToolInput.createdAt)}</p> : null}
+          {showDetails ? (
+            <details className="bubble-details">
+              <summary>Details</summary>
+              <pre>{message.details}</pre>
+            </details>
+          ) : null}
+          {pendingApproval ? (
+            <div className="approval-actions">
+              <button type="button" onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "accept", "turn")}>
+                Approve
+              </button>
+              <button type="button" onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "accept", "session")}>
+                Approve for Session
+              </button>
+              <button type="button" className="danger" onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "decline", "turn")}>
+                Deny
+              </button>
+            </div>
+          ) : null}
+          {pendingToolInput ? (
+            <div className="tool-input-form">
+              {pendingToolInput.questions.map((question) => (
+                <label key={question.id}>
+                  <span>{question.header}</span>
+                  <small>{question.question}</small>
+                  <input
+                    type={question.isSecret ? "password" : "text"}
+                    value={toolInputDraftById[pendingToolInput.requestId]?.[question.id] ?? ""}
+                    onChange={(event) =>
+                      setToolInputDraftById((current) => ({
+                        ...current,
+                        [pendingToolInput.requestId]: {
+                          ...(current[pendingToolInput.requestId] ?? {}),
+                          [question.id]: event.target.value
+                        }
+                      }))
+                    }
+                    placeholder={question.options?.[0]?.label ?? "Answer"}
+                  />
+                </label>
+              ))}
+              <div className="approval-actions">
+                <button
+                  type="button"
+                  onClick={() => void submitToolInputDecision(pendingToolInput, "accept")}
+                  disabled={toolInputActionRequestId === pendingToolInput.requestId}
+                >
+                  {toolInputActionRequestId === pendingToolInput.requestId ? "Submitting..." : "Submit"}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void submitToolInputDecision(pendingToolInput, "cancel")}
+                  disabled={toolInputActionRequestId === pendingToolInput.requestId}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={() => void submitToolInputDecision(pendingToolInput, "decline")}
+                  disabled={toolInputActionRequestId === pendingToolInput.requestId}
+                >
+                  Decline
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      );
+      thoughtRows.push(eventRow);
+      if (pendingApproval || pendingToolInput) {
+        pendingThoughtRows.push(eventRow);
+      }
+    }
+
+    const panelState = thoughtPanelStateByTurnId[group.turnId];
+    const thoughtMode = panelState?.mode ?? (pendingThoughtRows.length > 0 && !thinkingActive ? "pending-only" : "full");
+    const thoughtsOpen = panelState?.open ?? (thinkingActive || pendingThoughtRows.length > 0);
+    const showingPendingOnly = thoughtMode === "pending-only" && pendingThoughtRows.length > 0;
+    const displayedThoughtRows = showingPendingOnly ? pendingThoughtRows : thoughtRows;
+    const canShowPriorActivity = showingPendingOnly && thoughtRows.length > pendingThoughtRows.length;
+
+    return (
+      <section key={`turn-${group.turnId}`} className="turn-group">
+        {userMessages.map((message) => (
+          <article key={message.id} className={`bubble ${message.role}`}>
+            <header>
+              <strong>{message.role}</strong>
+              <span>{message.status}</span>
+            </header>
+            <pre>{message.content || "(empty)"}</pre>
+          </article>
+        ))}
+        {responseMessages.length > 0 ? (
+          <article className={`response-card${thinkingActive ? " streaming" : ""}`}>
+            {thoughtMessages.length > 0 ? (
+              <details
+                className="response-thoughts"
+                open={thoughtsOpen}
+              >
+                <summary
+                  onClick={(event) => {
+                    event.preventDefault();
+                    const nextOpen = !thoughtsOpen;
+                    setThoughtPanelStateByTurnId((current) => ({
+                      ...current,
+                      [group.turnId]: {
+                        open: nextOpen,
+                        mode: nextOpen ? "full" : (current[group.turnId]?.mode ?? "full"),
+                        lastPendingSignature: current[group.turnId]?.lastPendingSignature ?? ""
+                      }
+                    }));
+                  }}
+                >
+                  {thoughtLabel}
+                </summary>
+                <div className="response-thought-details">
+                  {canShowPriorActivity ? (
+                    <button
+                      type="button"
+                      className="thought-preview-expand"
+                      onClick={() =>
+                        setThoughtPanelStateByTurnId((current) => ({
+                          ...current,
+                          [group.turnId]: {
+                            open: true,
+                            mode: "full",
+                            lastPendingSignature: current[group.turnId]?.lastPendingSignature ?? ""
+                          }
+                        }))
+                      }
+                    >
+                      Show prior activity
+                    </button>
+                  ) : null}
+                  {displayedThoughtRows}
+                </div>
+              </details>
+            ) : null}
+            {finalAssistantMessage ? (
+              <div className="response-body">
+                <pre>{finalAssistantMessage.content || "(empty)"}</pre>
+              </div>
+            ) : null}
+          </article>
+        ) : null}
+      </section>
+    );
+  };
 
   const renderSessionRow = (session: SessionSummary) => {
     const isSelected = session.sessionId === selectedSessionId;
@@ -3966,21 +5978,18 @@ export function App() {
         <header className="chat-header">
           <h2>{selectedSession ? selectedSession.title : selectedSessionId ? `Session ${selectedSessionId}` : "No active session"}</h2>
           <div className="chat-actions">
-            <label className="model-picker">
-              <span>Model</span>
-              <select
-                value={selectedModelId}
-                onChange={(event) => handleModelSelection(event.target.value)}
-                disabled={loadingModels || models.length === 0}
-              >
-                {models.length === 0 ? <option value="">No models</option> : null}
-                {models.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.label} ({model.provider})
-                  </option>
-                ))}
-              </select>
-            </label>
+            <button
+              ref={modelMenuTriggerRef}
+              type="button"
+              className="model-combo-trigger"
+              onClick={(event) => toggleModelMenu(event.currentTarget)}
+              disabled={loadingModels || models.length === 0}
+              aria-haspopup="menu"
+              aria-expanded={modelMenuOpen}
+            >
+              <span className="model-combo-label">Model</span>
+              <span className="model-combo-value">{selectedModelMenuLabel}</span>
+            </button>
             <span className="state-pill">{runtimeStateLabel}</span>
             <button
               ref={threadMenuTriggerRef}
@@ -4116,155 +6125,9 @@ export function App() {
 
             {loadingTranscript ? <p className="hint">Loading transcript...</p> : null}
 
-            {!loadingTranscript && visibleMessages.length === 0 ? <p className="hint">No entries for this filter yet.</p> : null}
+            {!loadingTranscript && visibleTurnGroups.length === 0 ? <p className="hint">No entries for this filter yet.</p> : null}
 
-            {visibleMessages.map((message, index) => {
-              const category = messageCategory(message);
-              const previous = index > 0 ? visibleMessages[index - 1] : null;
-              const previousCategory = previous ? messageCategory(previous) : null;
-              const showGroupLabel =
-                category !== "chat" && (!previous || previousCategory !== category || previous.turnId !== message.turnId);
-
-              const maybeApprovalId =
-                message.type.startsWith("approval.") && message.id.startsWith("approval-")
-                  ? message.id.slice("approval-".length)
-                  : null;
-              const pendingApproval = maybeApprovalId ? pendingApprovalsById.get(maybeApprovalId) : undefined;
-              const maybeToolInputId =
-                message.type.startsWith("tool_input.") && message.id.startsWith("tool-input-")
-                  ? message.id.slice("tool-input-".length)
-                  : null;
-              const pendingToolInput = maybeToolInputId ? pendingToolInputsById.get(maybeToolInputId) : undefined;
-
-              if (category === "chat") {
-                return (
-                  <article key={message.id} className={`bubble ${message.role}`}>
-                    <header>
-                      <strong>{message.role}</strong>
-                      <span>{message.status}</span>
-                    </header>
-                    <pre>{message.content || "(empty)"}</pre>
-                  </article>
-                );
-              }
-
-              if (category === "approvals") {
-                const title = message.type.startsWith("tool_input.")
-                  ? message.type === "tool_input.request"
-                    ? "Input Required"
-                    : "Input Update"
-                  : message.type === "approval.request"
-                    ? "Approval Required"
-                    : "Approval Update";
-                return (
-                  <div key={message.id}>
-                    {showGroupLabel ? (
-                      <p className="event-group-label">Action required activity for turn {shortTurnId(message.turnId)}</p>
-                    ) : null}
-                    <article className={`event-card approval ${message.status}`}>
-                      <header>
-                        <strong>{title}</strong>
-                        <span className="event-status-chip">{statusLabel(message.status)}</span>
-                      </header>
-                      <p>{message.content}</p>
-                      {pendingApproval ? <p className="approval-time">Requested: {formatApprovalDate(pendingApproval.createdAt)}</p> : null}
-                      {pendingToolInput ? <p className="approval-time">Requested: {formatApprovalDate(pendingToolInput.createdAt)}</p> : null}
-                      {message.details ? (
-                        <details className="bubble-details">
-                          <summary>Details</summary>
-                          <pre>{message.details}</pre>
-                        </details>
-                      ) : null}
-                      {pendingApproval ? (
-                        <div className="approval-actions">
-                          <button type="button" onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "accept", "turn")}>
-                            Approve
-                          </button>
-                          <button type="button" onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "accept", "session")}>
-                            Approve for Session
-                          </button>
-                          <button
-                            type="button"
-                            className="danger"
-                            onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "decline", "turn")}
-                          >
-                            Deny
-                          </button>
-                        </div>
-                      ) : null}
-                      {pendingToolInput ? (
-                        <div className="tool-input-form">
-                          {pendingToolInput.questions.map((question) => (
-                            <label key={question.id}>
-                              <span>{question.header}</span>
-                              <small>{question.question}</small>
-                              <input
-                                type={question.isSecret ? "password" : "text"}
-                                value={toolInputDraftById[pendingToolInput.requestId]?.[question.id] ?? ""}
-                                onChange={(event) =>
-                                  setToolInputDraftById((current) => ({
-                                    ...current,
-                                    [pendingToolInput.requestId]: {
-                                      ...(current[pendingToolInput.requestId] ?? {}),
-                                      [question.id]: event.target.value
-                                    }
-                                  }))
-                                }
-                                placeholder={question.options?.[0]?.label ?? "Answer"}
-                              />
-                            </label>
-                          ))}
-                          <div className="approval-actions">
-                            <button
-                              type="button"
-                              onClick={() => void submitToolInputDecision(pendingToolInput, "accept")}
-                              disabled={toolInputActionRequestId === pendingToolInput.requestId}
-                            >
-                              {toolInputActionRequestId === pendingToolInput.requestId ? "Submitting..." : "Submit"}
-                            </button>
-                            <button
-                              type="button"
-                              className="ghost"
-                              onClick={() => void submitToolInputDecision(pendingToolInput, "cancel")}
-                              disabled={toolInputActionRequestId === pendingToolInput.requestId}
-                            >
-                              Cancel
-                            </button>
-                            <button
-                              type="button"
-                              className="danger"
-                              onClick={() => void submitToolInputDecision(pendingToolInput, "decline")}
-                              disabled={toolInputActionRequestId === pendingToolInput.requestId}
-                            >
-                              Decline
-                            </button>
-                          </div>
-                        </div>
-                      ) : null}
-                    </article>
-                  </div>
-                );
-              }
-
-              return (
-                <div key={message.id}>
-                  {showGroupLabel ? <p className="event-group-label">Tool activity for turn {shortTurnId(message.turnId)}</p> : null}
-                  <article className={`event-card tool ${message.status}`}>
-                    <header>
-                      <strong>{message.type}</strong>
-                      <span className="event-status-chip">{statusLabel(message.status)}</span>
-                    </header>
-                    <p>{message.content}</p>
-                    {message.details ? (
-                      <details className="bubble-details">
-                        <summary>Details</summary>
-                        <pre>{message.details}</pre>
-                      </details>
-                    ) : null}
-                  </article>
-                </div>
-              );
-            })}
+            {visibleTurnGroups.map((group) => renderTurnGroup(group))}
             </div>
 
             {showJumpToBottom ? (
@@ -4569,6 +6432,46 @@ export function App() {
           </div>
         </div>
       ) : null}
+      {modelMenuOpen && modelMenuPosition
+        ? createPortal(
+            <div
+              ref={modelMenuRef}
+              className="model-context-menu"
+              role="menu"
+              aria-label="Select model and reasoning effort"
+              style={{
+                top: `${modelMenuPosition.top}px`,
+                left: `${modelMenuPosition.left}px`
+              }}
+            >
+              {models.map((model) => {
+                const efforts = reasoningEffortsForModel(model);
+                const modelSelected = model.id === selectedModelOption?.id;
+                return (
+                  <div key={model.id} className="model-submenu-group" role="none">
+                    <div className={`model-submenu-trigger${modelSelected ? " selected" : ""}`} role="menuitem" aria-haspopup="menu" tabIndex={0}>
+                      <span>{modelDisplayLabel(model)}</span>
+                    </div>
+                    <div className="model-submenu" role="menu" aria-label={`Reasoning effort for ${model.label}`}>
+                      {efforts.map((effort) => (
+                        <button
+                          key={`${model.id}:${effort}`}
+                          type="button"
+                          role="menuitem"
+                          className={modelSelected && selectedReasoningEffort === effort ? "selected" : ""}
+                          onClick={() => applyModelReasoningSelection(model.id, effort)}
+                        >
+                          {reasoningEffortLabel(effort)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>,
+            document.body
+          )
+        : null}
       {sessionMenuSession && sessionMenuPosition
         ? createPortal(
             <div

@@ -46,6 +46,8 @@ export type TranscriptEntry = {
   type: string;
   content: string;
   details?: string;
+  startedAt?: number;
+  completedAt?: number;
   status: "streaming" | "complete" | "canceled" | "error";
 };
 
@@ -82,6 +84,7 @@ export type PendingToolInput = {
 
 export type ModelEntry = Record<string, unknown>;
 export type McpServerStatusEntry = Record<string, unknown>;
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 type QueryValue = string | number | boolean | null | undefined;
 
@@ -743,7 +746,7 @@ export async function resumeSession(sessionId: string, baseUrl = "/api"): Promis
 
 export async function suggestSessionReply(
   sessionId: string,
-  body: { model?: string; draft?: string } = {},
+  body: { model?: string; effort?: ReasoningEffort; draft?: string } = {},
   baseUrl = "/api"
 ): Promise<{ status: string; sessionId: string; suggestion: string }> {
   return requestJson<{ status: string; sessionId: string; suggestion: string }>(
@@ -762,14 +765,15 @@ export async function sendSessionMessage(
   sessionId: string,
   text: string,
   baseUrl = "/api",
-  model?: string
+  model?: string,
+  effort?: ReasoningEffort
 ): Promise<{ status: string; sessionId: string; turnId: string }> {
   return requestJson<{ status: string; sessionId: string; turnId: string }>(
     baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/messages",
     {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text, model })
+      body: JSON.stringify({ text, model, effort })
     },
     "send message failed",
     [202, 410]
