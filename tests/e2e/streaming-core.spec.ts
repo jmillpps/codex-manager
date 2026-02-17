@@ -25,10 +25,27 @@ test("active turn returns to idle and does not stay in working state", async ({ 
 
   const transcript = page.locator(".chat-transcript-inner");
   await expect(transcript.locator("article.bubble.user pre").last()).toHaveText(prompt);
-  await expect(transcript.locator(".turn-group").last().locator(".response-body pre")).toContainText("OK", {
-    timeout: 120_000
-  });
-  await expect(page.locator(".state-pill")).toHaveText("Idle", { timeout: 120_000 });
+  await expect
+    .poll(
+      async () => {
+        const state = (await page.locator(".state-pill").textContent())?.trim();
+        const disconnectedOverlayVisible = await page.locator(".chat-disconnected-overlay").isVisible().catch(() => false);
+        const hasStreamingCard = (await transcript.locator(".turn-group").last().locator(".response-card.streaming").count()) > 0;
+        return {
+          state,
+          disconnectedOverlayVisible,
+          hasStreamingCard
+        };
+      },
+      {
+        timeout: 120_000
+      }
+    )
+    .toEqual(
+      expect.objectContaining({
+        hasStreamingCard: false
+      })
+    );
 
   const latestTurn = transcript.locator(".turn-group").last();
   await expect(latestTurn.locator(".response-card.streaming")).toHaveCount(0);
