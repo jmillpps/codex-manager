@@ -123,19 +123,15 @@ Use this with:
 
 ### Passing checks
 
-- `pnpm gen`
-- `pnpm test`
 - `pnpm typecheck`
-- `pnpm build`
-- `pnpm smoke:runtime`
-- `pnpm test:e2e:list`
-- `pnpm test:e2e`
 
 ### Current validation limitations
 
 - `pnpm lint` is still placeholder-only in workspace packages; enforceable lint rules are not configured yet.
 - Browser-level Playwright requires Linux shared libraries. Root `pnpm test:e2e*` commands now run through `scripts/run-playwright.mjs`, which bootstraps missing libs into `.data/playwright-libs` when `apt-get download` is available.
 - `pnpm gen` can fail under restricted file-permission environments when writing `apps/api/openapi/openapi.json`; rerun contract generation in a writable environment before release.
+- `pnpm test` can fail under restricted file-permission environments when creating runtime directories under `.data/`.
+- `pnpm build` can fail under restricted file-permission environments when Vite writes temp files under `apps/web/node_modules/.vite-temp`.
 
 ## Known follow-up hardening work
 
