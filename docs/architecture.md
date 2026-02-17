@@ -224,7 +224,7 @@ Project associations are harness-owned metadata, not native app-server thread fi
 
 1. UI calls `POST /api/sessions/:sessionId/project` with `projectId` or `null`
 2. Backend validates the target project (if provided) and verifies the session exists (persisted thread or currently loaded non-materialized thread)
-3. Backend updates persisted metadata (`.data/session-metadata.json`)
+3. Backend updates persisted harness metadata (`.data/session-metadata.json`) and maintains the supplemental transcript ledger (`.data/supplemental-transcript.json`) for non-native runtime audit rows.
 4. Backend broadcasts `session_project_updated` (and related project events when relevant) to all clients
 5. UI removes assigned chats from `Your chats` and renders them only under the corresponding project group
 
@@ -267,11 +267,14 @@ The backend must:
 - Preserve order
 - Not buffer until completion
 - Treat `item/completed` as authoritative
+- Canonicalize transcript reconstruction per turn so synthetic raw-events ids (`item-N`) do not duplicate canonical items after restart/reload
+- Persist locally observed event timestamps for transcript rows when item payloads do not provide explicit timing fields
 
 UI must:
 
 - Append deltas in-order
 - Replace provisional content on completion
+- Treat `turn/completed` and `turn/failed` as terminal turn signals for clearing active-turn UI state
 
 ---
 

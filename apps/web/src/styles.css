@@ -18,6 +18,28 @@
 
 * {
   box-sizing: border-box;
+  scrollbar-color: rgba(112, 124, 146, 0.72) transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+  background: transparent;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-track-piece,
+*::-webkit-scrollbar-corner,
+*::-webkit-scrollbar-button {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: rgba(112, 124, 146, 0.72);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
 }
 
 html,
@@ -1088,17 +1110,40 @@ body {
   background: #f8fafd;
 }
 
-.response-thoughts > summary {
-  list-style: none;
+.response-thought-summary {
+  width: 100%;
+  border: 0;
+  background: transparent;
   cursor: pointer;
+  text-align: left;
   padding: 0.5rem 0.66rem;
+  line-height: 1.5;
+}
+
+.response-thought-summary.reasoning,
+.response-thought-preview.reasoning {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: #334155;
+}
+
+.response-thought-summary.agent,
+.response-thought-preview.agent {
+  font-size: 0.79rem;
+  font-weight: 400;
+  color: #1f2937;
+}
+
+.response-thought-summary.meta,
+.response-thought-preview.meta {
   font-size: 0.79rem;
   font-weight: 600;
   color: #334155;
 }
 
-.response-thoughts > summary::-webkit-details-marker {
-  display: none;
+.response-thought-preview {
+  margin: 0;
+  line-height: 1.5;
 }
 
 .response-thought-details {
@@ -1107,6 +1152,16 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.26rem;
+  position: relative;
+  cursor: pointer;
+}
+
+.response-thought-summary + .response-thought-details {
+  border-top: 1px solid #e5eaf2;
+}
+
+.response-thoughts.open .response-thought-details {
+  border-top: 0;
 }
 
 .thought-preview-expand {

@@ -189,6 +189,12 @@ type SessionMetadataStore = {
   turnTimingBySessionId: Record<string, Record<string, TurnTimingRecord>>;
 };
 
+type SupplementalTranscriptStore = {
+  version: 1;
+  sequence: number;
+  byThreadId: Record<string, Array<SupplementalTranscriptEntry>>;
+};
+
 type DeletedSessionPayload = {
   status: "deleted";
   sessionId: string;
@@ -481,11 +487,17 @@ const pendingToolUserInputs = new Map<string, PendingToolUserInputRecord>();
 const purgedSessionIds = new Set<string>();
 const supplementalTranscriptByThread = new Map<string, Map<string, SupplementalTranscriptEntry>>();
 let supplementalTranscriptSequence = 1;
+let supplementalTranscriptPersistTimer: NodeJS.Timeout | null = null;
+let supplementalTranscriptPersistQueued = false;
+let supplementalTranscriptPersistInFlight: Promise<void> | null = null;
 const sockets = new Set<WebSocketLike>();
 const socketThreadFilter = new Map<WebSocketLike, string | null>();
 const codexHomeAuthFilePath = env.CODEX_HOME ? path.join(env.CODEX_HOME, "auth.json") : null;
 const sessionMetadataPath = path.join(env.DATA_DIR, "session-metadata.json");
+const supplementalTranscriptPath = path.join(env.DATA_DIR, "supplemental-transcript.json");
+const syntheticTranscriptMessageIdPattern = /^item-\d+$/i;
 const sessionMetadata = await loadSessionMetadata();
+await loadSupplementalTranscriptStore();
 const deletedSessionMessage = "This chat was permanently deleted and is no longer available.";
 const capabilitiesByMethod = new Map<string, CapabilityEntry>();
 let capabilitiesLastUpdatedAt: string | null = null;
@@ -641,6 +653,20 @@ function lookupTurnTiming(sessionId: string, turnId: string): TurnTimingRecord |
   return sessionTiming[turnId] ?? null;
 }
 
+function earliestTimestamp(left: number | undefined, right: number | undefined): number | undefined {
+  if (typeof left === "number" && typeof right === "number") {
+    return Math.min(left, right);
+  }
+  return typeof left === "number" ? left : right;
+}
+
+function latestTimestamp(left: number | undefined, right: number | undefined): number | undefined {
+  if (typeof left === "number" && typeof right === "number") {
+    return Math.max(left, right);
+  }
+  return typeof left === "number" ? left : right;
+}
+
 function upsertSupplementalTranscriptEntry(threadId: string, entry: TranscriptEntry): void {
   let entryMap = supplementalTranscriptByThread.get(threadId);
   if (!entryMap) {
@@ -650,10 +676,25 @@ function upsertSupplementalTranscriptEntry(threadId: string, entry: TranscriptEn
 
   const existing = entryMap.get(entry.messageId);
   if (existing) {
+    const mergedStartedAt = earliestTimestamp(existing.entry.startedAt, entry.startedAt);
+    const mergedCompletedAt = latestTimestamp(existing.entry.completedAt, entry.completedAt);
+    const normalizedCompletedAt =
+      typeof mergedCompletedAt === "number" && typeof mergedStartedAt === "number" && mergedCompletedAt < mergedStartedAt
+        ? mergedStartedAt
+        : mergedCompletedAt;
+
+    const mergedEntry: TranscriptEntry = {
+      ...existing.entry,
+      ...entry,
+      ...(typeof mergedStartedAt === "number" ? { startedAt: mergedStartedAt } : {}),
+      ...(typeof normalizedCompletedAt === "number" ? { completedAt: normalizedCompletedAt } : {})
+    };
+
     entryMap.set(entry.messageId, {
       ...existing,
-      entry
+      entry: mergedEntry
     });
+    requestSupplementalTranscriptPersistence();
     return;
   }
 
@@ -673,6 +714,8 @@ function upsertSupplementalTranscriptEntry(threadId: string, entry: TranscriptEn
     }
     supplementalTranscriptByThread.set(threadId, nextMap);
   }
+
+  requestSupplementalTranscriptPersistence();
 }
 
 function listSupplementalTranscriptEntries(threadId: string): Array<SupplementalTranscriptEntry> {
@@ -685,16 +728,243 @@ function listSupplementalTranscriptEntries(threadId: string): Array<Supplemental
 }
 
 function clearSupplementalTranscriptEntries(threadId: string): boolean {
-  return supplementalTranscriptByThread.delete(threadId);
+  const deleted = supplementalTranscriptByThread.delete(threadId);
+  if (deleted) {
+    requestSupplementalTranscriptPersistence();
+  }
+  return deleted;
+}
+
+function normalizeComparableTranscriptText(value: string | undefined): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function isSyntheticTranscriptMessageId(messageId: string): boolean {
+  return syntheticTranscriptMessageIdPattern.test(messageId);
+}
+
+function hasCanonicalTurnMatchForSyntheticEntry(
+  entry: TranscriptEntry,
+  turnEntries: Array<TranscriptEntry>
+): boolean {
+  const canonicalCandidates = turnEntries.filter(
+    (candidate) =>
+      candidate.messageId !== entry.messageId &&
+      !isSyntheticTranscriptMessageId(candidate.messageId) &&
+      candidate.role === entry.role &&
+      candidate.type === entry.type
+  );
+
+  if (canonicalCandidates.length === 0) {
+    return false;
+  }
+
+  // Raw-events fallback often emits synthetic "reasoning" snapshots that overlap
+  // canonical reasoning items from thread/read. Prefer canonical rows whenever present.
+  if (entry.type === "reasoning") {
+    return true;
+  }
+
+  const normalizedContent = normalizeComparableTranscriptText(entry.content);
+  const normalizedDetails = normalizeComparableTranscriptText(entry.details);
+
+  return canonicalCandidates.some((candidate) => {
+    const candidateContent = normalizeComparableTranscriptText(candidate.content);
+    if (normalizedContent.length > 0 && candidateContent === normalizedContent) {
+      return true;
+    }
+
+    if (normalizedDetails.length > 0) {
+      const candidateDetails = normalizeComparableTranscriptText(candidate.details);
+      if (candidateDetails === normalizedDetails) {
+        return true;
+      }
+    }
+
+    return false;
+  });
+}
+
+function dedupeSyntheticTranscriptEntriesByTurn(transcript: Array<TranscriptEntry>): Array<TranscriptEntry> {
+  if (transcript.length === 0) {
+    return transcript;
+  }
+
+  const turnOrder: Array<string> = [];
+  const entriesByTurnId = new Map<string, Array<TranscriptEntry>>();
+  for (const entry of transcript) {
+    if (!entriesByTurnId.has(entry.turnId)) {
+      entriesByTurnId.set(entry.turnId, []);
+      turnOrder.push(entry.turnId);
+    }
+    entriesByTurnId.get(entry.turnId)?.push(entry);
+  }
+
+  const deduped: Array<TranscriptEntry> = [];
+  for (const turnId of turnOrder) {
+    const turnEntries = entriesByTurnId.get(turnId) ?? [];
+    const hasSynthetic = turnEntries.some((entry) => isSyntheticTranscriptMessageId(entry.messageId));
+    const hasCanonical = turnEntries.some((entry) => !isSyntheticTranscriptMessageId(entry.messageId));
+    if (!hasSynthetic || !hasCanonical) {
+      deduped.push(...turnEntries);
+      continue;
+    }
+
+    for (const entry of turnEntries) {
+      if (isSyntheticTranscriptMessageId(entry.messageId) && hasCanonicalTurnMatchForSyntheticEntry(entry, turnEntries)) {
+        continue;
+      }
+      deduped.push(entry);
+    }
+  }
+
+  return deduped;
+}
+
+function extractItemStartedAt(item: CodexThreadItem): number | null {
+  return (
+    coerceEpochMs(item.startedAt) ??
+    coerceEpochMs(item.started_at) ??
+    coerceEpochMs(item.startTime) ??
+    coerceEpochMs(item.start_time)
+  );
+}
+
+function extractItemCompletedAt(item: CodexThreadItem): number | null {
+  return (
+    coerceEpochMs(item.completedAt) ??
+    coerceEpochMs(item.completed_at) ??
+    coerceEpochMs(item.endTime) ??
+    coerceEpochMs(item.end_time)
+  );
 }
 
 function mergeTranscriptWithSupplemental(
   threadId: string,
   transcript: Array<TranscriptEntry>
 ): Array<TranscriptEntry> {
+  const statusPriority = (status: TranscriptEntry["status"]): number => {
+    if (status === "error") {
+      return 3;
+    }
+    if (status === "canceled") {
+      return 2;
+    }
+    if (status === "complete") {
+      return 1;
+    }
+    return 0;
+  };
+
+  const mergeTranscriptEntries = (base: TranscriptEntry, supplemental: TranscriptEntry): TranscriptEntry => {
+    const normalizedTextLength = (value: unknown): number => {
+      if (typeof value !== "string") {
+        return 0;
+      }
+      return value.trim().length;
+    };
+
+    const pickRicherText = (preferred: string | undefined, fallback: string | undefined): string | undefined => {
+      const preferredLength = normalizedTextLength(preferred);
+      const fallbackLength = normalizedTextLength(fallback);
+      if (preferredLength === 0 && fallbackLength === 0) {
+        return undefined;
+      }
+      if (preferredLength === 0) {
+        return fallback;
+      }
+      if (fallbackLength === 0) {
+        return preferred;
+      }
+      return preferredLength >= fallbackLength ? preferred : fallback;
+    };
+
+    const choosePreferredEntry = (): TranscriptEntry => {
+      const basePriority = statusPriority(base.status);
+      const supplementalPriority = statusPriority(supplemental.status);
+      if (basePriority !== supplementalPriority) {
+        return basePriority > supplementalPriority ? base : supplemental;
+      }
+
+      const baseDetailsLength = normalizedTextLength(base.details);
+      const supplementalDetailsLength = normalizedTextLength(supplemental.details);
+      if (baseDetailsLength !== supplementalDetailsLength) {
+        return baseDetailsLength > supplementalDetailsLength ? base : supplemental;
+      }
+
+      const baseContentLength = normalizedTextLength(base.content);
+      const supplementalContentLength = normalizedTextLength(supplemental.content);
+      if (baseContentLength !== supplementalContentLength) {
+        return baseContentLength > supplementalContentLength ? base : supplemental;
+      }
+
+      return base;
+    };
+
+    const startedAt =
+      typeof base.startedAt === "number" && typeof supplemental.startedAt === "number"
+        ? Math.min(base.startedAt, supplemental.startedAt)
+        : typeof base.startedAt === "number"
+          ? base.startedAt
+          : supplemental.startedAt;
+    const completedAt =
+      typeof base.completedAt === "number" && typeof supplemental.completedAt === "number"
+        ? Math.max(base.completedAt, supplemental.completedAt)
+        : typeof base.completedAt === "number"
+          ? base.completedAt
+          : supplemental.completedAt;
+    const mergedStatus =
+      statusPriority(base.status) >= statusPriority(supplemental.status) ? base.status : supplemental.status;
+    const preferred = choosePreferredEntry();
+    const fallback = preferred === base ? supplemental : base;
+    const content = pickRicherText(preferred.content, fallback.content) ?? preferred.content ?? fallback.content ?? "";
+    const details = pickRicherText(preferred.details, fallback.details);
+
+    return {
+      messageId: preferred.messageId,
+      turnId: preferred.turnId,
+      role: preferred.role,
+      type: preferred.type,
+      content,
+      ...(typeof details === "string" ? { details } : {}),
+      status: mergedStatus,
+      ...(typeof startedAt === "number" ? { startedAt } : {}),
+      ...(typeof completedAt === "number" ? { completedAt } : {})
+    };
+  };
+
+  const finalizeTranscriptEntryFromTurnTiming = (entry: TranscriptEntry): TranscriptEntry => {
+    const turnTiming = lookupTurnTiming(threadId, entry.turnId);
+    if (!turnTiming) {
+      return entry;
+    }
+
+    let changed = false;
+    const next: TranscriptEntry = { ...entry };
+    if (typeof next.startedAt !== "number" && typeof turnTiming.startedAt === "number") {
+      next.startedAt = turnTiming.startedAt;
+      changed = true;
+    }
+    if (typeof next.completedAt !== "number" && typeof turnTiming.completedAt === "number") {
+      next.completedAt = turnTiming.completedAt;
+      changed = true;
+    }
+
+    if (next.status === "streaming" && typeof turnTiming.completedAt === "number") {
+      next.status = "complete";
+      changed = true;
+    }
+
+    return changed ? next : entry;
+  };
+
   const supplementalEntries = listSupplementalTranscriptEntries(threadId);
   if (supplementalEntries.length === 0) {
-    return transcript;
+    const finalized = transcript.map((entry) => finalizeTranscriptEntryFromTurnTiming(entry));
+    return dedupeSyntheticTranscriptEntriesByTurn(finalized);
   }
 
   const baseTurnOrder: Array<string> = [];
@@ -728,15 +998,6 @@ function mergeTranscriptWithSupplemental(
     }
 
     const supplementalEntriesForTurn = supplementalTurnEntries.map((entry) => entry.entry);
-    const hasTurnAnchors = supplementalEntriesForTurn.some(
-      (entry) => entry.type === "userMessage" || entry.type === "agentMessage" || entry.type === "reasoning"
-    );
-
-    if (hasTurnAnchors) {
-      merged.push(...supplementalEntriesForTurn);
-      supplementalEntriesByTurnId.delete(turnId);
-      continue;
-    }
 
     let insertionIndex = baseTurnEntries.length;
     for (let index = baseTurnEntries.length - 1; index >= 0; index -= 1) {
@@ -746,26 +1007,28 @@ function mergeTranscriptWithSupplemental(
       }
     }
 
-    const seenMessageIds = new Set<string>();
-    for (const baseEntry of baseTurnEntries.slice(0, insertionIndex)) {
-      merged.push(baseEntry);
-      seenMessageIds.add(baseEntry.messageId);
+    const mergedTurnEntries = [...baseTurnEntries];
+    const indexByMessageId = new Map<string, number>();
+    for (let index = 0; index < mergedTurnEntries.length; index += 1) {
+      indexByMessageId.set(mergedTurnEntries[index].messageId, index);
     }
 
     for (const supplementalEntry of supplementalEntriesForTurn) {
-      if (!seenMessageIds.has(supplementalEntry.messageId)) {
-        merged.push(supplementalEntry);
-        seenMessageIds.add(supplementalEntry.messageId);
+      const existingIndex = indexByMessageId.get(supplementalEntry.messageId);
+      if (typeof existingIndex === "number") {
+        mergedTurnEntries[existingIndex] = mergeTranscriptEntries(mergedTurnEntries[existingIndex], supplementalEntry);
+        continue;
+      }
+
+      const insertAt = Math.min(insertionIndex, mergedTurnEntries.length);
+      mergedTurnEntries.splice(insertAt, 0, supplementalEntry);
+      insertionIndex += 1;
+      for (let index = insertAt; index < mergedTurnEntries.length; index += 1) {
+        indexByMessageId.set(mergedTurnEntries[index].messageId, index);
       }
     }
 
-    for (const baseEntry of baseTurnEntries.slice(insertionIndex)) {
-      if (!seenMessageIds.has(baseEntry.messageId)) {
-        merged.push(baseEntry);
-        seenMessageIds.add(baseEntry.messageId);
-      }
-    }
-
+    merged.push(...mergedTurnEntries);
     supplementalEntriesByTurnId.delete(turnId);
   }
 
@@ -781,7 +1044,217 @@ function mergeTranscriptWithSupplemental(
     }
   }
 
-  return merged;
+  const finalized = merged.map((entry) => finalizeTranscriptEntryFromTurnTiming(entry));
+  return dedupeSyntheticTranscriptEntriesByTurn(finalized);
+}
+
+function normalizeTranscriptEntryFromStore(value: unknown): TranscriptEntry | null {
+  if (!isObjectRecord(value)) {
+    return null;
+  }
+
+  const messageId = typeof value.messageId === "string" ? value.messageId.trim() : "";
+  const turnId = typeof value.turnId === "string" ? value.turnId.trim() : "";
+  const role = value.role;
+  const type = typeof value.type === "string" ? value.type.trim() : "";
+  const content = typeof value.content === "string" ? value.content : "";
+  const status = value.status;
+
+  if (!messageId || !turnId || !type) {
+    return null;
+  }
+
+  if (role !== "user" && role !== "assistant" && role !== "system") {
+    return null;
+  }
+
+  if (status !== "streaming" && status !== "complete" && status !== "canceled" && status !== "error") {
+    return null;
+  }
+
+  const startedAt =
+    coerceEpochMs(value.startedAt) ??
+    coerceEpochMs(value.started_at) ??
+    coerceEpochMs(value.startTime) ??
+    coerceEpochMs(value.start_time);
+  const completedAt =
+    coerceEpochMs(value.completedAt) ??
+    coerceEpochMs(value.completed_at) ??
+    coerceEpochMs(value.endTime) ??
+    coerceEpochMs(value.end_time);
+
+  const normalized: TranscriptEntry = {
+    messageId,
+    turnId,
+    role,
+    type,
+    content,
+    status
+  };
+
+  if (typeof value.details === "string" && value.details.trim().length > 0) {
+    normalized.details = value.details;
+  }
+
+  if (startedAt !== null) {
+    normalized.startedAt = startedAt;
+  } else if (completedAt !== null) {
+    normalized.startedAt = completedAt;
+  }
+
+  if (completedAt !== null && completedAt >= (normalized.startedAt ?? completedAt)) {
+    normalized.completedAt = completedAt;
+  }
+
+  return normalized;
+}
+
+function normalizeSupplementalTranscriptEntryFromStore(value: unknown): SupplementalTranscriptEntry | null {
+  if (!isObjectRecord(value)) {
+    return null;
+  }
+
+  const sequenceValue = value.sequence;
+  const sequence =
+    typeof sequenceValue === "number" && Number.isFinite(sequenceValue) && sequenceValue > 0
+      ? Math.floor(sequenceValue)
+      : null;
+  if (sequence === null) {
+    return null;
+  }
+
+  const entry = normalizeTranscriptEntryFromStore(value.entry);
+  if (!entry) {
+    return null;
+  }
+
+  return {
+    sequence,
+    entry
+  };
+}
+
+async function loadSupplementalTranscriptStore(): Promise<void> {
+  try {
+    const raw = await readFile(supplementalTranscriptPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!isObjectRecord(parsed)) {
+      return;
+    }
+
+    const byThread = isObjectRecord(parsed.byThreadId) ? parsed.byThreadId : null;
+    const next = new Map<string, Map<string, SupplementalTranscriptEntry>>();
+    let maxSequence = 0;
+
+    if (byThread) {
+      for (const [threadId, rawEntries] of Object.entries(byThread)) {
+        if (typeof threadId !== "string" || threadId.trim().length === 0 || !Array.isArray(rawEntries)) {
+          continue;
+        }
+
+        const normalized = rawEntries
+          .map((value) => normalizeSupplementalTranscriptEntryFromStore(value))
+          .filter((value): value is SupplementalTranscriptEntry => value !== null)
+          .sort((left, right) => left.sequence - right.sequence)
+          .slice(-5000);
+
+        if (normalized.length === 0) {
+          continue;
+        }
+
+        const entryMap = new Map<string, SupplementalTranscriptEntry>();
+        for (const entry of normalized) {
+          const existing = entryMap.get(entry.entry.messageId);
+          if (!existing || existing.sequence <= entry.sequence) {
+            entryMap.set(entry.entry.messageId, entry);
+          }
+          maxSequence = Math.max(maxSequence, entry.sequence);
+        }
+
+        if (entryMap.size > 0) {
+          next.set(threadId, entryMap);
+        }
+      }
+    }
+
+    supplementalTranscriptByThread.clear();
+    for (const [threadId, entryMap] of next.entries()) {
+      supplementalTranscriptByThread.set(threadId, entryMap);
+    }
+
+    const parsedSequence =
+      typeof parsed.sequence === "number" && Number.isFinite(parsed.sequence) && parsed.sequence > 0
+        ? Math.floor(parsed.sequence)
+        : 1;
+    supplementalTranscriptSequence = Math.max(parsedSequence, maxSequence + 1, 1);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      app.log.warn({ error }, "failed to load supplemental transcript store");
+    }
+  }
+}
+
+function scheduleSupplementalTranscriptPersistence(delayMs: number): void {
+  if (supplementalTranscriptPersistTimer !== null) {
+    return;
+  }
+
+  supplementalTranscriptPersistTimer = setTimeout(() => {
+    supplementalTranscriptPersistTimer = null;
+    void flushSupplementalTranscriptPersistence();
+  }, delayMs);
+}
+
+function requestSupplementalTranscriptPersistence(): void {
+  supplementalTranscriptPersistQueued = true;
+  void flushSupplementalTranscriptPersistence();
+}
+
+async function persistSupplementalTranscriptStore(): Promise<void> {
+  const byThreadId: Record<string, Array<SupplementalTranscriptEntry>> = {};
+  for (const [threadId, entryMap] of supplementalTranscriptByThread.entries()) {
+    const entries = Array.from(entryMap.values()).sort((left, right) => left.sequence - right.sequence);
+    if (entries.length === 0) {
+      continue;
+    }
+    byThreadId[threadId] = entries;
+  }
+
+  const payload: SupplementalTranscriptStore = {
+    version: 1,
+    sequence: supplementalTranscriptSequence,
+    byThreadId
+  };
+
+  await writeFile(supplementalTranscriptPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+async function flushSupplementalTranscriptPersistence(): Promise<void> {
+  if (supplementalTranscriptPersistInFlight) {
+    await supplementalTranscriptPersistInFlight;
+    return;
+  }
+
+  supplementalTranscriptPersistInFlight = (async () => {
+    while (supplementalTranscriptPersistQueued) {
+      supplementalTranscriptPersistQueued = false;
+      try {
+        await persistSupplementalTranscriptStore();
+      } catch (error) {
+        app.log.warn({ error }, "failed to persist supplemental transcript store");
+        supplementalTranscriptPersistQueued = true;
+        scheduleSupplementalTranscriptPersistence(1000);
+        break;
+      }
+    }
+  })();
+
+  try {
+    await supplementalTranscriptPersistInFlight;
+  } finally {
+    supplementalTranscriptPersistInFlight = null;
+  }
 }
 
 async function loadSessionMetadata(): Promise<SessionMetadataStore> {
@@ -1944,6 +2417,7 @@ function createPendingToolUserInput(serverRequest: JsonRpcServerRequest): Pendin
 }
 
 function approvalToTranscriptEntry(approval: PendingApprovalRecord): TranscriptEntry {
+  const startedAt = coerceEpochMs(approval.createdAt) ?? Date.now();
   return {
     messageId: `approval-${approval.approvalId}`,
     turnId: approval.turnId ?? "approval",
@@ -1955,6 +2429,7 @@ function approvalToTranscriptEntry(approval: PendingApprovalRecord): TranscriptE
       createdAt: approval.createdAt,
       ...approval.details
     }),
+    startedAt,
     status: "complete"
   };
 }
@@ -1965,6 +2440,8 @@ function approvalResolutionToTranscriptEntry(
 ): TranscriptEntry {
   const decisionText = typeof payload.decision === "string" ? ` (${payload.decision})` : "";
   const statusText = typeof payload.status === "string" ? payload.status : "resolved";
+  const completedAt = Date.now();
+  const startedAt = coerceEpochMs(approval.createdAt) ?? completedAt;
   return {
     messageId: `approval-${approval.approvalId}`,
     turnId: approval.turnId ?? "approval",
@@ -1975,11 +2452,14 @@ function approvalResolutionToTranscriptEntry(
       approvalId: approval.approvalId,
       ...payload
     }),
+    startedAt,
+    completedAt,
     status: "complete"
   };
 }
 
 function toolInputToTranscriptEntry(request: PendingToolUserInputRecord): TranscriptEntry {
+  const startedAt = coerceEpochMs(request.createdAt) ?? Date.now();
   return {
     messageId: `tool-input-${request.requestId}`,
     turnId: request.turnId ?? "tool-input",
@@ -1992,6 +2472,7 @@ function toolInputToTranscriptEntry(request: PendingToolUserInputRecord): Transc
       questions: request.questions,
       ...request.details
     }),
+    startedAt,
     status: "complete"
   };
 }
@@ -2002,6 +2483,8 @@ function toolInputResolutionToTranscriptEntry(
 ): TranscriptEntry {
   const decisionText = typeof payload.decision === "string" ? ` (${payload.decision})` : "";
   const statusText = typeof payload.status === "string" ? payload.status : "resolved";
+  const completedAt = Date.now();
+  const startedAt = coerceEpochMs(request.createdAt) ?? completedAt;
   return {
     messageId: `tool-input-${request.requestId}`,
     turnId: request.turnId ?? "tool-input",
@@ -2012,6 +2495,8 @@ function toolInputResolutionToTranscriptEntry(
       requestId: request.requestId,
       ...payload
     }),
+    startedAt,
+    completedAt,
     status: "complete"
   };
 }
@@ -2908,8 +3393,20 @@ supervisor.on("notification", (notification: JsonRpcNotification) => {
   ) {
     const item = notification.params.item as CodexThreadItem;
     const turnId = extractTurnId(notification.params) ?? activeTurnByThread.get(threadId) ?? "turn";
+    const observedAt = Date.now();
+    const itemStartedAt = extractItemStartedAt(item);
+    const itemCompletedAt = extractItemCompletedAt(item);
     const transcriptEntry = itemToTranscriptEntry(turnId, item);
-    transcriptEntry.status = notification.method === "item/started" ? "streaming" : "complete";
+    if (notification.method === "item/started") {
+      transcriptEntry.status = "streaming";
+      transcriptEntry.startedAt = itemStartedAt ?? observedAt;
+    } else {
+      transcriptEntry.status = "complete";
+      if (itemStartedAt !== null) {
+        transcriptEntry.startedAt = itemStartedAt;
+      }
+      transcriptEntry.completedAt = itemCompletedAt ?? observedAt;
+    }
     upsertSupplementalTranscriptEntry(threadId, transcriptEntry);
   }
 
@@ -4452,6 +4949,8 @@ app.post("/api/sessions/:sessionId/suggested-reply", async (request, reply) => {
     transcript = [];
   }
 
+  transcript = mergeTranscriptWithSupplemental(params.sessionId, transcript);
+
   const contextEntries = transcript
     .filter((entry) => (entry.role === "user" || entry.role === "assistant") && entry.content.trim().length > 0)
     .slice(-12);
@@ -4764,6 +5263,12 @@ app.post("/api/approvals/:approvalId/decision", async (request, reply) => {
 });
 
 app.addHook("onClose", async () => {
+  if (supplementalTranscriptPersistTimer !== null) {
+    clearTimeout(supplementalTranscriptPersistTimer);
+    supplementalTranscriptPersistTimer = null;
+  }
+  await flushSupplementalTranscriptPersistence();
+
   for (const socket of sockets) {
     try {
       socket.close();

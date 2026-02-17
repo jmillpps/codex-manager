@@ -10,6 +10,8 @@ Expected structure:
 
 ```txt
 .data/
+  session-metadata.json
+  supplemental-transcript.json
   logs/
     codex.log
 ```

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -13,6 +13,7 @@ const apiBase = `http://${host}:${port}/api`;
 const runtimeId = `api-contract-${Date.now()}`;
 const dataDir = path.join(root, ".data", runtimeId);
 const codexHome = path.join(dataDir, "codex-home");
+const supplementalTranscriptPath = path.join(dataDir, "supplemental-transcript.json");
 
 function makeJsonResponse(status, body) {
   return { status, ok: status >= 200 && status < 300, body };
@@ -96,10 +97,8 @@ function runNodeScript(scriptPath, env = {}) {
   });
 }
 
-async function main() {
-  await mkdir(codexHome, { recursive: true });
-
-  const apiProcess = spawn("pnpm", ["--filter", "@repo/api", "exec", "tsx", "src/index.ts"], {
+function startApiProcess() {
+  return spawn("pnpm", ["--filter", "@repo/api", "exec", "tsx", "src/index.ts"], {
     cwd: root,
     env: {
       ...process.env,
@@ -111,6 +110,66 @@ async function main() {
     },
     stdio: "inherit"
   });
+}
+
+async function stopApiProcess(processHandle) {
+  if (!processHandle) {
+    return;
+  }
+
+  if (!processHandle.killed) {
+    processHandle.kill("SIGTERM");
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+
+  if (processHandle.exitCode === null && !processHandle.killed) {
+    processHandle.kill("SIGKILL");
+  }
+}
+
+async function appendSyntheticSupplementalEntries(threadId, entries) {
+  let parsed;
+  try {
+    const raw = await readFile(supplementalTranscriptPath, "utf8");
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = null;
+  }
+
+  const normalized =
+    parsed &&
+    typeof parsed === "object" &&
+    !Array.isArray(parsed) &&
+    parsed.byThreadId &&
+    typeof parsed.byThreadId === "object" &&
+    !Array.isArray(parsed.byThreadId)
+      ? parsed
+      : { version: 1, sequence: 1, byThreadId: {} };
+
+  const currentSequence = Number.isFinite(normalized.sequence) && normalized.sequence > 0 ? Math.floor(normalized.sequence) : 1;
+  let nextSequence = currentSequence;
+  const existing = Array.isArray(normalized.byThreadId[threadId]) ? normalized.byThreadId[threadId] : [];
+
+  const appended = entries.map((entry) => {
+    const sequence = nextSequence;
+    nextSequence += 1;
+    return {
+      sequence,
+      entry
+    };
+  });
+
+  normalized.byThreadId[threadId] = [...existing, ...appended];
+  normalized.sequence = nextSequence;
+  normalized.version = 1;
+
+  await writeFile(supplementalTranscriptPath, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+}
+
+async function main() {
+  await mkdir(codexHome, { recursive: true });
+  let apiProcess = startApiProcess();
 
   let cleaned = false;
 
@@ -120,15 +179,7 @@ async function main() {
     }
     cleaned = true;
 
-    if (!apiProcess.killed) {
-      apiProcess.kill("SIGTERM");
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-
-    if (apiProcess.exitCode === null && !apiProcess.killed) {
-      apiProcess.kill("SIGKILL");
-    }
+    await stopApiProcess(apiProcess);
 
     await rm(dataDir, { recursive: true, force: true });
   };
@@ -197,6 +248,68 @@ async function main() {
     } else {
       assert.equal(suggestedReply.body?.status, "fallback");
     }
+
+    // Risk closure: synthetic transcript dedupe should drop synthetic entries that duplicate canonical
+    // same-turn rows while preserving distinct synthetic supplemental entries.
+    const detailBeforeRestart = await request(`/sessions/${encodeURIComponent(sessionId)}`);
+    assert.equal(detailBeforeRestart.status, 200);
+    const transcriptBeforeRestart = Array.isArray(detailBeforeRestart.body?.transcript) ? detailBeforeRestart.body.transcript : [];
+    const canonicalEntry = transcriptBeforeRestart.find((entry) => {
+      const messageId = typeof entry?.messageId === "string" ? entry.messageId : "";
+      const isSynthetic = /^item-\d+$/i.test(messageId);
+      const hasText = typeof entry?.content === "string" && entry.content.trim().length > 0;
+      const hasTurnId = typeof entry?.turnId === "string" && entry.turnId.trim().length > 0;
+      return !isSynthetic && hasText && hasTurnId;
+    });
+    assert.ok(canonicalEntry, "expected at least one canonical transcript entry before dedupe test");
+
+    const syntheticSeed = Date.now();
+    const duplicateSyntheticMessageId = `item-${syntheticSeed + 1000}`;
+    const distinctSyntheticMessageId = `item-${syntheticSeed + 1001}`;
+    const baseStartedAt =
+      Number.isFinite(canonicalEntry.startedAt) && canonicalEntry.startedAt > 0
+        ? canonicalEntry.startedAt
+        : Date.now();
+    await appendSyntheticSupplementalEntries(sessionId, [
+      {
+        messageId: duplicateSyntheticMessageId,
+        turnId: canonicalEntry.turnId,
+        role: canonicalEntry.role,
+        type: canonicalEntry.type,
+        content: canonicalEntry.content,
+        status: "complete",
+        startedAt: baseStartedAt,
+        completedAt: baseStartedAt + 1
+      },
+      {
+        messageId: distinctSyntheticMessageId,
+        turnId: canonicalEntry.turnId,
+        role: canonicalEntry.role,
+        type: canonicalEntry.type,
+        content: `[synthetic-distinct] ${canonicalEntry.content}`,
+        status: "complete",
+        startedAt: baseStartedAt,
+        completedAt: baseStartedAt + 2
+      }
+    ]);
+
+    await stopApiProcess(apiProcess);
+    apiProcess = startApiProcess();
+    await waitForHealth();
+
+    const detailAfterRestart = await request(`/sessions/${encodeURIComponent(sessionId)}`);
+    assert.equal(detailAfterRestart.status, 200);
+    const transcriptAfterRestart = Array.isArray(detailAfterRestart.body?.transcript) ? detailAfterRestart.body.transcript : [];
+    assert.equal(
+      transcriptAfterRestart.some((entry) => entry?.messageId === duplicateSyntheticMessageId),
+      false,
+      "synthetic duplicate entry should be removed when canonical same-turn match exists"
+    );
+    assert.equal(
+      transcriptAfterRestart.some((entry) => entry?.messageId === distinctSyntheticMessageId),
+      true,
+      "distinct synthetic entry should remain in transcript"
+    );
 
     const suggestedReplyInvalidEffort = await request(`/sessions/${encodeURIComponent(sessionId)}/suggested-reply`, {
       method: "POST",

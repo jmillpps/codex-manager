@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode
+} from "react";
 import { createPortal } from "react-dom";
 
 type SessionSummary = {
@@ -1856,9 +1864,7 @@ export function App() {
     })();
     const finalAssistantMessage = finalAssistantIndex >= 0 ? responseMessages[finalAssistantIndex] : null;
     const thoughtMessages = responseMessages.filter((_message, index) => index !== finalAssistantIndex);
-    const thinkingActive =
-      thoughtMessages.some((message) => message.status === "streaming") ||
-      finalAssistantMessage?.status === "streaming";
+    const thinkingActive = activeTurnId === group.turnId;
     const pendingIds = new Set<string>();
     for (const message of thoughtMessages) {
       const approvalId = approvalIdFromMessage(message);
@@ -1934,7 +1940,7 @@ export function App() {
 
       return changed ? next : current;
     });
-  }, [visibleTurnGroups, pendingApprovalsById, pendingToolInputsById]);
+  }, [visibleTurnGroups, pendingApprovalsById, pendingToolInputsById, activeTurnId]);
 
   const upsertMessage = (nextMessage: ChatMessage): void => {
     setMessages((current) => {
@@ -4872,7 +4878,7 @@ export function App() {
           return;
         }
 
-        if (method === "turn/completed") {
+        if (method === "turn/completed" || method === "turn/failed") {
           setStreaming(false);
           setSteerDraft("");
 
@@ -4886,9 +4892,13 @@ export function App() {
                 additionalDetails?: string | null;
               } | null;
             };
+            error?: {
+              message?: string;
+              additionalDetails?: string | null;
+            } | null;
           };
 
-          const status = completedPayload.turn?.status;
+          const status = completedPayload.turn?.status ?? (method === "turn/failed" ? "failed" : undefined);
           if (typeof completedPayload.threadId === "string") {
             markSendActivityObserved(
               completedPayload.threadId,
@@ -4908,6 +4918,8 @@ export function App() {
             const errorMessage =
               completedPayload.turn?.error?.message ??
               completedPayload.turn?.error?.additionalDetails ??
+              completedPayload.error?.message ??
+              completedPayload.error?.additionalDetails ??
               "Turn failed";
             const normalized = normalizeRuntimeErrorMessage(errorMessage);
             setError(normalized);
@@ -4953,6 +4965,21 @@ export function App() {
 
           if (typeof deltaPayload.itemId !== "string") {
             return;
+          }
+          const deltaThreadId = envelope.threadId;
+          const deltaTurnId = deltaPayload.turnId;
+          if (typeof deltaThreadId === "string" && typeof deltaTurnId === "string") {
+            setActiveTurnIdBySession((current) => {
+              if (current[deltaThreadId] === deltaTurnId) {
+                return current;
+              }
+
+              return {
+                ...current,
+                [deltaThreadId]: deltaTurnId
+              };
+            });
+            setStreaming(true);
           }
           const itemId = deltaPayload.itemId;
           const now = Date.now();
@@ -5016,6 +5043,21 @@ export function App() {
           const itemId = item.id as string;
           const itemType = typeof item.type === "string" ? item.type : "event";
           const turnId = typeof itemPayload.turnId === "string" ? itemPayload.turnId : "turn";
+          const itemThreadId = envelope.threadId;
+          const itemTurnId = itemPayload.turnId;
+          if (method === "item/started" && typeof itemThreadId === "string" && typeof itemTurnId === "string") {
+            setActiveTurnIdBySession((current) => {
+              if (current[itemThreadId] === itemTurnId) {
+                return current;
+              }
+
+              return {
+                ...current,
+                [itemThreadId]: itemTurnId
+              };
+            });
+            setStreaming(true);
+          }
 
           if (itemType === "userMessage") {
             return;
@@ -5199,9 +5241,37 @@ export function App() {
       return messageTimingById[message.id] ?? parseMessageTimingFromDetails(message.details);
     };
 
-    const thoughtLabel = (() => {
+    const thoughtHeader = (() => {
       if (thinkingActive) {
-        return "Working...";
+        for (let index = thoughtMessages.length - 1; index >= 0; index -= 1) {
+          const message = thoughtMessages[index];
+          if (message.type === "agentMessage") {
+            const trimmed = message.content.trim();
+            if (trimmed.length > 0) {
+              return {
+                text: trimmed,
+                tone: "agent" as const
+              };
+            }
+            continue;
+          }
+
+          if (message.type === "reasoning") {
+            const { summaryLines, contentLines } = parseReasoningLines(message.details, message.content);
+            const previewLines = [...summaryLines, ...contentLines].map((line) => line.trim()).filter((line) => line.length > 0);
+            if (previewLines.length > 0) {
+              return {
+                text: previewLines.join(" "),
+                tone: "reasoning" as const
+              };
+            }
+          }
+        }
+
+        return {
+          text: "Working...",
+          tone: "meta" as const
+        };
       }
 
       const userStartCandidates = userMessages
@@ -5242,28 +5312,83 @@ export function App() {
 
       const endAt = endCandidates.length > 0 ? Math.max(...endCandidates) : null;
       if (startAt !== null && endAt !== null && endAt >= startAt) {
-        return `Worked for ${formatElapsedLabel(endAt - startAt)}`;
+        return {
+          text: `Worked for ${formatElapsedLabel(endAt - startAt)}`,
+          tone: "meta" as const
+        };
       }
 
-      return "Worked for <1s";
+      return {
+        text: "Worked for <1s",
+        tone: "meta" as const
+      };
     })();
 
     const thoughtRows: Array<ReactNode> = [];
     const pendingThoughtRows: Array<ReactNode> = [];
+    const queuedApprovalRows: Array<{ row: ReactNode; requestedAt: number; sequence: number }> = [];
+    const queuedPendingApprovalRows: Array<{ row: ReactNode; requestedAt: number; sequence: number }> = [];
+    let approvalSequence = 0;
+    const finalAssistantText = finalAssistantMessage?.content.trim() ?? "";
+    const finalAssistantHasContent = finalAssistantText.length > 0;
+    const finalAssistantSettled = Boolean(finalAssistantMessage && finalAssistantMessage.status !== "streaming");
+    const approvalRequestedAt = (approval?: PendingApproval): number => {
+      if (!approval) {
+        return Number.MAX_SAFE_INTEGER;
+      }
+
+      const parsed = Date.parse(approval.createdAt);
+      return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
+    };
+    const reasoningLinesByMessageId = new Map<string, { summaryLines: Array<string>; contentLines: Array<string> }>();
     const fileChangeMessagesById = new Map<string, ChatMessage>();
     for (const thoughtMessage of thoughtMessages) {
+      if (thoughtMessage.type === "reasoning") {
+        reasoningLinesByMessageId.set(
+          thoughtMessage.id,
+          parseReasoningLines(thoughtMessage.details, thoughtMessage.content)
+        );
+      }
       if (thoughtMessage.type === "fileChange") {
         fileChangeMessagesById.set(thoughtMessage.id, thoughtMessage);
       }
     }
-    for (const message of thoughtMessages) {
+    const hasMeaningfulFutureEvent = new Array<boolean>(thoughtMessages.length).fill(false);
+    let seenMeaningfulEvent = false;
+    for (let index = thoughtMessages.length - 1; index >= 0; index -= 1) {
+      hasMeaningfulFutureEvent[index] = seenMeaningfulEvent;
+      const message = thoughtMessages[index];
+      const isReasoning = message.type === "reasoning";
+      const reasoningLines = isReasoning ? reasoningLinesByMessageId.get(message.id) : undefined;
+      const reasoningLineCount = reasoningLines ? reasoningLines.summaryLines.length + reasoningLines.contentLines.length : 0;
+      const isMeaningfulEvent = !isReasoning || reasoningLineCount > 0;
+      if (isMeaningfulEvent) {
+        seenMeaningfulEvent = true;
+      }
+    }
+    for (const [messageIndex, message] of thoughtMessages.entries()) {
       if (message.type === "reasoning") {
-        const { summaryLines, contentLines } = parseReasoningLines(message.details, message.content);
+        const { summaryLines, contentLines } =
+          reasoningLinesByMessageId.get(message.id) ?? parseReasoningLines(message.details, message.content);
         const mergedLines = [...summaryLines, ...contentLines];
 
         if (mergedLines.length === 0) {
+          const reasoningTiming = resolveMessageTiming(message);
+          const hasReasoningCompletedTimestamp = Boolean(reasoningTiming?.completedAt);
+          const hasLaterMeaningfulEvent = hasMeaningfulFutureEvent[messageIndex] === true;
+          const shouldHideEmptyReasoning =
+            !thinkingActive ||
+            message.status !== "streaming" ||
+            hasReasoningCompletedTimestamp ||
+            hasLaterMeaningfulEvent ||
+            finalAssistantSettled ||
+            finalAssistantHasContent;
+          if (shouldHideEmptyReasoning) {
+            continue;
+          }
+
           thoughtRows.push(
-            <div key={`reasoning-empty-${message.id}`} className="thought-row-line summary">
+            <div key={`reasoning-empty-${message.id}`} className="thought-row-line summary" data-thought-collapse="true">
               <span>thinking</span>
               <span className="thinking-ellipsis" aria-label="thinking">
                 ...
@@ -5275,7 +5400,7 @@ export function App() {
 
         for (const [index, line] of summaryLines.entries()) {
           thoughtRows.push(
-            <div key={`reasoning-summary-${message.id}-${index}`} className="thought-row-line summary">
+            <div key={`reasoning-summary-${message.id}-${index}`} className="thought-row-line summary" data-thought-collapse="true">
               {line}
             </div>
           );
@@ -5283,7 +5408,7 @@ export function App() {
 
         for (const [index, line] of contentLines.entries()) {
           thoughtRows.push(
-            <div key={`reasoning-content-${message.id}-${index}`} className="thought-row-line content">
+            <div key={`reasoning-content-${message.id}-${index}`} className="thought-row-line content" data-thought-collapse="true">
               {line}
             </div>
           );
@@ -5304,7 +5429,7 @@ export function App() {
           projectRoot: selectedSession?.cwd ?? null
         });
         const eventRow = (
-          <div key={`event-${message.id}`} className="thought-row-event inline">
+          <div key={`event-${message.id}`} className="thought-row-event inline" data-thought-no-collapse="true">
             <div className="thought-command-output">
               <p className="thought-command-line">
                 <span className="thought-command-prompt">{terminalLine.promptPath}$</span>{" "}
@@ -5345,7 +5470,7 @@ export function App() {
             : null;
 
         const eventRow = (
-          <div key={`event-${message.id}`} className="thought-row-event inline">
+          <div key={`event-${message.id}`} className="thought-row-event inline" data-thought-no-collapse="true">
             {actionText ? <p className="thought-row-text">{actionText}</p> : null}
             {fileListPreview ? <p className="thought-row-meta">{fileListPreview}</p> : null}
             {diffs.map((diffEntry, diffIndex) => (
@@ -5461,7 +5586,7 @@ export function App() {
           })();
 
           const eventRow = (
-            <div key={`event-${message.id}`} className="thought-row-event">
+            <div key={`event-${message.id}`} className="thought-row-event" data-thought-no-collapse="true">
               <p className="thought-row-text">{approvalText}</p>
               {pendingApproval ? <p className="approval-time">Requested: {formatApprovalDate(pendingApproval.createdAt)}</p> : null}
               {pendingApproval && isFileChangeApproval && effectiveFileChangePreview ? (
@@ -5512,9 +5637,15 @@ export function App() {
               ) : null}
             </div>
           );
-          thoughtRows.push(eventRow);
+          const queuedApprovalRow = {
+            row: eventRow,
+            requestedAt: approvalRequestedAt(pendingApproval),
+            sequence: approvalSequence
+          };
+          approvalSequence += 1;
+          queuedApprovalRows.push(queuedApprovalRow);
           if (pendingApproval) {
-            pendingThoughtRows.push(eventRow);
+            queuedPendingApprovalRows.push(queuedApprovalRow);
           }
           continue;
         }
@@ -5533,7 +5664,7 @@ export function App() {
       const showDetails = Boolean(message.details) && !message.type.startsWith("approval.");
 
       const eventRow = (
-        <div key={`event-${message.id}`} className="thought-row-event">
+        <div key={`event-${message.id}`} className="thought-row-event" data-thought-no-collapse="true">
           {showEventTitle ? <p className="thought-row-title">{title}</p> : null}
           <p className="thought-row-text">{message.content}</p>
           {pendingApproval ? <p className="approval-time">Requested: {formatApprovalDate(pendingApproval.createdAt)}</p> : null}
@@ -5608,11 +5739,34 @@ export function App() {
           ) : null}
         </div>
       );
-      thoughtRows.push(eventRow);
-      if (pendingApproval || pendingToolInput) {
-        pendingThoughtRows.push(eventRow);
+      if (message.type.startsWith("approval.")) {
+        const queuedApprovalRow = {
+          row: eventRow,
+          requestedAt: approvalRequestedAt(pendingApproval),
+          sequence: approvalSequence
+        };
+        approvalSequence += 1;
+        queuedApprovalRows.push(queuedApprovalRow);
+        if (pendingApproval) {
+          queuedPendingApprovalRows.push(queuedApprovalRow);
+        }
+      } else {
+        thoughtRows.push(eventRow);
+        if (pendingApproval || pendingToolInput) {
+          pendingThoughtRows.push(eventRow);
+        }
       }
     }
+
+    const sortedApprovalRows = queuedApprovalRows
+      .sort((left, right) => left.requestedAt - right.requestedAt || left.sequence - right.sequence)
+      .map((entry) => entry.row);
+    thoughtRows.push(...sortedApprovalRows);
+
+    const sortedPendingApprovalRows = queuedPendingApprovalRows
+      .sort((left, right) => left.requestedAt - right.requestedAt || left.sequence - right.sequence)
+      .map((entry) => entry.row);
+    pendingThoughtRows.push(...sortedPendingApprovalRows);
 
     const panelState = thoughtPanelStateByTurnId[group.turnId];
     const thoughtMode = panelState?.mode ?? (pendingThoughtRows.length > 0 && !thinkingActive ? "pending-only" : "full");
@@ -5620,63 +5774,93 @@ export function App() {
     const showingPendingOnly = thoughtMode === "pending-only" && pendingThoughtRows.length > 0;
     const displayedThoughtRows = showingPendingOnly ? pendingThoughtRows : thoughtRows;
     const canShowPriorActivity = showingPendingOnly && thoughtRows.length > pendingThoughtRows.length;
+    const collapseThoughtPanel = (): void => {
+      setThoughtPanelStateByTurnId((current) => ({
+        ...current,
+        [group.turnId]: {
+          open: false,
+          mode: current[group.turnId]?.mode ?? "full",
+          lastPendingSignature: current[group.turnId]?.lastPendingSignature ?? ""
+        }
+      }));
+    };
+    const handleThoughtDetailsClick = (event: ReactMouseEvent<HTMLDivElement>): void => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) {
+        return;
+      }
+
+      if (target.closest("button, input, textarea, select, a, summary, details, [role='button']")) {
+        return;
+      }
+
+      if (target.closest("[data-thought-no-collapse='true']")) {
+        return;
+      }
+
+      if (target === event.currentTarget || target.closest("[data-thought-collapse='true']")) {
+        collapseThoughtPanel();
+      }
+    };
 
     return (
       <section key={`turn-${group.turnId}`} className="turn-group">
         {userMessages.map((message) => (
           <article key={message.id} className={`bubble ${message.role}`}>
-            <header>
-              <strong>{message.role}</strong>
-              <span>{message.status}</span>
-            </header>
             <pre>{message.content || "(empty)"}</pre>
           </article>
         ))}
         {responseMessages.length > 0 ? (
           <article className={`response-card${thinkingActive ? " streaming" : ""}`}>
             {thoughtMessages.length > 0 ? (
-              <details
-                className="response-thoughts"
-                open={thoughtsOpen}
-              >
-                <summary
-                  onClick={(event) => {
-                    event.preventDefault();
-                    const nextOpen = !thoughtsOpen;
-                    setThoughtPanelStateByTurnId((current) => ({
-                      ...current,
-                      [group.turnId]: {
-                        open: nextOpen,
-                        mode: nextOpen ? "full" : (current[group.turnId]?.mode ?? "full"),
-                        lastPendingSignature: current[group.turnId]?.lastPendingSignature ?? ""
-                      }
-                    }));
-                  }}
-                >
-                  {thoughtLabel}
-                </summary>
-                <div className="response-thought-details">
-                  {canShowPriorActivity ? (
-                    <button
-                      type="button"
-                      className="thought-preview-expand"
-                      onClick={() =>
-                        setThoughtPanelStateByTurnId((current) => ({
-                          ...current,
-                          [group.turnId]: {
-                            open: true,
-                            mode: "full",
-                            lastPendingSignature: current[group.turnId]?.lastPendingSignature ?? ""
-                          }
-                        }))
-                      }
-                    >
-                      Show prior activity
-                    </button>
-                  ) : null}
-                  {displayedThoughtRows}
-                </div>
-              </details>
+              <div className={`response-thoughts${thoughtsOpen ? " open" : ""}`}>
+                {!thoughtsOpen ? (
+                  <button
+                    type="button"
+                    className={`response-thought-summary ${thoughtHeader.tone}`}
+                    onClick={() => {
+                      setThoughtPanelStateByTurnId((current) => ({
+                        ...current,
+                        [group.turnId]: {
+                          open: true,
+                          mode: "full",
+                          lastPendingSignature: current[group.turnId]?.lastPendingSignature ?? ""
+                        }
+                      }));
+                    }}
+                  >
+                    {thoughtHeader.text}
+                  </button>
+                ) : null}
+                {thoughtsOpen ? (
+                  <div className="response-thought-details" onClick={handleThoughtDetailsClick}>
+                    {showingPendingOnly ? (
+                      <p className={`response-thought-preview ${thoughtHeader.tone}`} data-thought-collapse="true">
+                        {thoughtHeader.text}
+                      </p>
+                    ) : null}
+                    {canShowPriorActivity ? (
+                      <button
+                        type="button"
+                        className="thought-preview-expand"
+                        onClick={() =>
+                          setThoughtPanelStateByTurnId((current) => ({
+                            ...current,
+                            [group.turnId]: {
+                              open: true,
+                              mode: "full",
+                              lastPendingSignature: current[group.turnId]?.lastPendingSignature ?? ""
+                            }
+                          }))
+                        }
+                      >
+                        Show prior activity
+                      </button>
+                    ) : null}
+                    {displayedThoughtRows}
+                  </div>
+                ) : null}
+              </div>
             ) : null}
             {finalAssistantMessage ? (
               <div className="response-body">
