@@ -727,6 +727,40 @@ body {
   flex-wrap: wrap;
 }
 
+.chat-disconnected-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 28;
+  background: #f8fafcc7;
+  backdrop-filter: grayscale(0.35);
+  display: grid;
+  place-items: start center;
+  padding: 1.1rem;
+}
+
+.chat-disconnected-card {
+  width: min(420px, 100%);
+  border: 1px solid #d5dbe5;
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 12px 28px #0f172a1f;
+  padding: 0.8rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.chat-disconnected-card h3 {
+  margin: 0;
+  font-size: 0.98rem;
+  color: #111827;
+}
+
+.chat-disconnected-card p {
+  margin: 0;
+  color: #4b5563;
+}
+
 .thread-menu {
   position: absolute;
   top: calc(100% - 0.1rem);

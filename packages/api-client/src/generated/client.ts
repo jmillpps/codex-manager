@@ -34,6 +34,7 @@ export type SessionSummary = {
 export type ProjectSummary = {
   projectId: string;
   name: string;
+  workingDirectory: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -417,6 +418,7 @@ export async function listProjects(baseUrl = "/api"): Promise<{ data: Array<Proj
 
 export async function createProject(
   name: string,
+  workingDirectory: string | null = null,
   baseUrl = "/api"
 ): Promise<{ status: string; project: ProjectSummary; orchestrationSession?: SessionSummary | null }> {
   return requestJson<{ status: string; project: ProjectSummary; orchestrationSession?: SessionSummary | null }>(
@@ -424,7 +426,7 @@ export async function createProject(
     {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name })
+      body: JSON.stringify({ name, workingDirectory })
     },
     "create project failed"
   );
@@ -433,14 +435,16 @@ export async function createProject(
 export async function renameProject(
   projectId: string,
   name: string,
+  workingDirectory?: string | null,
   baseUrl = "/api"
 ): Promise<{ status: string; project: ProjectSummary }> {
+  const body = workingDirectory === undefined ? { name } : { name, workingDirectory };
   return requestJson<{ status: string; project: ProjectSummary }>(
     baseUrl + "/projects/" + encodeURIComponent(projectId) + "/rename",
     {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name })
+      body: JSON.stringify(body)
     },
     "rename project failed"
   );

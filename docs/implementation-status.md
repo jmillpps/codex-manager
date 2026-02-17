@@ -13,14 +13,9 @@ Use this with:
 
 ## Last verified
 
-- Date: February 16, 2026
+- Date: February 17, 2026
 - Validation run:
-  - `pnpm gen`
-  - `pnpm test`
   - `pnpm typecheck`
-  - `pnpm build`
-  - `pnpm smoke:runtime`
-  - `pnpm test:e2e`
 
 ## Current implemented scope
 
@@ -45,9 +40,12 @@ Use this with:
   - server-initiated tool user-input request ingestion and decision submission.
   - pending tool-input listing per session.
 - Projects and session organization:
-  - project create/list/rename/delete.
+  - project create/list/rename/delete with optional per-project `workingDirectory` configuration.
+  - project rename preserves existing `workingDirectory` when omitted from the request; explicit `null` clears it.
+  - project `workingDirectory` changes re-provision the project orchestration session so suggested-reply orchestration uses the updated cwd immediately.
   - assign/unassign session to project.
   - bulk project chat move (`unassigned`/`archive`) and bulk project chat delete.
+  - project orchestration sessions start in the project working directory when configured (fallback: workspace root).
 - Discovery/settings/account/integrations:
   - capabilities probe endpoint.
   - models, experimental features, collaboration modes, app list, skills list/config/remote.
@@ -89,9 +87,12 @@ Use this with:
   - create, rename, archive/unarchive, hard delete with confirmation.
   - project creation inserts an auto-created orchestration chat into the project chat list immediately.
   - project creation/rename/delete, bulk move/delete chats, session assignment and move flows.
+  - project context menu action to set/clear project working directory; new chats from that project start in that directory.
   - non-materialized session movement supported.
 - Chat runtime features:
   - websocket reconnect/backoff.
+  - disconnected websocket state now blocks the chat pane with a reconnect overlay/action until connectivity resumes.
+  - send-message health check: when no turn/activity response arrives shortly after send, the UI marks websocket as effectively disconnected and prompts reconnect.
   - message send/cancel/retry flows.
   - streamed transcript rendering with filters (All/Chat/Tools/Approvals).
   - system/tool/approval activity cards with status chips and expandable details.
@@ -134,6 +135,7 @@ Use this with:
 
 - `pnpm lint` is still placeholder-only in workspace packages; enforceable lint rules are not configured yet.
 - Browser-level Playwright requires Linux shared libraries. Root `pnpm test:e2e*` commands now run through `scripts/run-playwright.mjs`, which bootstraps missing libs into `.data/playwright-libs` when `apt-get download` is available.
+- `pnpm gen` can fail under restricted file-permission environments when writing `apps/api/openapi/openapi.json`; rerun contract generation in a writable environment before release.
 
 ## Known follow-up hardening work
 

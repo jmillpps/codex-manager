@@ -60,6 +60,7 @@ type SessionSummary = {
 
 type ProjectRecord = {
   name: string;
+  workingDirectory: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -67,6 +68,7 @@ type ProjectRecord = {
 type ProjectSummary = {
   projectId: string;
   name: string;
+  workingDirectory: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -231,7 +233,8 @@ const renameSessionBodySchema = z.object({
 });
 
 const upsertProjectBodySchema = z.object({
-  name: z.string().trim().min(1).max(120)
+  name: z.string().trim().min(1).max(120),
+  workingDirectory: z.string().trim().min(1).max(2000).nullable().optional()
 });
 
 const setSessionProjectBodySchema = z.object({
@@ -542,6 +545,9 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
 
         projects[projectId] = {
           name,
+          workingDirectory: normalizeProjectWorkingDirectory(
+            typeof value.workingDirectory === "string" || value.workingDirectory === null ? value.workingDirectory : null
+          ),
           createdAt: typeof value.createdAt === "string" && value.createdAt.trim().length > 0 ? value.createdAt : now,
           updatedAt: typeof value.updatedAt === "string" && value.updatedAt.trim().length > 0 ? value.updatedAt : now
         };
@@ -627,10 +633,20 @@ function setSessionTitleOverride(threadId: string, title: string | null | undefi
   return true;
 }
 
+function normalizeProjectWorkingDirectory(input: string | null | undefined): string | null {
+  if (input === null || input === undefined) {
+    return null;
+  }
+
+  const normalized = input.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
 function toProjectSummary(projectId: string, project: ProjectRecord): ProjectSummary {
   return {
     projectId,
     name: project.name,
+    workingDirectory: project.workingDirectory,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt
   };
@@ -734,9 +750,13 @@ async function setSessionTitle(threadId: string, title: string): Promise<void> {
   }
 }
 
-async function createProjectOrchestrationSession(projectId: string, projectName: string): Promise<CodexThread> {
+async function createProjectOrchestrationSession(
+  projectId: string,
+  projectName: string,
+  workingDirectory: string | null
+): Promise<CodexThread> {
   const startResponse = await supervisor.call<{ thread: CodexThread }>("thread/start", {
-    cwd: env.WORKSPACE_ROOT,
+    cwd: workingDirectory ?? env.WORKSPACE_ROOT,
     sandbox: env.DEFAULT_SANDBOX_MODE,
     approvalPolicy: env.DEFAULT_APPROVAL_POLICY,
     experimentalRawEvents: false
@@ -769,7 +789,7 @@ async function ensureProjectOrchestrationSessions(): Promise<void> {
         delete sessionMetadata.projectOrchestratorSessionById[projectId];
       }
 
-      const created = await createProjectOrchestrationSession(projectId, project.name);
+      const created = await createProjectOrchestrationSession(projectId, project.name, project.workingDirectory);
       publishToSockets(
         "session_project_updated",
         {
@@ -2936,6 +2956,7 @@ app.post("/api/projects", async (request, reply) => {
   const projectId = randomUUID();
   const project: ProjectRecord = {
     name: body.name.trim(),
+    workingDirectory: normalizeProjectWorkingDirectory(body.workingDirectory),
     createdAt: now,
     updatedAt: now
   };
@@ -2943,7 +2964,7 @@ app.post("/api/projects", async (request, reply) => {
 
   let orchestrationThread: CodexThread | null = null;
   try {
-    orchestrationThread = await createProjectOrchestrationSession(projectId, project.name);
+    orchestrationThread = await createProjectOrchestrationSession(projectId, project.name, project.workingDirectory);
   } catch (error) {
     delete sessionMetadata.projects[projectId];
     delete sessionMetadata.projectOrchestratorSessionById[projectId];
@@ -3005,12 +3026,36 @@ app.post("/api/projects/:projectId/rename", async (request, reply) => {
   }
 
   const nextName = body.name.trim();
+  const nextWorkingDirectory =
+    body.workingDirectory === undefined ? current.workingDirectory : normalizeProjectWorkingDirectory(body.workingDirectory);
   const previousName = current.name;
-  if (current.name !== nextName) {
+  const shouldUpdateName = current.name !== nextName;
+  const shouldUpdateWorkingDirectory = current.workingDirectory !== nextWorkingDirectory;
+
+  if (shouldUpdateName || shouldUpdateWorkingDirectory) {
+    let replacementOrchestratorThread: CodexThread | null = null;
+    const previousOrchestratorSessionId = sessionMetadata.projectOrchestratorSessionById[params.projectId] ?? null;
+    if (shouldUpdateWorkingDirectory) {
+      try {
+        replacementOrchestratorThread = await createProjectOrchestrationSession(params.projectId, nextName, nextWorkingDirectory);
+      } catch (error) {
+        return sendMappedCodexError(reply, error, "failed to update project orchestration session", {
+          method: "thread/start",
+          projectId: params.projectId
+        });
+      }
+    }
+
     current.name = nextName;
+    current.workingDirectory = nextWorkingDirectory;
     current.updatedAt = new Date().toISOString();
     const orchestratorSessionId = sessionMetadata.projectOrchestratorSessionById[params.projectId];
-    if (typeof orchestratorSessionId === "string" && orchestratorSessionId.trim().length > 0) {
+    if (
+      shouldUpdateName &&
+      !shouldUpdateWorkingDirectory &&
+      typeof orchestratorSessionId === "string" &&
+      orchestratorSessionId.trim().length > 0
+    ) {
       const currentStoredTitle = sessionMetadata.titles[orchestratorSessionId];
       const expectedPreviousTitle = buildProjectOrchestratorTitle(previousName);
       if (!currentStoredTitle || currentStoredTitle === expectedPreviousTitle) {
@@ -3018,6 +3063,47 @@ app.post("/api/projects/:projectId/rename", async (request, reply) => {
       }
     }
     await persistSessionMetadata();
+
+    if (replacementOrchestratorThread) {
+      publishToSockets(
+        "session_project_updated",
+        {
+          sessionId: replacementOrchestratorThread.id,
+          projectId: params.projectId
+        },
+        replacementOrchestratorThread.id,
+        { broadcastToAll: true }
+      );
+    }
+
+    if (
+      replacementOrchestratorThread &&
+      typeof previousOrchestratorSessionId === "string" &&
+      previousOrchestratorSessionId.trim().length > 0 &&
+      previousOrchestratorSessionId !== replacementOrchestratorThread.id
+    ) {
+      try {
+        await hardDeleteSession(previousOrchestratorSessionId);
+      } catch (error) {
+        const detached = setSessionProjectAssignment(previousOrchestratorSessionId, null);
+        if (detached) {
+          await persistSessionMetadata();
+          publishToSockets(
+            "session_project_updated",
+            {
+              sessionId: previousOrchestratorSessionId,
+              projectId: null
+            },
+            previousOrchestratorSessionId,
+            { broadcastToAll: true }
+          );
+        }
+        app.log.warn(
+          { error, projectId: params.projectId, sessionId: previousOrchestratorSessionId, detached },
+          "failed to cleanup previous project orchestration session after working directory update; detached assignment fallback applied"
+        );
+      }
+    }
   }
 
   const payload = toProjectSummary(params.projectId, current);

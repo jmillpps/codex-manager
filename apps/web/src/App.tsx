@@ -16,6 +16,7 @@ type SessionSummary = {
 type ProjectSummary = {
   projectId: string;
   name: string;
+  workingDirectory: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -147,7 +148,7 @@ type SessionProjectUpdatedPayload = {
 };
 
 type ProjectUpsertedPayload = {
-  project?: ProjectSummary;
+  project?: unknown;
 };
 
 type ProjectDeletedPayload = {
@@ -335,6 +336,33 @@ function normalizeMcpServerSummary(input: unknown): McpServerSummary | null {
     status,
     authStatus,
     toolCount
+  };
+}
+
+function normalizeProjectSummary(input: unknown): ProjectSummary | null {
+  const value = asRecord(input);
+  if (!value) {
+    return null;
+  }
+
+  const projectId = typeof value.projectId === "string" ? value.projectId.trim() : "";
+  const name = typeof value.name === "string" ? value.name.trim() : "";
+  const createdAt = typeof value.createdAt === "string" ? value.createdAt : "";
+  const updatedAt = typeof value.updatedAt === "string" ? value.updatedAt : "";
+
+  if (!projectId || !name || !createdAt || !updatedAt) {
+    return null;
+  }
+
+  const workingDirectory =
+    typeof value.workingDirectory === "string" && value.workingDirectory.trim().length > 0 ? value.workingDirectory.trim() : null;
+
+  return {
+    projectId,
+    name,
+    workingDirectory,
+    createdAt,
+    updatedAt
   };
 }
 
@@ -593,6 +621,8 @@ export function App() {
   const websocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptRef = useRef(0);
+  const sendAckTimerRef = useRef<number | null>(null);
+  const pendingSendAckRef = useRef<{ sessionId: string; turnId: string | null } | null>(null);
   const openSessionMenuRef = useRef<HTMLDivElement | null>(null);
   const sessionMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const projectMenuRef = useRef<HTMLDivElement | null>(null);
@@ -674,6 +704,45 @@ export function App() {
         : streaming
           ? "Streaming"
           : "Idle";
+  const showDisconnectedOverlay = wsState === "disconnected" && !deletedSessionNotice;
+  const clearPendingSendAck = (): void => {
+    pendingSendAckRef.current = null;
+    if (sendAckTimerRef.current !== null) {
+      window.clearTimeout(sendAckTimerRef.current);
+      sendAckTimerRef.current = null;
+    }
+  };
+  const markSendActivityObserved = (sessionId: string, turnId?: string): void => {
+    const pending = pendingSendAckRef.current;
+    if (!pending || pending.sessionId !== sessionId) {
+      return;
+    }
+
+    if (pending.turnId && turnId && pending.turnId !== turnId) {
+      return;
+    }
+
+    clearPendingSendAck();
+  };
+  const startPendingSendAck = (sessionId: string, turnId: string | null): void => {
+    clearPendingSendAck();
+    pendingSendAckRef.current = {
+      sessionId,
+      turnId
+    };
+    sendAckTimerRef.current = window.setTimeout(() => {
+      const pending = pendingSendAckRef.current;
+      if (!pending || pending.sessionId !== sessionId) {
+        return;
+      }
+
+      pendingSendAckRef.current = null;
+      sendAckTimerRef.current = null;
+      setWsState("disconnected");
+      setStreaming(false);
+      setError("No response after sending. Connection appears disconnected. Reconnect to continue.");
+    }, 12_000);
+  };
 
   const transcriptCounts = useMemo(() => {
     const counts: Record<TranscriptFilter, number> = {
@@ -1237,9 +1306,12 @@ export function App() {
         throw new Error(`failed to load projects (${response.status})`);
       }
 
-      const payload = (await response.json()) as { data?: Array<ProjectSummary> };
+      const payload = (await response.json()) as { data?: Array<unknown> };
       const sortedProjects = Array.isArray(payload.data)
-        ? [...payload.data].sort((left, right) => left.name.localeCompare(right.name))
+        ? payload.data
+            .map((entry) => normalizeProjectSummary(entry))
+            .filter((entry): entry is ProjectSummary => entry !== null)
+            .sort((left, right) => left.name.localeCompare(right.name))
         : [];
       setProjects(sortedProjects);
       setExpandedProjectsById((current) => {
@@ -1334,8 +1406,11 @@ export function App() {
       throw new Error(`failed to create project (${response.status})`);
     }
 
-    const payload = (await response.json()) as { project: ProjectSummary; orchestrationSession?: SessionSummary | null };
-    const project = payload.project;
+    const payload = (await response.json()) as { project: unknown; orchestrationSession?: SessionSummary | null };
+    const project = normalizeProjectSummary(payload.project);
+    if (!project) {
+      throw new Error("invalid project response payload");
+    }
     setProjects((current) => {
       const byId = new Map(current.map((entry) => [entry.projectId, entry]));
       byId.set(project.projectId, project);
@@ -1435,6 +1510,54 @@ export function App() {
     }
   };
 
+  const updateProjectWorkingDirectory = async (project: ProjectSummary): Promise<void> => {
+    const currentValue = project.workingDirectory ?? "";
+    const nextValue = window.prompt(
+      `Working directory for "${project.name}"\n\nLeave blank to clear project-specific directory.`,
+      currentValue
+    );
+    if (nextValue === null) {
+      return;
+    }
+
+    const normalized = nextValue.trim();
+    setError(null);
+    closeProjectMenu();
+    setProjectActionProjectId(project.projectId);
+
+    try {
+      const response = await fetch(`${apiBase}/projects/${encodeURIComponent(project.projectId)}/rename`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          name: project.name,
+          workingDirectory: normalized.length > 0 ? normalized : null
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`failed to update project working directory (${response.status})`);
+      }
+
+      const payload = (await response.json()) as { project: unknown };
+      const incoming = normalizeProjectSummary(payload.project);
+      if (!incoming) {
+        throw new Error("invalid project response payload");
+      }
+      setProjects((current) => {
+        const byId = new Map(current.map((entry) => [entry.projectId, entry]));
+        byId.set(incoming.projectId, incoming);
+        return Array.from(byId.values()).sort((left, right) => left.name.localeCompare(right.name));
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "failed to update project working directory");
+    } finally {
+      setProjectActionProjectId(null);
+    }
+  };
+
   const moveAllProjectChats = async (project: ProjectSummary, destination: MoveProjectChatsDestination): Promise<void> => {
     const projectSessions = sessionsByProjectId.get(project.projectId) ?? [];
     const destinationLabel = destination === "archive" ? "Archive" : "Your Chats";
@@ -1521,6 +1644,8 @@ export function App() {
     if (projectId) {
       setProjectActionProjectId(projectId);
     }
+    const project = projectId ? projects.find((entry) => entry.projectId === projectId) ?? null : null;
+    const projectWorkingDirectory = project?.workingDirectory ?? null;
 
     try {
       const response = await fetch(`${apiBase}/sessions`, {
@@ -1529,7 +1654,8 @@ export function App() {
           "content-type": "application/json"
         },
         body: JSON.stringify({
-          model: selectedModelId || undefined
+          model: selectedModelId || undefined,
+          cwd: projectWorkingDirectory ?? undefined
         })
       });
 
@@ -2077,10 +2203,12 @@ export function App() {
           [selectedSessionId]: payload.turnId as string
         }));
       }
+      startPendingSendAck(selectedSessionId, typeof payload.turnId === "string" ? payload.turnId : null);
     } catch (err) {
       setStreaming(false);
       setMessages((current) => current.filter((message) => message.id !== optimisticId));
       setDraft(text);
+      clearPendingSendAck();
       setError(err instanceof Error ? err.message : "failed to send message");
     }
   };
@@ -2884,6 +3012,7 @@ export function App() {
     suggestedReplyAbortRef.current?.abort();
     suggestedReplyAbortRef.current = null;
     suggestedReplyRequestIdRef.current += 1;
+    clearPendingSendAck();
 
     if (!selectedSessionId) {
       setMessages([]);
@@ -3013,11 +3142,11 @@ export function App() {
 
         if (envelope.type === "project_upserted") {
           const payload = envelope.payload as ProjectUpsertedPayload;
-          if (!payload.project || typeof payload.project.projectId !== "string") {
+          const incoming = normalizeProjectSummary(payload.project);
+          if (!incoming) {
             return;
           }
 
-          const incoming = payload.project;
           setProjects((current) => {
             const byId = new Map(current.map((entry) => [entry.projectId, entry]));
             byId.set(incoming.projectId, incoming);
@@ -3284,6 +3413,9 @@ export function App() {
               [turnPayload.threadId as string]: turnPayload.turn?.id as string
             }));
           }
+          if (typeof turnPayload.threadId === "string") {
+            markSendActivityObserved(turnPayload.threadId, typeof turnPayload.turn?.id === "string" ? turnPayload.turn.id : undefined);
+          }
           setStreaming(true);
           return;
         }
@@ -3306,6 +3438,10 @@ export function App() {
 
           const status = completedPayload.turn?.status;
           if (typeof completedPayload.threadId === "string") {
+            markSendActivityObserved(
+              completedPayload.threadId,
+              typeof completedPayload.turn?.id === "string" ? completedPayload.turn.id : undefined
+            );
             setActiveTurnIdBySession((current) => {
               if (!(completedPayload.threadId as string in current)) {
                 return current;
@@ -3393,6 +3529,10 @@ export function App() {
             };
             return next;
           });
+          const ackSessionId = selectedSessionIdRef.current;
+          if (ackSessionId) {
+            markSendActivityObserved(ackSessionId, typeof deltaPayload.turnId === "string" ? deltaPayload.turnId : undefined);
+          }
           return;
         }
 
@@ -3413,6 +3553,11 @@ export function App() {
 
           if (itemType === "userMessage") {
             return;
+          }
+
+          const ackSessionId = typeof envelope.threadId === "string" ? envelope.threadId : selectedSessionIdRef.current;
+          if (ackSessionId) {
+            markSendActivityObserved(ackSessionId, typeof itemPayload.turnId === "string" ? itemPayload.turnId : undefined);
           }
 
           if (itemType === "agentMessage" && method === "item/completed") {
@@ -3480,6 +3625,7 @@ export function App() {
 
     return () => {
       disposed = true;
+      clearPendingSendAck();
       if (reconnectTimerRef.current !== null) {
         window.clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
@@ -3614,6 +3760,15 @@ export function App() {
     ? (sessionsByProjectId.get(projectMenuProject.projectId) ?? []).length
     : 0;
   const projectMenuHasChats = projectMenuSessionCount > 0;
+  const requestReconnect = (): void => {
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    clearPendingSendAck();
+    setWsState("connecting");
+    setWsReconnectNonce((value) => value + 1);
+  };
 
   return (
     <>
@@ -3908,6 +4063,17 @@ export function App() {
                 </button>
                 <span className="hint">Or select another chat from the left sidebar.</span>
               </div>
+            </div>
+          </div>
+        ) : null}
+        {showDisconnectedOverlay ? (
+          <div className="chat-disconnected-overlay" role="alert" aria-live="polite">
+            <div className="chat-disconnected-card">
+              <h3>Connection Lost</h3>
+              <p>Live updates are temporarily unavailable.</p>
+              <button type="button" onClick={requestReconnect}>
+                Reconnect
+              </button>
             </div>
           </div>
         ) : null}
@@ -4537,6 +4703,19 @@ export function App() {
                 disabled={projectActionProjectId === projectMenuProject.projectId}
               >
                 {projectActionProjectId === projectMenuProject.projectId ? "Working..." : "New Chat"}
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => void updateProjectWorkingDirectory(projectMenuProject)}
+                disabled={projectActionProjectId === projectMenuProject.projectId}
+                title={projectMenuProject.workingDirectory ?? undefined}
+              >
+                {projectActionProjectId === projectMenuProject.projectId
+                  ? "Working..."
+                  : projectMenuProject.workingDirectory
+                    ? "Edit Working Directory"
+                    : "Set Working Directory"}
               </button>
               {projectMenuHasChats ? (
                 <div className="session-submenu-group" role="none">
