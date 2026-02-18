@@ -80,6 +80,43 @@ Checklist:
 - Ensure the backend responds exactly once per approval request `id`
 - Inspect logs for “unknown approval id” or “already responded” errors
 
+#### Approval action appears stuck in `Approving...`/`Denying...`
+
+Symptoms:
+
+- Clicking an approval action disables buttons and shows a submitting label, but the row does not resolve.
+- This is intermittent and usually appears after websocket instability/reconnect churn.
+
+Checklist:
+
+- Confirm websocket status in the UI is `connected`.
+- Verify `/api/stream` is still open in browser devtools (Network -> WS).
+- Switch chats and return (forces pending approvals reload for the selected session).
+- Click sidebar `Refresh` to force session/approval state resync.
+- If still stuck, reload the page to rehydrate state from API and websocket.
+
+Root-cause note:
+
+- Approval decision transitions are websocket-authoritative in the UI: local click enters submitting state, and final pending/resolved state is applied from runtime events. The UI now includes a bounded reconcile fallback (delayed approvals reload) to auto-heal missed `approval_resolved` delivery, but temporary stale submitting labels can still appear briefly during reconnect churn.
+
+#### Chat no longer follows bottom during approval churn
+
+Symptoms:
+
+- During/after approval request or approval decision, transcript view occasionally drifts from tail.
+- `Jump to bottom` appears even though the user was reading the tail moments before.
+
+Checklist:
+
+- Confirm the affected chat is active when the approval request arrives.
+- Confirm the UI still shows websocket connected.
+- Use `Jump to bottom` once; follow mode should re-engage immediately.
+- Reproduce while watching scroll distance behavior in devtools if needed:
+  - follow-mode hysteresis: disengage around `96px`, re-engage around `24px`.
+  - approve-click arming near-bottom threshold: `128px`.
+  - snap-back release threshold: `>420px` from bottom (intentional user scroll-away).
+- If behavior regresses after edits, verify `Jump to bottom` remains absolute overlay (not inside scroll-content flow), otherwise geometry churn can reintroduce drift.
+
 #### Turns fail with 401 Unauthorized
 
 Symptoms:

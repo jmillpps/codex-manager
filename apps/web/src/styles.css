@@ -922,13 +922,18 @@ body {
   grid-template-columns: minmax(0, 1fr) 350px;
 }
 
+.chat-transcript-shell {
+  min-height: 0;
+  position: relative;
+}
+
 .chat-transcript {
   min-height: 0;
+  height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
   background: #ffffff;
   padding: 0 1.2rem 1rem;
-  position: relative;
 }
 
 .chat-transcript-inner {
@@ -1008,36 +1013,6 @@ body {
   font: inherit;
   font-size: 0.74rem;
   color: #1f2937;
-}
-
-.transcript-toolbar {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  padding: 0.68rem 0 0.25rem;
-  background: linear-gradient(180deg, #ffffff 77%, #ffffff00 100%);
-}
-
-.filter-group {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.34rem;
-}
-
-.filter-btn {
-  border: 1px solid #d9dde5;
-  border-radius: 999px;
-  background: #f4f6f9;
-  color: #465063;
-  font-size: 0.72rem;
-  font-weight: 600;
-  padding: 0.2rem 0.54rem;
-}
-
-.filter-btn.active {
-  border-color: #111827;
-  background: #111827;
-  color: #ffffff;
 }
 
 .bubble {
@@ -1120,6 +1095,11 @@ body {
   line-height: 1.5;
 }
 
+.response-thought-summary:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: -2px;
+}
+
 .response-thought-summary.reasoning,
 .response-thought-preview.reasoning {
   font-size: 0.76rem;
@@ -1144,6 +1124,35 @@ body {
 .response-thought-preview {
   margin: 0;
   line-height: 1.5;
+}
+
+.response-thought-header-markdown {
+  color: inherit;
+}
+
+.response-thought-header-markdown > :first-child {
+  margin-top: 0;
+}
+
+.response-thought-header-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.response-thought-header-markdown p,
+.response-thought-header-markdown ul,
+.response-thought-header-markdown ol,
+.response-thought-header-markdown blockquote,
+.response-thought-header-markdown pre {
+  margin: 0.2rem 0 0;
+}
+
+.response-thought-header-markdown ul,
+.response-thought-header-markdown ol {
+  padding-left: 1.05rem;
+}
+
+.response-thought-header-markdown li + li {
+  margin-top: 0.1rem;
 }
 
 .response-thought-details {
@@ -1197,6 +1206,128 @@ body {
 
 .thought-row-line.content {
   font-weight: 400;
+}
+
+.thought-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.22rem;
+}
+
+.thought-section-toggle {
+  width: fit-content;
+  max-width: 100%;
+  align-self: flex-start;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 0.34rem;
+  text-align: left;
+  cursor: pointer;
+  color: #334155;
+}
+
+.thought-section-toggle:hover .thought-section-title {
+  text-decoration: underline;
+}
+
+.thought-section-toggle:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.thought-section-caret {
+  width: 0;
+  height: 0;
+  border-left: 0.25rem solid transparent;
+  border-right: 0.25rem solid transparent;
+  border-top: 0.36rem solid #64748b;
+  margin-top: 0.34rem;
+  margin-left: 0.06rem;
+  transform: rotate(0deg);
+  transition: transform 120ms ease;
+  transform-origin: 50% 40%;
+  flex: 0 0 auto;
+}
+
+.thought-section-caret.collapsed {
+  transform: rotate(-90deg);
+}
+
+.thought-section-title {
+  font-size: 0.76rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.thought-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.26rem;
+  padding-left: 1.12rem;
+}
+
+.thought-markdown {
+  color: inherit;
+}
+
+.thought-markdown > :first-child {
+  margin-top: 0;
+}
+
+.thought-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.thought-markdown p,
+.thought-markdown ul,
+.thought-markdown ol,
+.thought-markdown blockquote,
+.thought-markdown pre {
+  margin: 0.22rem 0 0;
+}
+
+.thought-markdown ul,
+.thought-markdown ol {
+  padding-left: 1.1rem;
+}
+
+.thought-markdown li + li {
+  margin-top: 0.1rem;
+}
+
+.thought-markdown a {
+  color: #2563eb;
+}
+
+.thought-markdown pre {
+  border: 1px solid #2a3345;
+  border-radius: 8px;
+  background: #0b1220;
+  color: #d1d5db;
+  padding: 0.42rem 0.5rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.73rem;
+  line-height: 1.45;
+  overflow: auto;
+  max-height: 16rem;
+}
+
+.thought-markdown code {
+  border-radius: 4px;
+  background: #edf2f8;
+  padding: 0.04rem 0.26rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.9em;
+}
+
+.thought-markdown pre code {
+  background: transparent;
+  padding: 0;
 }
 
 .thinking-ellipsis {
@@ -1359,11 +1490,73 @@ body {
   border-top: 1px solid #e9edf4;
 }
 
-.response-body pre {
-  margin: 0;
-  white-space: pre-wrap;
-  font: inherit;
+.response-markdown {
   color: #111827;
+  line-height: 1.52;
+  overflow-wrap: anywhere;
+}
+
+.response-markdown > :first-child {
+  margin-top: 0;
+}
+
+.response-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.response-markdown p,
+.response-markdown ul,
+.response-markdown ol,
+.response-markdown blockquote,
+.response-markdown pre,
+.response-markdown table {
+  margin: 0.56rem 0;
+}
+
+.response-markdown ul,
+.response-markdown ol {
+  padding-left: 1.25rem;
+}
+
+.response-markdown li + li {
+  margin-top: 0.2rem;
+}
+
+.response-markdown a {
+  color: #1d4ed8;
+  text-decoration: underline;
+}
+
+.response-markdown blockquote {
+  border-left: 3px solid #d3dbe8;
+  padding-left: 0.7rem;
+  color: #4b5568;
+}
+
+.response-markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.9em;
+  background: #eef2f7;
+  border-radius: 6px;
+  padding: 0.08rem 0.33rem;
+}
+
+.response-markdown pre {
+  margin: 0;
+  background: #0b1220;
+  color: #d1d5db;
+  border-radius: 10px;
+  padding: 0.62rem 0.7rem;
+  overflow: auto;
+}
+
+.response-markdown pre code {
+  display: block;
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+  color: inherit;
+  white-space: pre;
 }
 
 .event-group-label {
@@ -1504,12 +1697,11 @@ body {
 }
 
 .jump-to-bottom {
-  position: sticky;
-  bottom: 0.7rem;
-  left: 0;
-  right: 0;
-  margin-inline: auto;
-  z-index: 4;
+  position: absolute;
+  left: 50%;
+  bottom: 0.8rem;
+  transform: translateX(-50%);
+  z-index: 8;
   box-shadow: 0 8px 20px #0000001a;
 }
 

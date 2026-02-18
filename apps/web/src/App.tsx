@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -8,6 +9,8 @@ import {
   type ReactNode
 } from "react";
 import { createPortal } from "react-dom";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 type SessionSummary = {
   sessionId: string;
@@ -74,7 +77,14 @@ type ThoughtPanelState = {
   lastPendingSignature: string;
 };
 
-type TranscriptFilter = "all" | "chat" | "tools" | "approvals";
+type ThoughtRowEntry = {
+  key: string;
+  node: ReactNode | null;
+  sectionTitle: string | null;
+};
+
+type ApprovalDecision = "accept" | "decline" | "cancel";
+type ApprovalScope = "turn" | "session";
 
 type PendingApproval = {
   approvalId: string;
@@ -198,8 +208,27 @@ type ModelOption = {
   defaultReasoningEffort: ReasoningEffortSelection;
 };
 
+const markdownComponents = {
+  a: ({ href, children, ...props }: React.ComponentProps<"a">) => (
+    <a href={href} {...props} target="_blank" rel="noreferrer">
+      {children}
+    </a>
+  )
+};
+
+function MarkdownText({ content, className }: { content: string; className?: string }): ReactNode {
+  return (
+    <div className={className}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 const allReasoningEfforts: Array<ReasoningEffort> = ["none", "minimal", "low", "medium", "high", "xhigh"];
 const preferredReasoningEffortOrder: Array<ReasoningEffort> = ["xhigh", "high", "medium", "low", "minimal", "none"];
+const approvalSnapBackStartDelayMs = 60;
 const reasoningEffortLabelByValue: Record<ReasoningEffort, string> = {
   none: "None",
   minimal: "Minimal",
@@ -908,25 +937,14 @@ function extractApprovalFileChangeCount(message: ChatMessage, pendingApproval?: 
   return extractCountFromSummaryLine(message.content);
 }
 
-function extractApprovalDecision(message: ChatMessage): "accept" | "decline" | "cancel" | null {
-  const parsedDetails = parseDetailsRecord(message.details);
-  const decision = findStringInRecordChain(parsedDetails, "decision");
-  if (!decision) {
-    return null;
+function extractApprovalCreatedAt(message: ChatMessage, pendingApproval?: PendingApproval): string | null {
+  const pendingCreatedAt = typeof pendingApproval?.createdAt === "string" ? pendingApproval.createdAt.trim() : "";
+  if (pendingCreatedAt.length > 0) {
+    return pendingCreatedAt;
   }
 
-  const normalized = decision.toLowerCase();
-  if (normalized === "accept" || normalized === "decline" || normalized === "cancel") {
-    return normalized;
-  }
-
-  return null;
-}
-
-function extractApprovalStatus(message: ChatMessage): string | null {
   const parsedDetails = parseDetailsRecord(message.details);
-  const status = findStringInRecordChain(parsedDetails, "status");
-  return status ? status.toLowerCase() : null;
+  return findStringInRecordChain(parsedDetails, "createdAt");
 }
 
 function normalizeProjectRootPath(path: string | null | undefined): string | null {
@@ -1276,28 +1294,11 @@ function shouldHidePathHeaderForCreatePreview(preview: {
   return preview.entries.length === 1 && preview.entries[0].kind === "create";
 }
 
-function parseReasoningLines(details?: string, fallbackContent?: string): {
+export function parseReasoningLines(details?: string, fallbackContent?: string): {
   summaryLines: Array<string>;
   contentLines: Array<string>;
 } {
-  const trimWrappingAsterisks = (line: string): string => {
-    let normalized = line.trim();
-    while (normalized.length > 0) {
-      const match = normalized.match(/^(\*{1,3})(.+)\1$/);
-      if (!match) {
-        break;
-      }
-
-      const inner = match[2].trim();
-      if (!inner) {
-        break;
-      }
-
-      normalized = inner;
-    }
-
-    return normalized;
-  };
+  const normalizeReasoningText = (line: string): string => line.trim();
 
   const normalizeLines = (value: unknown): Array<string> => {
     if (!Array.isArray(value)) {
@@ -1307,7 +1308,7 @@ function parseReasoningLines(details?: string, fallbackContent?: string): {
     const lines: Array<string> = [];
     for (const entry of value) {
       if (typeof entry === "string") {
-        const trimmed = trimWrappingAsterisks(entry);
+        const trimmed = normalizeReasoningText(entry);
         if (trimmed.length > 0) {
           lines.push(trimmed);
         }
@@ -1329,14 +1330,14 @@ function parseReasoningLines(details?: string, fallbackContent?: string): {
               : null;
 
       if (textCandidate && textCandidate.trim().length > 0) {
-        lines.push(trimWrappingAsterisks(textCandidate));
+        lines.push(normalizeReasoningText(textCandidate));
       }
     }
     return lines.filter((line) => line.length > 0);
   };
 
   if (!details || details.trim().length === 0) {
-    const fallback = typeof fallbackContent === "string" ? trimWrappingAsterisks(fallbackContent) : "";
+    const fallback = typeof fallbackContent === "string" ? normalizeReasoningText(fallbackContent) : "";
     return {
       summaryLines: fallback && fallback !== "[reasoning]" ? [fallback] : [],
       contentLines: []
@@ -1349,7 +1350,7 @@ function parseReasoningLines(details?: string, fallbackContent?: string): {
     const contentLines = normalizeLines(parsed.content);
 
     if (summaryLines.length === 0 && contentLines.length === 0) {
-      const fallback = typeof fallbackContent === "string" ? trimWrappingAsterisks(fallbackContent) : "";
+      const fallback = typeof fallbackContent === "string" ? normalizeReasoningText(fallbackContent) : "";
       return {
         summaryLines: fallback && fallback !== "[reasoning]" ? [fallback] : [],
         contentLines: []
@@ -1361,12 +1362,40 @@ function parseReasoningLines(details?: string, fallbackContent?: string): {
       contentLines
     };
   } catch {
-    const fallback = typeof fallbackContent === "string" ? trimWrappingAsterisks(fallbackContent) : "";
+    const fallback = typeof fallbackContent === "string" ? normalizeReasoningText(fallbackContent) : "";
     return {
       summaryLines: fallback && fallback !== "[reasoning]" ? [fallback] : [],
       contentLines: []
     };
   }
+}
+
+export function extractMarkdownSectionHeader(content: string): { title: string; remainder: string | null } | null {
+  const lines = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length === 0) {
+    return null;
+  }
+
+  const match = lines[0].match(/^\*\*(.+?)\*\*(.*)$/);
+  if (!match) {
+    return null;
+  }
+
+  const title = match[1].trim();
+  if (title.length === 0) {
+    return null;
+  }
+
+  const firstRemainder = match[2].trim();
+  const remainingLines = lines.slice(1);
+  const remainderParts = [firstRemainder, ...remainingLines].filter((line) => line.length > 0);
+  return {
+    title,
+    remainder: remainderParts.length > 0 ? remainderParts.join("\n\n") : null
+  };
 }
 
 function formatElapsedLabel(durationMs: number): string {
@@ -1553,11 +1582,12 @@ export function App() {
   const [projectsHeaderMenuAnchor, setProjectsHeaderMenuAnchor] = useState<SessionMenuAnchor | null>(null);
   const [sessionActionSessionId, setSessionActionSessionId] = useState<string | null>(null);
   const [projectActionProjectId, setProjectActionProjectId] = useState<string | null>(null);
-  const [transcriptFilter, setTranscriptFilter] = useState<TranscriptFilter>("all");
   const [messages, setMessages] = useState<Array<ChatMessage>>([]);
   const [messageTimingById, setMessageTimingById] = useState<Record<string, MessageTiming>>({});
   const [thoughtPanelStateByTurnId, setThoughtPanelStateByTurnId] = useState<Record<string, ThoughtPanelState>>({});
+  const [collapsedThoughtSectionsByTurnId, setCollapsedThoughtSectionsByTurnId] = useState<Record<string, Record<string, boolean>>>({});
   const [pendingApprovals, setPendingApprovals] = useState<Array<PendingApproval>>([]);
+  const [approvalActionById, setApprovalActionById] = useState<Record<string, { decision: ApprovalDecision; scope: ApprovalScope }>>({});
   const [pendingToolInputs, setPendingToolInputs] = useState<Array<PendingToolInput>>([]);
   const [toolInputDraftById, setToolInputDraftById] = useState<Record<string, Record<string, string>>>({});
   const [toolInputActionRequestId, setToolInputActionRequestId] = useState<string | null>(null);
@@ -1629,6 +1659,11 @@ export function App() {
   const projectsHeaderMenuRef = useRef<HTMLDivElement | null>(null);
   const projectsHeaderMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
+  const approvalSnapBackStartAtRef = useRef(0);
+  const approvalSnapBackUntilRef = useRef(0);
+  const approvalSnapBackDelayTimerRef = useRef<number | null>(null);
+  const approvalSnapBackFrameRef = useRef<number | null>(null);
+  const approvalReconcileTimersRef = useRef<Record<string, number>>({});
   const threadMenuRef = useRef<HTMLDivElement | null>(null);
   const threadMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
@@ -1636,12 +1671,21 @@ export function App() {
   const suggestedReplyAbortRef = useRef<AbortController | null>(null);
   const suggestedReplyRequestIdRef = useRef(0);
   const selectedSessionIdRef = useRef<string | null>(null);
+  const approvalActionByIdRef = useRef<Record<string, { decision: ApprovalDecision; scope: ApprovalScope }>>({});
   const draftRef = useRef("");
   selectedSessionIdRef.current = selectedSessionId;
+  approvalActionByIdRef.current = approvalActionById;
   draftRef.current = draft;
   useEffect(() => {
     persistSelectedSessionId(selectedSessionId);
   }, [selectedSessionId]);
+  useEffect(() => {
+    for (const approvalId of Object.keys(approvalReconcileTimersRef.current)) {
+      if (!(approvalId in approvalActionById)) {
+        clearApprovalReconcileTimer(approvalId);
+      }
+    }
+  }, [approvalActionById]);
   const selectedSession = useMemo(
     () => sessions.find((session) => session.sessionId === selectedSessionId) ?? null,
     [sessions, selectedSessionId]
@@ -1789,28 +1833,6 @@ export function App() {
     }, 12_000);
   };
 
-  const transcriptCounts = useMemo(() => {
-    const counts: Record<TranscriptFilter, number> = {
-      all: messages.length,
-      chat: 0,
-      tools: 0,
-      approvals: 0
-    };
-
-    for (const message of messages) {
-      const category = messageCategory(message);
-      if (category === "chat") {
-        counts.chat += 1;
-      } else if (category === "tools") {
-        counts.tools += 1;
-      } else {
-        counts.approvals += 1;
-      }
-    }
-
-    return counts;
-  }, [messages]);
-
   const allTurnGroups = useMemo(() => {
     const byTurnId = new Map<string, Array<ChatMessage>>();
 
@@ -1833,18 +1855,7 @@ export function App() {
     }
     return groups;
   }, [messages]);
-  const visibleTurnGroups = useMemo(() => {
-    if (transcriptFilter === "all") {
-      return allTurnGroups;
-    }
-
-    return allTurnGroups.filter((group) =>
-      group.messages.some((message) => {
-        const category = messageCategory(message);
-        return category === transcriptFilter;
-      })
-    );
-  }, [allTurnGroups, transcriptFilter]);
+  const visibleTurnGroups = allTurnGroups;
   const inspectTurnGroupState = (group: TurnMessageGroup): {
     responseMessages: Array<ChatMessage>;
     thoughtMessages: Array<ChatMessage>;
@@ -1918,10 +1929,6 @@ export function App() {
             open = true;
             mode = "pending-only";
           }
-        }
-
-        if (pendingSignature.length === 0 && mode === "pending-only") {
-          mode = "full";
         }
 
         next[group.turnId] = {
@@ -2067,7 +2074,10 @@ export function App() {
         ...existing,
         type: "approval.resolved",
         content: resolvedSummary,
-        details: safePrettyJson(compactDetails),
+        details: safePrettyJson({
+          previous: existing.details ?? null,
+          resolution: compactDetails
+        }),
         status: approvalResolutionStatus(payload)
       };
       return next;
@@ -2390,7 +2400,9 @@ export function App() {
       const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(sessionId)}/approvals`);
       if (!response.ok) {
         if (await handleDeletedSessionResponse(response, sessionId)) {
+          clearAllApprovalReconcileTimers();
           setPendingApprovals([]);
+          setApprovalActionById({});
           return;
         }
         throw new Error(`failed to load approvals (${response.status})`);
@@ -2398,12 +2410,29 @@ export function App() {
 
       const payload = (await response.json()) as { data: Array<PendingApproval> };
       setPendingApprovals(payload.data);
+      setApprovalActionById((current) => {
+        const pendingIds = new Set(payload.data.map((approval) => approval.approvalId));
+        let changed = false;
+        const next: Record<string, { decision: ApprovalDecision; scope: ApprovalScope }> = {};
+        for (const [approvalId, action] of Object.entries(current)) {
+          if (pendingIds.has(approvalId)) {
+            next[approvalId] = action;
+          } else {
+            changed = true;
+            clearApprovalReconcileTimer(approvalId);
+          }
+        }
+
+        return changed ? next : current;
+      });
       for (const approval of payload.data) {
         upsertPendingApprovalMessage(approval);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed to load approvals");
+      clearAllApprovalReconcileTimers();
       setPendingApprovals([]);
+      setApprovalActionById({});
     }
   };
 
@@ -3744,12 +3773,125 @@ export function App() {
     }
   };
 
+  const isTranscriptNearBottom = (thresholdPx = 96): boolean => {
+    const element = transcriptRef.current;
+    if (!element) {
+      return true;
+    }
+
+    const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
+    return distanceFromBottom < thresholdPx;
+  };
+
+  const stopApprovalSnapBack = (): void => {
+    approvalSnapBackStartAtRef.current = 0;
+    approvalSnapBackUntilRef.current = 0;
+    if (approvalSnapBackDelayTimerRef.current !== null) {
+      window.clearTimeout(approvalSnapBackDelayTimerRef.current);
+      approvalSnapBackDelayTimerRef.current = null;
+    }
+    if (approvalSnapBackFrameRef.current !== null) {
+      window.cancelAnimationFrame(approvalSnapBackFrameRef.current);
+      approvalSnapBackFrameRef.current = null;
+    }
+  };
+
+  const clearApprovalReconcileTimer = (approvalId: string): void => {
+    const timerId = approvalReconcileTimersRef.current[approvalId];
+    if (timerId === undefined) {
+      return;
+    }
+
+    window.clearTimeout(timerId);
+    delete approvalReconcileTimersRef.current[approvalId];
+  };
+
+  const clearAllApprovalReconcileTimers = (): void => {
+    for (const timerId of Object.values(approvalReconcileTimersRef.current)) {
+      window.clearTimeout(timerId);
+    }
+    approvalReconcileTimersRef.current = {};
+  };
+
+  const armApprovalReconcileFallback = (approvalId: string, sessionId: string, delayMs = 2500): void => {
+    clearApprovalReconcileTimer(approvalId);
+    approvalReconcileTimersRef.current[approvalId] = window.setTimeout(() => {
+      delete approvalReconcileTimersRef.current[approvalId];
+      if (selectedSessionIdRef.current !== sessionId) {
+        return;
+      }
+      if (!(approvalId in approvalActionByIdRef.current)) {
+        return;
+      }
+
+      void loadSessionApprovals(sessionId);
+    }, delayMs);
+  };
+
+  const armApprovalSnapBack = (durationMs = 2600): void => {
+    const element = transcriptRef.current;
+    if (!element) {
+      return;
+    }
+
+    approvalSnapBackUntilRef.current = Math.max(approvalSnapBackUntilRef.current, Date.now() + durationMs);
+    setShowJumpToBottom(false);
+
+    const pulse = (): void => {
+      const current = transcriptRef.current;
+      if (!current) {
+        approvalSnapBackStartAtRef.current = 0;
+        approvalSnapBackFrameRef.current = null;
+        return;
+      }
+
+      current.scrollTo({ top: current.scrollHeight });
+      const stillActive = Date.now() < approvalSnapBackUntilRef.current;
+      if (!stillActive) {
+        approvalSnapBackStartAtRef.current = 0;
+        approvalSnapBackUntilRef.current = 0;
+        approvalSnapBackFrameRef.current = null;
+        return;
+      }
+
+      approvalSnapBackFrameRef.current = window.requestAnimationFrame(pulse);
+    };
+
+    if (approvalSnapBackFrameRef.current !== null || approvalSnapBackDelayTimerRef.current !== null) {
+      return;
+    }
+
+    approvalSnapBackStartAtRef.current = Date.now() + approvalSnapBackStartDelayMs;
+    approvalSnapBackDelayTimerRef.current = window.setTimeout(() => {
+      approvalSnapBackDelayTimerRef.current = null;
+      if (Date.now() >= approvalSnapBackUntilRef.current) {
+        approvalSnapBackStartAtRef.current = 0;
+        return;
+      }
+
+      setFollowTranscriptTail(true);
+      setShowJumpToBottom(false);
+      approvalSnapBackFrameRef.current = window.requestAnimationFrame(pulse);
+    }, approvalSnapBackStartDelayMs);
+  };
+
   const submitApprovalDecision = async (
     approvalId: string,
-    decision: "accept" | "decline" | "cancel",
-    scope: "turn" | "session" = "turn"
+    decision: ApprovalDecision,
+    scope: ApprovalScope = "turn"
   ): Promise<void> => {
+    if (isTranscriptNearBottom(128)) {
+      armApprovalSnapBack();
+    }
+
     setError(null);
+    setApprovalActionById((current) => ({
+      ...current,
+      [approvalId]: {
+        decision,
+        scope
+      }
+    }));
 
     try {
       const response = await fetch(`${apiBase}/approvals/${encodeURIComponent(approvalId)}/decision`, {
@@ -3764,14 +3906,19 @@ export function App() {
         throw new Error(`failed to submit approval (${response.status})`);
       }
 
-      setPendingApprovals((current) => current.filter((approval) => approval.approvalId !== approvalId));
-      resolveApprovalMessage({
-        approvalId,
-        status: "resolved",
-        decision,
-        scope
-      });
+      if (selectedSessionId) {
+        armApprovalReconcileFallback(approvalId, selectedSessionId);
+      }
     } catch (err) {
+      clearApprovalReconcileTimer(approvalId);
+      setApprovalActionById((current) => {
+        if (!(approvalId in current)) {
+          return current;
+        }
+
+        const { [approvalId]: _removed, ...rest } = current;
+        return rest;
+      });
       setError(err instanceof Error ? err.message : "failed to submit approval decision");
     }
   };
@@ -4429,12 +4576,15 @@ export function App() {
     suggestedReplyAbortRef.current = null;
     suggestedReplyRequestIdRef.current += 1;
     clearPendingSendAck();
+    stopApprovalSnapBack();
+    clearAllApprovalReconcileTimers();
 
     if (!selectedSessionId) {
       setMessages([]);
       setMessageTimingById({});
       setThoughtPanelStateByTurnId({});
       setPendingApprovals([]);
+      setApprovalActionById({});
       setPendingToolInputs([]);
       setFollowTranscriptTail(true);
       setShowJumpToBottom(false);
@@ -4446,6 +4596,7 @@ export function App() {
 
     setFollowTranscriptTail(true);
     setShowJumpToBottom(false);
+    setApprovalActionById({});
     setRetryPrompt(null);
     setLoadingSuggestedReply(false);
     void loadSessionTranscript(selectedSessionId);
@@ -4458,6 +4609,8 @@ export function App() {
       suggestedReplyAbortRef.current?.abort();
       suggestedReplyAbortRef.current = null;
       suggestedReplyRequestIdRef.current += 1;
+      stopApprovalSnapBack();
+      clearAllApprovalReconcileTimers();
     };
   }, []);
 
@@ -4663,6 +4816,22 @@ export function App() {
             return;
           }
 
+          const isForActiveSession = !selectedSessionId || approval.threadId === selectedSessionId;
+          if (isForActiveSession) {
+            // Force-focus newly requested approvals so users immediately see and act on them.
+            armApprovalSnapBack(3200);
+          }
+
+          setApprovalActionById((current) => {
+            if (!(approval.approvalId in current)) {
+              return current;
+            }
+
+            clearApprovalReconcileTimer(approval.approvalId);
+            const { [approval.approvalId]: _removed, ...rest } = current;
+            return rest;
+          });
+
           setPendingApprovals((current) => {
             if (selectedSessionId && approval.threadId !== selectedSessionId) {
               return current;
@@ -4692,6 +4861,15 @@ export function App() {
             return;
           }
 
+          setApprovalActionById((current) => {
+            if (!(payload.approvalId as string in current)) {
+              return current;
+            }
+
+            clearApprovalReconcileTimer(payload.approvalId as string);
+            const { [payload.approvalId as string]: _removed, ...rest } = current;
+            return rest;
+          });
           setPendingApprovals((current) => current.filter((approval) => approval.approvalId !== payload.approvalId));
           resolveApprovalMessage({
             approvalId: payload.approvalId,
@@ -5199,9 +5377,26 @@ export function App() {
     }
 
     const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
-    const atBottom = distanceFromBottom < 64;
-    setFollowTranscriptTail(atBottom);
-    setShowJumpToBottom(!atBottom);
+    const snapBackActive = Date.now() < approvalSnapBackUntilRef.current;
+    const snapBackReady = Date.now() >= approvalSnapBackStartAtRef.current;
+    if (snapBackActive) {
+      // If the user intentionally scrolls well away from the bottom, release snap-back.
+      if (distanceFromBottom > 420) {
+        stopApprovalSnapBack();
+      } else {
+        if (snapBackReady && !followTranscriptTail) {
+          setFollowTranscriptTail(true);
+        }
+        setShowJumpToBottom(false);
+        return;
+      }
+    }
+
+    const shouldFollow = followTranscriptTail ? distanceFromBottom < 96 : distanceFromBottom < 24;
+    if (shouldFollow !== followTranscriptTail) {
+      setFollowTranscriptTail(shouldFollow);
+    }
+    setShowJumpToBottom(!shouldFollow);
   };
 
   const jumpToBottom = (): void => {
@@ -5210,16 +5405,17 @@ export function App() {
       return;
     }
 
+    stopApprovalSnapBack();
     element.scrollTo({
-      top: element.scrollHeight,
-      behavior: "smooth"
+      top: element.scrollHeight
     });
     setFollowTranscriptTail(true);
     setShowJumpToBottom(false);
   };
 
-  useEffect(() => {
-    if (!followTranscriptTail) {
+  useLayoutEffect(() => {
+    const snapBackReady = Date.now() < approvalSnapBackUntilRef.current && Date.now() >= approvalSnapBackStartAtRef.current;
+    if (!followTranscriptTail && !snapBackReady) {
       return;
     }
 
@@ -5228,10 +5424,16 @@ export function App() {
       return;
     }
 
-    element.scrollTo({
-      top: element.scrollHeight
+    const frame = window.requestAnimationFrame(() => {
+      element.scrollTo({
+        top: element.scrollHeight
+      });
     });
-  }, [visibleTurnGroups, followTranscriptTail, loadingTranscript, selectedSessionId]);
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [visibleTurnGroups, followTranscriptTail, loadingTranscript, selectedSessionId, thoughtPanelStateByTurnId]);
 
   const renderTurnGroup = (group: TurnMessageGroup) => {
     const userMessages = group.messages.filter((message) => message.role === "user");
@@ -5261,7 +5463,7 @@ export function App() {
             const previewLines = [...summaryLines, ...contentLines].map((line) => line.trim()).filter((line) => line.length > 0);
             if (previewLines.length > 0) {
               return {
-                text: previewLines.join(" "),
+                text: previewLines.join("\n\n"),
                 tone: "reasoning" as const
               };
             }
@@ -5324,21 +5526,36 @@ export function App() {
       };
     })();
 
-    const thoughtRows: Array<ReactNode> = [];
-    const pendingThoughtRows: Array<ReactNode> = [];
-    const queuedApprovalRows: Array<{ row: ReactNode; requestedAt: number; sequence: number }> = [];
-    const queuedPendingApprovalRows: Array<{ row: ReactNode; requestedAt: number; sequence: number }> = [];
+    const thoughtRows: Array<ThoughtRowEntry> = [];
+    const pendingThoughtRows: Array<ThoughtRowEntry> = [];
+    const queuedApprovalRows: Array<{ row: ThoughtRowEntry; requestedAt: number; sequence: number }> = [];
+    const queuedPendingApprovalRows: Array<{ row: ThoughtRowEntry; requestedAt: number; sequence: number }> = [];
     let approvalSequence = 0;
+    const appendThoughtRow = (entry: ThoughtRowEntry, includeInPending = false): void => {
+      thoughtRows.push(entry);
+      if (includeInPending) {
+        pendingThoughtRows.push(entry);
+      }
+    };
     const finalAssistantText = finalAssistantMessage?.content.trim() ?? "";
     const finalAssistantHasContent = finalAssistantText.length > 0;
     const finalAssistantSettled = Boolean(finalAssistantMessage && finalAssistantMessage.status !== "streaming");
-    const approvalRequestedAt = (approval?: PendingApproval): number => {
-      if (!approval) {
-        return Number.MAX_SAFE_INTEGER;
+    const approvalRequestedAt = (message: ChatMessage, approval?: PendingApproval): number => {
+      if (approval) {
+        const parsed = Date.parse(approval.createdAt);
+        return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
       }
 
-      const parsed = Date.parse(approval.createdAt);
-      return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
+      const createdAtFromMessage = extractApprovalCreatedAt(message);
+      if (createdAtFromMessage) {
+        const parsed = Date.parse(createdAtFromMessage);
+        if (Number.isFinite(parsed)) {
+          return parsed;
+        }
+      }
+
+      const timing = resolveMessageTiming(message);
+      return timing?.startedAt ?? timing?.completedAt ?? Number.MAX_SAFE_INTEGER;
     };
     const reasoningLinesByMessageId = new Map<string, { summaryLines: Array<string>; contentLines: Array<string> }>();
     const fileChangeMessagesById = new Map<string, ChatMessage>();
@@ -5387,31 +5604,67 @@ export function App() {
             continue;
           }
 
-          thoughtRows.push(
-            <div key={`reasoning-empty-${message.id}`} className="thought-row-line summary" data-thought-collapse="true">
-              <span>thinking</span>
-              <span className="thinking-ellipsis" aria-label="thinking">
-                ...
-              </span>
-            </div>
-          );
+          appendThoughtRow({
+            key: `reasoning-empty-${message.id}`,
+            node: (
+              <div key={`reasoning-empty-${message.id}`} className="thought-row-line summary" data-thought-collapse="true">
+                <span>thinking</span>
+                <span className="thinking-ellipsis" aria-label="thinking">
+                  ...
+                </span>
+              </div>
+            ),
+            sectionTitle: null
+          });
           continue;
         }
 
         for (const [index, line] of summaryLines.entries()) {
-          thoughtRows.push(
-            <div key={`reasoning-summary-${message.id}-${index}`} className="thought-row-line summary" data-thought-collapse="true">
-              {line}
-            </div>
-          );
+          const rowKey = `reasoning-summary-${message.id}-${index}`;
+          const marker = extractMarkdownSectionHeader(line);
+          const markerLeadNode =
+            marker && marker.remainder
+              ? (
+                  <div key={`${rowKey}-lead`} className="thought-row-line summary" data-thought-collapse="true">
+                    <MarkdownText content={marker.remainder} className="thought-markdown" />
+                  </div>
+                )
+              : null;
+          appendThoughtRow({
+            key: rowKey,
+            node:
+              markerLeadNode ??
+              (
+                <div key={rowKey} className="thought-row-line summary" data-thought-collapse="true">
+                  <MarkdownText content={line} className="thought-markdown" />
+                </div>
+              ),
+            sectionTitle: marker?.title ?? null
+          });
         }
 
         for (const [index, line] of contentLines.entries()) {
-          thoughtRows.push(
-            <div key={`reasoning-content-${message.id}-${index}`} className="thought-row-line content" data-thought-collapse="true">
-              {line}
-            </div>
-          );
+          const rowKey = `reasoning-content-${message.id}-${index}`;
+          const marker = extractMarkdownSectionHeader(line);
+          const markerLeadNode =
+            marker && marker.remainder
+              ? (
+                  <div key={`${rowKey}-lead`} className="thought-row-line content" data-thought-collapse="true">
+                    <MarkdownText content={marker.remainder} className="thought-markdown" />
+                  </div>
+                )
+              : null;
+          appendThoughtRow({
+            key: rowKey,
+            node:
+              markerLeadNode ??
+              (
+                <div key={rowKey} className="thought-row-line content" data-thought-collapse="true">
+                  <MarkdownText content={line} className="thought-markdown" />
+                </div>
+              ),
+            sectionTitle: marker?.title ?? null
+          });
         }
         continue;
       }
@@ -5440,7 +5693,11 @@ export function App() {
             {exitCode !== null && exitCode !== 0 ? <p className="thought-row-meta error">Exit code {exitCode}</p> : null}
           </div>
         );
-        thoughtRows.push(eventRow);
+        appendThoughtRow({
+          key: `event-${message.id}`,
+          node: eventRow,
+          sectionTitle: null
+        });
         continue;
       }
 
@@ -5489,13 +5746,17 @@ export function App() {
             ))}
           </div>
         );
-        thoughtRows.push(eventRow);
+        appendThoughtRow({
+          key: `event-${message.id}`,
+          node: eventRow,
+          sectionTitle: null
+        });
         continue;
       }
 
       if (message.type.startsWith("approval.")) {
+        // Completed approval updates are intentionally hidden. We only render approvals while pending.
         if (!pendingApproval) {
-          // Keep approval rows visible only while action is still pending.
           continue;
         }
 
@@ -5503,8 +5764,6 @@ export function App() {
         const command = extractApprovalCommand(message, pendingApproval) ?? "(unknown command)";
         const fileChangeCount = extractApprovalFileChangeCount(message, pendingApproval);
         const fileChangeLabel = formatFileChangeLabel(fileChangeCount);
-        const decision = extractApprovalDecision(message);
-        const resolutionStatus = extractApprovalStatus(message);
         const lowerContent = message.content.toLowerCase();
         const isCommandApproval =
           method === "item/commandExecution/requestApproval" ||
@@ -5515,9 +5774,9 @@ export function App() {
           method === "item/fileChange/requestApproval" ||
           lowerContent.includes("file change approval required") ||
           lowerContent.includes("approval required to apply:");
-        const pendingFileChangePreview = pendingApproval && isFileChangeApproval ? summarizePendingFileChangeApproval(pendingApproval) : null;
+        const pendingFileChangePreview = isFileChangeApproval ? summarizePendingFileChangeApproval(pendingApproval) : null;
         const linkedFileChangeMessage =
-          pendingApproval && isFileChangeApproval && pendingApproval.itemId ? fileChangeMessagesById.get(pendingApproval.itemId) ?? null : null;
+          isFileChangeApproval && pendingApproval.itemId ? fileChangeMessagesById.get(pendingApproval.itemId) ?? null : null;
         const linkedFileChangePreview = linkedFileChangeMessage ? summarizeFileChangeMessage(linkedFileChangeMessage) : null;
         const effectiveFileChangePreview = (() => {
           if (!isFileChangeApproval) {
@@ -5543,46 +5802,19 @@ export function App() {
         })();
 
         if (isCommandApproval || isFileChangeApproval) {
-          const acceptedUpdate =
-            !pendingApproval &&
-            (decision === "accept" ||
-              lowerContent.includes("approved for") ||
-              lowerContent.includes("approved to run") ||
-              lowerContent.includes("approved file changes") ||
-              lowerContent.includes("approved to apply"));
-
-          // Keep approval timeline lean: once accepted, downstream execution/file-change rows own visible outcome.
-          if (acceptedUpdate) {
-            continue;
-          }
-
+          const approvalAction = approvalActionById[pendingApproval.approvalId];
+          const approvalActionPending = Boolean(approvalAction);
           const approvalText = (() => {
             if (isCommandApproval) {
-              return pendingApproval
-                ? `Approval required to run: ${command}`
-                : commandApprovalResolutionSummary(
-                    {
-                      status: resolutionStatus ?? undefined,
-                      decision: decision ?? undefined
-                    },
-                    command
-                  );
+              return `Approval required to run: ${command}`;
             }
 
-            return pendingApproval
-              ? effectiveFileChangePreview
-                ? summarizePendingFileChangeApprovalText({
-                    ...effectiveFileChangePreview,
-                    projectRoot: selectedSession?.cwd ?? null
-                  })
-                : `Approval required to apply: ${fileChangeLabel}`
-              : fileChangeApprovalResolutionSummary(
-                  {
-                    status: resolutionStatus ?? undefined,
-                    decision: decision ?? undefined
-                  },
-                  fileChangeLabel
-                );
+            return effectiveFileChangePreview
+              ? summarizePendingFileChangeApprovalText({
+                  ...effectiveFileChangePreview,
+                  projectRoot: selectedSession?.cwd ?? null
+                })
+              : `Approval required to apply: ${fileChangeLabel}`;
           })();
 
           const eventRow = (
@@ -5620,26 +5852,41 @@ export function App() {
               ) : null}
               {pendingApproval ? (
                 <div className="approval-actions">
-                  <button type="button" onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "accept", "turn")}>
-                    Approve
+                  <button
+                    type="button"
+                    onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "accept", "turn")}
+                    disabled={approvalActionPending}
+                  >
+                    {approvalAction?.decision === "accept" && approvalAction.scope === "turn" ? "Approving..." : "Approve"}
                   </button>
-                  <button type="button" onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "accept", "session")}>
-                    Approve for Session
+                  <button
+                    type="button"
+                    onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "accept", "session")}
+                    disabled={approvalActionPending}
+                  >
+                    {approvalAction?.decision === "accept" && approvalAction.scope === "session"
+                      ? "Approving Session..."
+                      : "Approve for Session"}
                   </button>
                   <button
                     type="button"
                     className="danger"
                     onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "decline", "turn")}
+                    disabled={approvalActionPending}
                   >
-                    Deny
+                    {approvalAction?.decision === "decline" ? "Denying..." : "Deny"}
                   </button>
                 </div>
               ) : null}
             </div>
           );
           const queuedApprovalRow = {
-            row: eventRow,
-            requestedAt: approvalRequestedAt(pendingApproval),
+            row: {
+              key: `event-${message.id}`,
+              node: eventRow,
+              sectionTitle: null
+            },
+            requestedAt: approvalRequestedAt(message, pendingApproval),
             sequence: approvalSequence
           };
           approvalSequence += 1;
@@ -5658,15 +5905,26 @@ export function App() {
         : message.type.startsWith("approval.")
           ? message.type === "approval.request"
             ? "Approval Required"
-            : "Approval Update"
+          : "Approval Update"
           : message.type;
       const showEventTitle = message.type !== "agentMessage";
       const showDetails = Boolean(message.details) && !message.type.startsWith("approval.");
+      const agentSectionHeader = message.type === "agentMessage" ? extractMarkdownSectionHeader(message.content || "") : null;
+      const agentMessageBody =
+        message.type === "agentMessage"
+          ? agentSectionHeader
+            ? agentSectionHeader.remainder
+            : message.content || "(empty)"
+          : null;
 
       const eventRow = (
         <div key={`event-${message.id}`} className="thought-row-event" data-thought-no-collapse="true">
           {showEventTitle ? <p className="thought-row-title">{title}</p> : null}
-          <p className="thought-row-text">{message.content}</p>
+          {message.type === "agentMessage" ? (
+            agentMessageBody ? <MarkdownText content={agentMessageBody} className="thought-markdown thought-row-text" /> : null
+          ) : (
+            <p className="thought-row-text">{message.content}</p>
+          )}
           {pendingApproval ? <p className="approval-time">Requested: {formatApprovalDate(pendingApproval.createdAt)}</p> : null}
           {pendingToolInput ? <p className="approval-time">Requested: {formatApprovalDate(pendingToolInput.createdAt)}</p> : null}
           {showDetails ? (
@@ -5677,14 +5935,33 @@ export function App() {
           ) : null}
           {pendingApproval ? (
             <div className="approval-actions">
-              <button type="button" onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "accept", "turn")}>
-                Approve
+              <button
+                type="button"
+                onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "accept", "turn")}
+                disabled={Boolean(approvalActionById[pendingApproval.approvalId])}
+              >
+                {approvalActionById[pendingApproval.approvalId]?.decision === "accept" &&
+                approvalActionById[pendingApproval.approvalId]?.scope === "turn"
+                  ? "Approving..."
+                  : "Approve"}
               </button>
-              <button type="button" onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "accept", "session")}>
-                Approve for Session
+              <button
+                type="button"
+                onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "accept", "session")}
+                disabled={Boolean(approvalActionById[pendingApproval.approvalId])}
+              >
+                {approvalActionById[pendingApproval.approvalId]?.decision === "accept" &&
+                approvalActionById[pendingApproval.approvalId]?.scope === "session"
+                  ? "Approving Session..."
+                  : "Approve for Session"}
               </button>
-              <button type="button" className="danger" onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "decline", "turn")}>
-                Deny
+              <button
+                type="button"
+                className="danger"
+                onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "decline", "turn")}
+                disabled={Boolean(approvalActionById[pendingApproval.approvalId])}
+              >
+                {approvalActionById[pendingApproval.approvalId]?.decision === "decline" ? "Denying..." : "Deny"}
               </button>
             </div>
           ) : null}
@@ -5741,8 +6018,12 @@ export function App() {
       );
       if (message.type.startsWith("approval.")) {
         const queuedApprovalRow = {
-          row: eventRow,
-          requestedAt: approvalRequestedAt(pendingApproval),
+          row: {
+            key: `event-${message.id}`,
+            node: eventRow,
+            sectionTitle: null
+          },
+          requestedAt: approvalRequestedAt(message, pendingApproval),
           sequence: approvalSequence
         };
         approvalSequence += 1;
@@ -5751,10 +6032,15 @@ export function App() {
           queuedPendingApprovalRows.push(queuedApprovalRow);
         }
       } else {
-        thoughtRows.push(eventRow);
-        if (pendingApproval || pendingToolInput) {
-          pendingThoughtRows.push(eventRow);
-        }
+        const sectionTitle = message.type === "agentMessage" ? agentSectionHeader?.title ?? null : null;
+        appendThoughtRow(
+          {
+            key: `event-${message.id}`,
+            node: eventRow,
+            sectionTitle
+          },
+          Boolean(pendingApproval || pendingToolInput)
+        );
       }
     }
 
@@ -5772,8 +6058,84 @@ export function App() {
     const thoughtMode = panelState?.mode ?? (pendingThoughtRows.length > 0 && !thinkingActive ? "pending-only" : "full");
     const thoughtsOpen = panelState?.open ?? (thinkingActive || pendingThoughtRows.length > 0);
     const showingPendingOnly = thoughtMode === "pending-only" && pendingThoughtRows.length > 0;
-    const displayedThoughtRows = showingPendingOnly ? pendingThoughtRows : thoughtRows;
+    const displayedThoughtRowEntries = showingPendingOnly ? pendingThoughtRows : thoughtRows;
     const canShowPriorActivity = showingPendingOnly && thoughtRows.length > pendingThoughtRows.length;
+    const collapsedSectionsForTurn = collapsedThoughtSectionsByTurnId[group.turnId] ?? {};
+    const toggleThoughtSection = (sectionKey: string): void => {
+      setCollapsedThoughtSectionsByTurnId((current) => {
+        const currentTurnState = current[group.turnId] ?? {};
+        return {
+          ...current,
+          [group.turnId]: {
+            ...currentTurnState,
+            [sectionKey]: !currentTurnState[sectionKey]
+          }
+        };
+      });
+    };
+    const renderThoughtRows = (entries: Array<ThoughtRowEntry>): Array<ReactNode> => {
+      const rendered: Array<ReactNode> = [];
+      let activeSection:
+        | {
+            key: string;
+            title: string;
+            rows: Array<ReactNode>;
+          }
+        | null = null;
+      const flushSection = (): void => {
+        if (!activeSection) {
+          return;
+        }
+
+        const section = activeSection;
+        const collapsed = collapsedSectionsForTurn[section.key] === true;
+        rendered.push(
+          <div key={`thought-section-${section.key}`} className="thought-section" data-thought-collapse="true">
+            <button
+              type="button"
+              className="thought-section-toggle"
+              data-thought-no-collapse="true"
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleThoughtSection(section.key);
+              }}
+            >
+              <span className={`thought-section-caret${collapsed ? " collapsed" : ""}`} aria-hidden="true" />
+              <span className="thought-section-title">{section.title}</span>
+            </button>
+            {!collapsed ? <div className="thought-section-body">{section.rows}</div> : null}
+          </div>
+        );
+        activeSection = null;
+      };
+
+      for (const entry of entries) {
+        if (entry.sectionTitle) {
+          flushSection();
+          activeSection = {
+            key: entry.key,
+            title: entry.sectionTitle,
+            rows: entry.node ? [entry.node] : []
+          };
+          continue;
+        }
+
+        if (activeSection) {
+          if (entry.node) {
+            activeSection.rows.push(entry.node);
+          }
+          continue;
+        }
+
+        if (entry.node) {
+          rendered.push(entry.node);
+        }
+      }
+
+      flushSection();
+      return rendered;
+    };
+    const displayedThoughtRows = renderThoughtRows(displayedThoughtRowEntries);
     const collapseThoughtPanel = (): void => {
       setThoughtPanelStateByTurnId((current) => ({
         ...current,
@@ -5783,6 +6145,22 @@ export function App() {
           lastPendingSignature: current[group.turnId]?.lastPendingSignature ?? ""
         }
       }));
+    };
+    const openThoughtPanel = (): void => {
+      setThoughtPanelStateByTurnId((current) => ({
+        ...current,
+        [group.turnId]: {
+          open: true,
+          mode: "full",
+          lastPendingSignature: current[group.turnId]?.lastPendingSignature ?? ""
+        }
+      }));
+    };
+    const handleThoughtSummaryKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openThoughtPanel();
+      }
     };
     const handleThoughtDetailsClick = (event: ReactMouseEvent<HTMLDivElement>): void => {
       const target = event.target;
@@ -5815,44 +6193,28 @@ export function App() {
             {thoughtMessages.length > 0 ? (
               <div className={`response-thoughts${thoughtsOpen ? " open" : ""}`}>
                 {!thoughtsOpen ? (
-                  <button
-                    type="button"
+                  <div
+                    role="button"
+                    tabIndex={0}
                     className={`response-thought-summary ${thoughtHeader.tone}`}
-                    onClick={() => {
-                      setThoughtPanelStateByTurnId((current) => ({
-                        ...current,
-                        [group.turnId]: {
-                          open: true,
-                          mode: "full",
-                          lastPendingSignature: current[group.turnId]?.lastPendingSignature ?? ""
-                        }
-                      }));
-                    }}
+                    onClick={openThoughtPanel}
+                    onKeyDown={handleThoughtSummaryKeyDown}
                   >
-                    {thoughtHeader.text}
-                  </button>
+                    <MarkdownText content={thoughtHeader.text} className="thought-markdown response-thought-header-markdown" />
+                  </div>
                 ) : null}
                 {thoughtsOpen ? (
                   <div className="response-thought-details" onClick={handleThoughtDetailsClick}>
                     {showingPendingOnly ? (
-                      <p className={`response-thought-preview ${thoughtHeader.tone}`} data-thought-collapse="true">
-                        {thoughtHeader.text}
-                      </p>
+                      <div className={`response-thought-preview ${thoughtHeader.tone}`} data-thought-collapse="true">
+                        <MarkdownText content={thoughtHeader.text} className="thought-markdown response-thought-header-markdown" />
+                      </div>
                     ) : null}
                     {canShowPriorActivity ? (
                       <button
                         type="button"
                         className="thought-preview-expand"
-                        onClick={() =>
-                          setThoughtPanelStateByTurnId((current) => ({
-                            ...current,
-                            [group.turnId]: {
-                              open: true,
-                              mode: "full",
-                              lastPendingSignature: current[group.turnId]?.lastPendingSignature ?? ""
-                            }
-                          }))
-                        }
+                        onClick={openThoughtPanel}
                       >
                         Show prior activity
                       </button>
@@ -5864,7 +6226,20 @@ export function App() {
             ) : null}
             {finalAssistantMessage ? (
               <div className="response-body">
-                <pre>{finalAssistantMessage.content || "(empty)"}</pre>
+                <div className="response-markdown">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      a: ({ href, children, ...props }) => (
+                        <a href={href} {...props} target="_blank" rel="noreferrer">
+                          {children}
+                        </a>
+                      )
+                    }}
+                  >
+                    {finalAssistantMessage.content || "(empty)"}
+                  </ReactMarkdown>
+                </div>
               </div>
             ) : null}
           </article>
@@ -6272,46 +6647,15 @@ export function App() {
         ) : null}
 
         <div className={`chat-body${insightDrawerOpen ? " with-drawer" : ""}`}>
-          <div className="chat-transcript" ref={transcriptRef} onScroll={handleTranscriptScroll}>
-            <div className="chat-transcript-inner">
-            <div className="transcript-toolbar">
-              <div className="filter-group" role="tablist" aria-label="Transcript filter">
-                <button
-                  type="button"
-                  className={transcriptFilter === "all" ? "filter-btn active" : "filter-btn"}
-                  onClick={() => setTranscriptFilter("all")}
-                >
-                  All ({transcriptCounts.all})
-                </button>
-                <button
-                  type="button"
-                  className={transcriptFilter === "chat" ? "filter-btn active" : "filter-btn"}
-                  onClick={() => setTranscriptFilter("chat")}
-                >
-                  Chat ({transcriptCounts.chat})
-                </button>
-                <button
-                  type="button"
-                  className={transcriptFilter === "tools" ? "filter-btn active" : "filter-btn"}
-                  onClick={() => setTranscriptFilter("tools")}
-                >
-                  Tools ({transcriptCounts.tools})
-                </button>
-                <button
-                  type="button"
-                  className={transcriptFilter === "approvals" ? "filter-btn active" : "filter-btn"}
-                  onClick={() => setTranscriptFilter("approvals")}
-                >
-                  Approvals ({transcriptCounts.approvals})
-                </button>
+          <div className="chat-transcript-shell">
+            <div className="chat-transcript" ref={transcriptRef} onScroll={handleTranscriptScroll}>
+              <div className="chat-transcript-inner">
+                {loadingTranscript ? <p className="hint">Loading transcript...</p> : null}
+
+                {!loadingTranscript && visibleTurnGroups.length === 0 ? <p className="hint">No entries yet.</p> : null}
+
+                {visibleTurnGroups.map((group) => renderTurnGroup(group))}
               </div>
-            </div>
-
-            {loadingTranscript ? <p className="hint">Loading transcript...</p> : null}
-
-            {!loadingTranscript && visibleTurnGroups.length === 0 ? <p className="hint">No entries for this filter yet.</p> : null}
-
-            {visibleTurnGroups.map((group) => renderTurnGroup(group))}
             </div>
 
             {showJumpToBottom ? (

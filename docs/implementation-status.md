@@ -13,9 +13,12 @@ Use this with:
 
 ## Last verified
 
-- Date: February 17, 2026
+- Date: February 18, 2026
 - Validation run:
-  - `pnpm typecheck`
+  - `pnpm --filter @repo/web typecheck` (pass)
+  - `pnpm --filter @repo/web test -- --runInBand` (pass)
+  - `pnpm test:e2e -- tests/e2e/approvals.spec.ts` (pass)
+  - `pnpm test:e2e -- tests/e2e/streaming-core.spec.ts` (pass)
 
 ## Current implemented scope
 
@@ -105,15 +108,22 @@ Use this with:
   - disconnected websocket state now blocks the chat pane with a reconnect overlay/action until connectivity resumes.
   - send-message health check: when no turn/activity response arrives shortly after send, the UI marks websocket as effectively disconnected and prompts reconnect.
   - message send/cancel/retry flows.
-  - streamed transcript rendering with filters (All/Chat/Tools/Approvals); filters control which turns are visible, while each visible turn card keeps full in-order thought activity (reasoning/tools/approvals) for auditability.
+  - streamed transcript rendering always shows full turn chronology (no top-level transcript filter bar), and each turn card preserves full in-order thought activity (reasoning/tools/approvals) for auditability.
+  - transcript tail-follow uses bottom-distance hysteresis (wider disengage threshold than re-engage threshold) to avoid flicker between follow/manual modes during rapid approval/event layout updates.
+  - tail-follow + approval anchoring constants are explicitly tuned in `apps/web/src/App.tsx`: follow-mode disengage threshold `96px`, re-engage threshold `24px`, approve-click near-bottom arming threshold `128px`, manual snap-back release threshold `420px` from bottom, incoming-approval snap-back window `3200ms`, approve-click snap-back window `2600ms`, and delayed snap-back start `60ms` to avoid pre-layout jitter.
+  - incoming approval requests for the active chat force-focus the tail and arm a short snap-back lock so approvals are visible immediately; approving while near the tail re-arms the same lock to stay anchored through approval grow/shrink + immediate follow-on item streaming; the lock auto-expires and cancels if the user intentionally scrolls far upward.
+  - `Jump to bottom` is rendered as an absolute overlay in the transcript pane (not in scroll-content flow), so it no longer perturbs transcript height or bottom anchoring when shown/hidden.
   - transcript turn grouping renders one user request card plus one consolidated response card per turn.
-  - response card layout is a single bubble: top thought area (shown only when the turn has reasoning/tool/approval activity) plus bottom final assistant response text area.
+  - response card layout is a single bubble: top thought area (shown only when the turn has reasoning/tool/approval activity) plus bottom final assistant response area.
+  - final assistant response area renders Markdown (GFM tables/lists/strikethrough/task lists) via safe Markdown rendering (raw HTML is not executed), with inline code and block code styled for chat readability.
+  - thought preview/header text and thought-line reasoning/agent message content also render through the same safe Markdown pipeline, so multiline reasoning updates and markdown-formatted progress notes keep structure (paragraphs/lists/code) instead of flattening into a single plain-text line.
+  - inside expanded thought details, reasoning/agent markdown lines that start with a bold title prefix (`**Title** ...`) become collapsible section headers (caret indicator) that group all following thought activity until the next section header (or end of the thought block); when the header line has trailing text after the bold prefix, that trailing text is retained as the first line inside the section body; section-toggle hit targets are content-width (not full-row), while clicks in surrounding thought background still collapse the full thought panel.
   - thought status is keyed to active turn lifecycle state (not inferred from partial thought rows): while the selected turn is active, the collapsed header shows a live progress preview (`Working...` until reasoning/agent progress text is available, then latest progress text); once the turn reaches a terminal lifecycle notification (`turn/completed` or `turn/failed`) it switches to `Worked for <duration>` using turn/message timing with `<1s` fallback for legacy timing gaps.
   - empty reasoning placeholders are auto-suppressed once completion can be inferred (turn ended, later meaningful events exist, or final assistant output is present/settled), preventing stale `thinking...` rows in completed turns.
-  - thought disclosure keeps per-turn open/closed state stable across stream/approval updates; when a new pending approval/tool-input arrives while the panel is closed it auto-opens in pending-only preview, and users can explicitly expand to full prior activity. Expanded mode hides the collapsed header label for normal full view, while pending-only view shows the latest live reasoning/agent preview text above `Show prior activity` for context.
+  - thought disclosure keeps per-turn open/closed state stable across stream/approval updates; when a new pending approval/tool-input arrives while the panel is closed it auto-opens in pending-only preview, and users can explicitly expand to full prior activity. Pending resolution no longer force-flips panel mode, preventing abrupt pending-only/full layout churn mid-turn. Expanded mode hides the collapsed header label for normal full view, while pending-only view shows the latest live reasoning/agent preview text above `Show prior activity` for context.
   - expanded thought panels collapse only from background/plain-thought clicks; clicks inside event/approval bubbles and their controls do not auto-collapse.
   - expanded thought details render reasoning summary/content line rows and inline tool/approval/tool-input context with actions.
-  - command and file-change approvals render as compact action-first rows (`Approval required to run …`, `Approval required to create/modify/delete/move file …`) with inline decision actions; approval cards are shown only while pending and are hidden after resolution, pending file-change approvals include an inline dark-theme diff/content preview above decision buttons and suppress duplicate pending file-change item rows until approved, accepted approval-update noise is suppressed, command-execution rows render inline terminal-style dark blocks (no nested wrapper bubble) with prompt lines whose `~` prefix is mapped to inferred user home from runtime cwd paths, and file-change rows render structured dark-theme diffs with add/remove/hunk/context coloring where displayed file paths and absolute home-path text in diff lines are normalized to `~`.
+  - command and file-change approvals render as compact action-first rows (`Approval required to run …`, `Approval required to create/modify/delete/move file …`) with inline decision actions; decision UX is websocket-authoritative (buttons enter submitting state locally, pending/resolved transitions are applied from runtime events, and a bounded fallback reconcile reloads pending approvals after submit if a resolution event is missed), approval rows are rendered only while pending (resolved/expired approval update rows are intentionally suppressed), pending file-change approvals include an inline dark-theme diff/content preview above decision buttons and suppress duplicate pending file-change item rows until approved, command-execution rows render inline terminal-style dark blocks (no nested wrapper bubble) with prompt lines whose `~` prefix is mapped to inferred user home from runtime cwd paths, and file-change rows render structured dark-theme diffs with add/remove/hunk/context coloring where displayed file paths and absolute home-path text in diff lines are normalized to `~`.
   - composer uses a single message input; `Suggest Reply` populates that same draft box and `Ctrl+Enter` sends.
   - header uses a combined nested selector (`Model -> Reasoning`): model rows open right-side reasoning submenus, users pick model+effort in one action, `Thread default` is removed from UI choices, and per-session effort/model selections are forwarded on send/suggest requests.
   - suggest-reply requests are race-guarded so late responses do not overwrite the draft after session switches or user edits.
@@ -143,7 +153,10 @@ Use this with:
 
 ### Passing checks
 
-- `pnpm typecheck`
+- `pnpm --filter @repo/web typecheck`
+- `pnpm --filter @repo/web test -- --runInBand`
+- `pnpm test:e2e -- tests/e2e/approvals.spec.ts`
+- `pnpm test:e2e -- tests/e2e/streaming-core.spec.ts`
 
 ### Current validation limitations
 

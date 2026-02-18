@@ -40,7 +40,7 @@ Key runtime semantics operators should know:
 - Session hard delete is a harness extension (`DELETE /api/sessions/:sessionId`) because app-server has no native `thread/delete`.
 - Suggested-reply (`POST /api/sessions/:sessionId/suggested-reply`) routes through project orchestrator chat when available, falls back to helper-thread strategy, and cleans helper sessions so they do not appear in lists or stream traffic.
 - Project deletion enforces emptiness against live sessions only; stale assignment metadata is pruned during delete before emptiness is evaluated.
-- In the web UI, the left sidebar and right chat pane scroll independently and the composer remains pinned in the right pane.
+- In the web UI, the left sidebar and right chat pane scroll independently and the composer remains pinned in the right pane; transcript tail-follow uses hysteresis, `Jump to bottom` is an absolute overlay so approval/event bursts do not shift scroll geometry, and incoming approval requests for the active chat force-focus bottom with a short snap-back window (brief settle delay before the first snap, also re-armed on approve) to preserve anchoring through approval transition jitter.
 
 ---
 

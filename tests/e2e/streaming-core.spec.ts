@@ -4,27 +4,31 @@ test("message can be sent and transcript updates", async ({ page }) => {
   await page.goto("/");
 
   await page.getByRole("button", { name: "New Chat" }).click();
-  const prompt = `Reply with exactly OK ${Date.now()}`;
+  const nonce = Date.now();
+  const prompt = `Reply with exactly OK ${nonce}`;
   const textarea = page.getByPlaceholder("Type your message...");
   await textarea.fill(prompt);
   await page.getByRole("button", { name: "Send" }).click();
 
   const transcript = page.locator(".chat-transcript-inner");
-  await expect(transcript.locator("article.bubble.user pre").last()).toHaveText(prompt);
-  await expect(page.getByRole("button", { name: /Chat \(/ })).toBeVisible();
+  const latestTurnBeforeIdle = transcript.locator(".turn-group").last();
+  await expect(latestTurnBeforeIdle).toContainText(`OK ${nonce}`);
+  await expect(page.locator(".chat-transcript-inner .turn-group")).not.toHaveCount(0);
 });
 
 test("active turn returns to idle and does not stay in working state", async ({ page }) => {
   await page.goto("/");
 
   await page.getByRole("button", { name: "New Chat" }).click();
-  const prompt = `Return exactly OK ${Date.now()}`;
+  const nonce = Date.now();
+  const prompt = `Return exactly OK ${nonce}`;
   const textarea = page.getByPlaceholder("Type your message...");
   await textarea.fill(prompt);
   await page.getByRole("button", { name: "Send" }).click();
 
   const transcript = page.locator(".chat-transcript-inner");
-  await expect(transcript.locator("article.bubble.user pre").last()).toHaveText(prompt);
+  const latestTurnBeforeIdle = transcript.locator(".turn-group").last();
+  await expect(latestTurnBeforeIdle).toContainText(`OK ${nonce}`);
   await expect
     .poll(
       async () => {
