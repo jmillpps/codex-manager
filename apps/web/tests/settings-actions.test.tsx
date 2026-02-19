@@ -122,6 +122,21 @@ function hasFetchCall(fetchMock: ReturnType<typeof vi.fn>, fragment: string): bo
   });
 }
 
+function deferredResponse(): { promise: Promise<Response>; resolve: (response: Response) => void } {
+  let resolve: ((response: Response) => void) | null = null;
+  const promise = new Promise<Response>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return {
+    promise,
+    resolve: (response: Response) => {
+      if (resolve) {
+        resolve(response);
+      }
+    }
+  };
+}
+
 describe("settings endpoint wiring", () => {
   const originalWebSocket = globalThis.WebSocket;
   let fetchMock: ReturnType<typeof vi.fn>;
@@ -129,6 +144,7 @@ describe("settings endpoint wiring", () => {
   let confirmSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
+    window.localStorage.clear();
     globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
     MockWebSocket.instances = [];
 
@@ -246,5 +262,296 @@ describe("settings endpoint wiring", () => {
       expect(screen.queryByText("Approval required to run: echo test")).not.toBeInTheDocument();
     });
     await screen.findByText("Idle");
+  });
+
+  it("ignores stale transcript and approval responses after switching sessions", async () => {
+    const createdAt = new Date().toISOString();
+    const sessionA = {
+      sessionId: "session-a",
+      title: "Session A",
+      materialized: true,
+      modelProvider: "openai",
+      createdAt: 1,
+      updatedAt: 2,
+      cwd: "/tmp",
+      source: "persisted",
+      projectId: null
+    };
+    const sessionB = {
+      sessionId: "session-b",
+      title: "Session B",
+      materialized: true,
+      modelProvider: "openai",
+      createdAt: 3,
+      updatedAt: 4,
+      cwd: "/tmp",
+      source: "persisted",
+      projectId: null
+    };
+
+    const sessionATranscript = deferredResponse();
+    const sessionAApprovals = deferredResponse();
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions?")) {
+        return Promise.resolve(json(200, { data: [sessionA, sessionB], nextCursor: null, archived: false }));
+      }
+
+      if (url.endsWith("/api/sessions/session-a")) {
+        return sessionATranscript.promise;
+      }
+
+      if (url.endsWith("/api/sessions/session-a/approvals")) {
+        return sessionAApprovals.promise;
+      }
+
+      if (url.endsWith("/api/sessions/session-a/tool-input")) {
+        return Promise.resolve(json(200, { data: [] }));
+      }
+
+      if (url.endsWith("/api/sessions/session-b")) {
+        return Promise.resolve(
+          json(200, {
+            session: { sessionId: "session-b" },
+            transcript: [
+              {
+                messageId: "b-user-1",
+                turnId: "b-turn-1",
+                role: "user",
+                type: "userMessage",
+                content: "B thread message",
+                details: null,
+                status: "complete"
+              }
+            ]
+          })
+        );
+      }
+
+      if (url.endsWith("/api/sessions/session-b/approvals")) {
+        return Promise.resolve(json(200, { data: [] }));
+      }
+
+      if (url.endsWith("/api/sessions/session-b/tool-input")) {
+        return Promise.resolve(json(200, { data: [] }));
+      }
+
+      return Promise.resolve(routeResponse(url));
+    });
+
+    render(<App />);
+
+    const sessionBButton = await screen.findByRole("button", { name: "Session B" });
+    fireEvent.click(sessionBButton);
+    await screen.findByText("B thread message");
+
+    await act(async () => {
+      sessionAApprovals.resolve(
+        json(200, {
+          data: [
+            {
+              approvalId: "stale-approval",
+              method: "item/commandExecution/requestApproval",
+              threadId: "session-a",
+              turnId: "a-turn-1",
+              itemId: "a-item-1",
+              summary: "Approval required to run command",
+              details: {
+                command: "echo stale"
+              },
+              createdAt,
+              status: "pending"
+            }
+          ]
+        })
+      );
+      sessionATranscript.resolve(
+        json(200, {
+          session: { sessionId: "session-a" },
+          transcript: [
+            {
+              messageId: "a-user-1",
+              turnId: "a-turn-1",
+              role: "user",
+              type: "userMessage",
+              content: "A thread message",
+              details: null,
+              status: "complete"
+            }
+          ]
+        })
+      );
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText("Approval required to run: echo stale")).not.toBeInTheDocument();
+      expect(screen.queryByText("A thread message")).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("B thread message")).toBeInTheDocument();
+  });
+
+  it("dedupes duplicate model ids and keeps selected model effort stable", async () => {
+    const session = {
+      sessionId: "session-model",
+      title: "Session Model",
+      materialized: true,
+      modelProvider: "openai",
+      createdAt: 1,
+      updatedAt: 2,
+      cwd: "/tmp",
+      source: "persisted",
+      projectId: null
+    };
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes("/api/sessions?")) {
+        return Promise.resolve(json(200, { data: [session], nextCursor: null, archived: false }));
+      }
+
+      if (url.includes("/api/models?")) {
+        return Promise.resolve(
+          json(200, {
+            data: [
+              {
+                id: "codex-max",
+                name: "Codex Max",
+                provider: "openai",
+                isDefault: true,
+                supportedReasoningEfforts: ["high", "low"]
+              },
+              {
+                id: "codex-max",
+                name: "Codex Max Duplicate",
+                provider: "openai",
+                supportedReasoningEfforts: ["xhigh"]
+              },
+              {
+                id: "gpt-lite",
+                name: "GPT Lite",
+                provider: "openai",
+                supportedReasoningEfforts: ["minimal", "low"]
+              }
+            ]
+          })
+        );
+      }
+
+      if (/\/api\/sessions\/[^/]+$/.test(url) && !url.includes("/api/sessions?")) {
+        return Promise.resolve(json(200, { session: { sessionId: "session-model" }, transcript: [] }));
+      }
+
+      if (/\/api\/sessions\/[^/]+\/approvals$/.test(url)) {
+        return Promise.resolve(json(200, { data: [] }));
+      }
+
+      if (/\/api\/sessions\/[^/]+\/tool-input$/.test(url)) {
+        return Promise.resolve(json(200, { data: [] }));
+      }
+
+      return Promise.resolve(routeResponse(url));
+    });
+
+    render(<App />);
+
+    const modelButton = await screen.findByRole("button", { name: /Codex Max/i });
+    fireEvent.click(modelButton);
+
+    const menu = await screen.findByRole("menu", { name: "Select model and reasoning effort" });
+    expect(menu.querySelectorAll(".model-submenu-group").length).toBe(2);
+
+    const xhighOption = screen.getByRole("menuitemradio", { name: "XHigh" });
+    fireEvent.click(xhighOption);
+
+    await waitFor(() => {
+      const trigger = document.querySelector<HTMLButtonElement>(".model-combo-trigger");
+      expect(trigger).not.toBeNull();
+      expect(trigger.textContent ?? "").toContain("Codex Max");
+      expect(trigger.textContent ?? "").toContain("XHigh");
+    });
+  });
+
+  it("toggles per-chat approval policy and sends never for that chat", async () => {
+    const session = {
+      sessionId: "session-approval",
+      title: "Session Approval",
+      materialized: true,
+      modelProvider: "openai",
+      approvalPolicy: "untrusted",
+      createdAt: 1,
+      updatedAt: 2,
+      cwd: "/tmp",
+      source: "persisted",
+      projectId: null
+    };
+
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.includes("/api/sessions?")) {
+        return Promise.resolve(json(200, { data: [session], nextCursor: null, archived: false }));
+      }
+
+      if (url.includes("/api/models?")) {
+        return Promise.resolve(json(200, { data: [] }));
+      }
+
+      if (url.endsWith("/api/sessions/session-approval")) {
+        return Promise.resolve(json(200, { session, transcript: [] }));
+      }
+
+      if (url.endsWith("/api/sessions/session-approval/approvals")) {
+        return Promise.resolve(json(200, { data: [] }));
+      }
+
+      if (url.endsWith("/api/sessions/session-approval/tool-input")) {
+        return Promise.resolve(json(200, { data: [] }));
+      }
+
+      if (url.endsWith("/api/sessions/session-approval/approval-policy") && init?.method === "POST") {
+        return Promise.resolve(
+          json(200, {
+            status: "ok",
+            sessionId: "session-approval",
+            approvalPolicy: "never"
+          })
+        );
+      }
+
+      if (url.endsWith("/api/sessions/session-approval/messages") && init?.method === "POST") {
+        return Promise.resolve(
+          json(202, {
+            status: "accepted",
+            sessionId: "session-approval",
+            turnId: "turn-approval-1"
+          })
+        );
+      }
+
+      return Promise.resolve(routeResponse(url));
+    });
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "Session Approval" });
+    expect(screen.getByRole("button", { name: "Approvals: Unless Trusted" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Approvals: Unless Trusted" }));
+    await screen.findByRole("button", { name: "Approvals: Never" });
+
+    const composer = screen.getByPlaceholderText("Type your message...");
+    fireEvent.change(composer, { target: { value: "policy test message" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(hasFetchCall(fetchMock, "/api/sessions/session-approval/messages")).toBe(true));
+    const messagesCall = fetchMock.mock.calls.find((args) => String(args[0]).includes("/api/sessions/session-approval/messages"));
+    expect(messagesCall).toBeDefined();
+    const requestBody = JSON.parse(String((messagesCall?.[1] as RequestInit | undefined)?.body ?? "{}")) as {
+      approvalPolicy?: string;
+    };
+    expect(requestBody.approvalPolicy).toBe("never");
   });
 });

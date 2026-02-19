@@ -36,6 +36,7 @@ Use this with:
   - send message (`turn/start`) and interrupt.
   - new user-created chats are initialized with a short sticky default title (`New chat`) and remain renameable via existing rename flow.
   - send message supports optional reasoning effort override (`effort`) and applies it to `turn/start`.
+  - send message supports optional approval-policy override (`approvalPolicy`), and per-chat approval policy can be updated via `POST /api/sessions/:sessionId/approval-policy` (persisted in session metadata and reused on resume/fork/send when no per-turn override is provided).
   - thread lifecycle calls (`thread/start`, `thread/fork`, `thread/resume`) optimistically request `experimentalRawEvents` and automatically retry without it when unsupported (`requires experimentalApi capability`) so runtime compatibility is preserved across app-server versions.
   - suggested reply endpoint (`POST /api/sessions/:sessionId/suggested-reply`) that uses the project orchestration chat when the source chat belongs to a project (falls back to helper thread for unassigned chats), sanitizes orchestration scaffolding from model output, supports non-materialized chats by returning draft-based fallback text (or `409 no_context` when no draft/context exists), and hard-cleans helper sessions so they do not leak into user-visible chat lists.
   - suggested reply also supports optional reasoning effort override (`effort`) for suggestion-generation turns.
@@ -72,6 +73,7 @@ Use this with:
   - `GET /api/sessions` merges persisted `thread/list` output with `thread/loaded/list` so newly created, non-materialized chats appear immediately.
   - Session summaries expose `materialized` (`true` when backed by persisted rollout state; `false` for loaded in-memory threads read via `includeTurns: false` fallback).
   - Session summaries expose `projectId` (`string | null`) so assigned chats render under project sections and unassigned chats render under `Your chats`.
+  - Session summaries expose effective `approvalPolicy` (`untrusted`/`on-failure`/`on-request`/`never`) so the web header can reflect per-chat approval behavior.
   - Non-materialized sessions are movable/assignable but are not guaranteed to survive API/Codex restart before first-turn rollout materialization.
   - `POST /api/sessions/:sessionId/archive` returns HTTP `409` + `status: "not_materialized"` when no rollout exists yet.
   - `DELETE /api/sessions/:sessionId` returns `status: "ok"` on successful purge, `status: "not_found"` when the session cannot be resolved, and returns HTTP `410` deleted payloads for already-purged ids.
@@ -110,6 +112,8 @@ Use this with:
   - outgoing user bubbles include local delivery-state indicators (`Sending`, `Sent`, `Delivered`, `Failed`) with circle/check-style icons driven by optimistic send + websocket activity/timeout state.
   - incoming assistant responses show a live receive indicator (spinner) while turn activity is streaming and flip to a red disconnect marker if websocket drops mid-stream.
   - assistant completion adds a green check icon on final responses, and transcript rendering is memoized so composer typing does not re-render the full history on each keystroke.
+  - transcript/approval/tool-input hydration on chat selection is request-id race-guarded, so stale fetches from previously selected chats cannot overwrite active-chat UI state after rapid chat switching.
+  - transcript hydration preserves only unresolved local user bubbles (`Sending`/`Sent`/`Failed`) plus pending approval/tool-input rows, preventing duplicate delivered user bubbles after chat switches while keeping pending decision rows visible if transcript payloads lag.
   - message send/cancel/retry flows.
   - streamed transcript rendering always shows full turn chronology (no top-level transcript filter bar), and each turn card preserves full in-order thought activity (reasoning/tools/approvals) for auditability.
   - transcript tail-follow uses bottom-distance hysteresis (wider disengage threshold than re-engage threshold) to avoid flicker between follow/manual modes during rapid approval/event layout updates.
@@ -128,7 +132,9 @@ Use this with:
   - expanded thought details render reasoning summary/content line rows and inline tool/approval/tool-input context with actions.
   - command and file-change approvals render as compact action-first rows (`Approval required to run …`, `Approval required to create/modify/delete/move file …`) with inline decision actions; decision UX is websocket-authoritative (buttons enter submitting state locally, pending/resolved transitions are applied from runtime events, and a bounded fallback reconcile reloads pending approvals after submit if a resolution event is missed), approval rows are rendered only while pending (resolved/expired approval update rows are intentionally suppressed), pending file-change approvals include an inline dark-theme diff/content preview above decision buttons and suppress duplicate pending file-change item rows until approved, command-execution rows render inline terminal-style dark blocks (no nested wrapper bubble) with prompt lines whose `~` prefix is mapped to inferred user home from runtime cwd paths, and file-change rows render structured dark-theme diffs with add/remove/hunk/context coloring where displayed file paths and absolute home-path text in diff lines are normalized to `~`.
   - composer uses a single message input; `Suggest Reply` populates that same draft box and `Ctrl+Enter` sends.
-  - header uses a combined nested selector (`Model -> Reasoning`): model rows open right-side reasoning submenus, users pick model+effort in one action, `Thread default` is removed from UI choices, and per-session effort/model selections persist immediately when changed, survive app/browser restarts via local storage, and are forwarded on send/suggest requests.
+  - header uses a combined model/effort selector: each model row is directly selectable and shows inline reasoning-effort chips (no hover-only flyout), `Thread default` is removed from UI choices, and per-session effort/model selections persist immediately when changed, survive app/browser restarts via local storage, and are forwarded on send/suggest requests.
+  - header includes a per-chat approval-policy toggle (`Approvals: Unless Trusted` / `Approvals: Never`) that writes through to the API and applies to subsequent sends in that chat.
+  - model list hydration is normalized to one entry per model id, and same-session synchronization now preserves a valid local model/effort selection instead of reapplying fallback/session defaults during unrelated state updates.
   - suggest-reply requests are race-guarded so late responses do not overwrite the draft after session switches or user edits.
   - pending approval cards and approval decisions.
   - tool-input request cards with answer submission.

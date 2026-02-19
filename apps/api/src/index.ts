@@ -59,6 +59,7 @@ type SessionSummary = {
   title: string;
   materialized: boolean;
   modelProvider: string;
+  approvalPolicy: ApprovalPolicy;
   createdAt: number;
   updatedAt: number;
   cwd: string;
@@ -174,6 +175,7 @@ type CapabilityMethodProbe = {
 type ApprovalDecisionInput = "accept" | "decline" | "cancel";
 type DefaultSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+type ApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
 type AuthStatus = {
   hasOpenAiApiKey: boolean;
   codexHomeAuthFile: boolean;
@@ -184,6 +186,7 @@ type SessionMetadataStore = {
   titles: Record<string, string>;
   projects: Record<string, ProjectRecord>;
   sessionProjectById: Record<string, string>;
+  sessionApprovalPolicyById: Record<string, ApprovalPolicy>;
   projectOrchestratorSessionById: Record<string, string>;
   suggestionHelperSessionIds: Record<string, true>;
   turnTimingBySessionId: Record<string, Record<string, TurnTimingRecord>>;
@@ -223,16 +226,19 @@ type HardDeleteSessionOutcome =
 const createSessionBodySchema = z
   .object({
     cwd: z.string().min(1).optional(),
-    model: z.string().min(1).optional()
+    model: z.string().min(1).optional(),
+    approvalPolicy: z.enum(["untrusted", "on-failure", "on-request", "never"]).optional()
   })
   .optional();
 
 const reasoningEffortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
+const approvalPolicySchema = z.enum(["untrusted", "on-failure", "on-request", "never"]);
 
 const sendMessageBodySchema = z.object({
   text: z.string().trim().min(1),
   model: z.string().min(1).optional(),
-  effort: reasoningEffortSchema.optional()
+  effort: reasoningEffortSchema.optional(),
+  approvalPolicy: approvalPolicySchema.optional()
 });
 
 const suggestedReplyBodySchema = z
@@ -242,6 +248,10 @@ const suggestedReplyBodySchema = z
     draft: z.string().trim().min(1).max(4000).optional()
   })
   .optional();
+
+const sessionApprovalPolicyBodySchema = z.object({
+  approvalPolicy: approvalPolicySchema
+});
 
 const listSessionsQuerySchema = z.object({
   archived: z.enum(["true", "false"]).optional(),
@@ -1257,6 +1267,10 @@ async function flushSupplementalTranscriptPersistence(): Promise<void> {
   }
 }
 
+function isApprovalPolicy(value: unknown): value is ApprovalPolicy {
+  return value === "untrusted" || value === "on-failure" || value === "on-request" || value === "never";
+}
+
 async function loadSessionMetadata(): Promise<SessionMetadataStore> {
   try {
     const raw = await readFile(sessionMetadataPath, "utf8");
@@ -1264,6 +1278,7 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
     const titles: Record<string, string> = {};
     const projects: Record<string, ProjectRecord> = {};
     const sessionProjectById: Record<string, string> = {};
+    const sessionApprovalPolicyById: Record<string, ApprovalPolicy> = {};
     const projectOrchestratorSessionById: Record<string, string> = {};
     const suggestionHelperSessionIds: Record<string, true> = {};
     const turnTimingBySessionId: Record<string, Record<string, TurnTimingRecord>> = {};
@@ -1313,6 +1328,14 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
           continue;
         }
         sessionProjectById[sessionId] = projectId;
+      }
+    }
+
+    if (isObjectRecord(parsed) && isObjectRecord(parsed.sessionApprovalPolicyById)) {
+      for (const [sessionId, approvalPolicy] of Object.entries(parsed.sessionApprovalPolicyById)) {
+        if (isApprovalPolicy(approvalPolicy)) {
+          sessionApprovalPolicyById[sessionId] = approvalPolicy;
+        }
       }
     }
 
@@ -1381,6 +1404,7 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
       titles,
       projects,
       sessionProjectById,
+      sessionApprovalPolicyById,
       projectOrchestratorSessionById,
       suggestionHelperSessionIds,
       turnTimingBySessionId
@@ -1394,6 +1418,7 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
       titles: {},
       projects: {},
       sessionProjectById: {},
+      sessionApprovalPolicyById: {},
       projectOrchestratorSessionById: {},
       suggestionHelperSessionIds: {},
       turnTimingBySessionId: {}
@@ -1475,6 +1500,32 @@ function resolveSessionProjectId(sessionId: string): string | null {
   }
 
   return storedProjectId;
+}
+
+function resolveSessionApprovalPolicy(sessionId: string): ApprovalPolicy {
+  const storedApprovalPolicy = sessionMetadata.sessionApprovalPolicyById[sessionId];
+  if (isApprovalPolicy(storedApprovalPolicy)) {
+    return storedApprovalPolicy;
+  }
+
+  return env.DEFAULT_APPROVAL_POLICY;
+}
+
+function setSessionApprovalPolicy(sessionId: string, approvalPolicy: ApprovalPolicy | null): boolean {
+  if (approvalPolicy === null) {
+    if (sessionId in sessionMetadata.sessionApprovalPolicyById) {
+      delete sessionMetadata.sessionApprovalPolicyById[sessionId];
+      return true;
+    }
+    return false;
+  }
+
+  if (sessionMetadata.sessionApprovalPolicyById[sessionId] === approvalPolicy) {
+    return false;
+  }
+
+  sessionMetadata.sessionApprovalPolicyById[sessionId] = approvalPolicy;
+  return true;
 }
 
 function setSessionProjectAssignment(sessionId: string, nextProjectId: string | null): boolean {
@@ -1697,6 +1748,7 @@ function toSessionSummary(thread: CodexThread, materialized = true): SessionSumm
     title: resolveSessionTitle(thread),
     materialized,
     modelProvider: thread.modelProvider,
+    approvalPolicy: resolveSessionApprovalPolicy(thread.id),
     createdAt: thread.createdAt,
     updatedAt: thread.updatedAt,
     cwd: thread.cwd,
@@ -2966,9 +3018,10 @@ async function classifyProjectSessionAssignments(sessionIds: Array<string>): Pro
 async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOutcome> {
   if (isSessionPurged(sessionId)) {
     const helperMetadataChanged = setSuggestionHelperSession(sessionId, false);
+    const policyMetadataChanged = setSessionApprovalPolicy(sessionId, null);
     const turnTimingMetadataChanged = clearSessionTurnTimings(sessionId);
     clearSupplementalTranscriptEntries(sessionId);
-    if (helperMetadataChanged || turnTimingMetadataChanged) {
+    if (helperMetadataChanged || policyMetadataChanged || turnTimingMetadataChanged) {
       await persistSessionMetadata();
     }
     return {
@@ -3024,9 +3077,17 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
     const projectMetadataChanged = setSessionProjectAssignment(sessionId, null);
     const orchestratorMetadataChanged = clearProjectOrchestratorSessionForSession(sessionId);
     const helperMetadataChanged = setSuggestionHelperSession(sessionId, false);
+    const policyMetadataChanged = setSessionApprovalPolicy(sessionId, null);
     const turnTimingMetadataChanged = clearSessionTurnTimings(sessionId);
     clearSupplementalTranscriptEntries(sessionId);
-    if (titleMetadataChanged || projectMetadataChanged || orchestratorMetadataChanged || helperMetadataChanged || turnTimingMetadataChanged) {
+    if (
+      titleMetadataChanged ||
+      projectMetadataChanged ||
+      orchestratorMetadataChanged ||
+      helperMetadataChanged ||
+      policyMetadataChanged ||
+      turnTimingMetadataChanged
+    ) {
       await persistSessionMetadata();
     }
     return {
@@ -3054,8 +3115,16 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
   const projectMetadataChanged = setSessionProjectAssignment(sessionId, null);
   const orchestratorMetadataChanged = clearProjectOrchestratorSessionForSession(sessionId);
   const helperMetadataChanged = setSuggestionHelperSession(sessionId, false);
+  const policyMetadataChanged = setSessionApprovalPolicy(sessionId, null);
   const turnTimingMetadataChanged = clearSessionTurnTimings(sessionId);
-  if (titleMetadataChanged || projectMetadataChanged || orchestratorMetadataChanged || helperMetadataChanged || turnTimingMetadataChanged) {
+  if (
+    titleMetadataChanged ||
+    projectMetadataChanged ||
+    orchestratorMetadataChanged ||
+    helperMetadataChanged ||
+    policyMetadataChanged ||
+    turnTimingMetadataChanged
+  ) {
     await persistSessionMetadata();
   }
 
@@ -4488,6 +4557,7 @@ app.get("/api/sessions", async (request) => {
 
 app.post("/api/sessions", async (request) => {
   const body = createSessionBodySchema.parse(request.body);
+  const approvalPolicy = body?.approvalPolicy ?? env.DEFAULT_APPROVAL_POLICY;
 
   const response = await callThreadMethodWithRawEventsFallback<{
     thread: CodexThread;
@@ -4495,10 +4565,13 @@ app.post("/api/sessions", async (request) => {
     cwd: body?.cwd ?? env.WORKSPACE_ROOT,
     model: body?.model,
     sandbox: env.DEFAULT_SANDBOX_MODE,
-    approvalPolicy: env.DEFAULT_APPROVAL_POLICY
+    approvalPolicy
   });
 
   await setSessionTitle(response.thread.id, defaultSessionTitle());
+  if (body?.approvalPolicy && setSessionApprovalPolicy(response.thread.id, body.approvalPolicy)) {
+    await persistSessionMetadata();
+  }
 
   return {
     session: toSessionSummary(response.thread, false),
@@ -4553,11 +4626,15 @@ app.post("/api/sessions/:sessionId/fork", async (request, reply) => {
   }
 
   try {
+    const sourceApprovalPolicy = resolveSessionApprovalPolicy(params.sessionId);
     const response = await callThreadMethodWithRawEventsFallback<{ thread: CodexThread }>("thread/fork", {
       threadId: params.sessionId,
       sandbox: env.DEFAULT_SANDBOX_MODE,
-      approvalPolicy: env.DEFAULT_APPROVAL_POLICY
+      approvalPolicy: sourceApprovalPolicy
     });
+    if (setSessionApprovalPolicy(response.thread.id, sourceApprovalPolicy)) {
+      await persistSessionMetadata();
+    }
 
     return {
       status: "ok",
@@ -4904,15 +4981,35 @@ app.post("/api/sessions/:sessionId/resume", async (request, reply) => {
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
 
+  const approvalPolicy = resolveSessionApprovalPolicy(params.sessionId);
   const response = await callThreadMethodWithRawEventsFallback<{ thread: CodexThread }>("thread/resume", {
     threadId: params.sessionId,
     sandbox: env.DEFAULT_SANDBOX_MODE,
-    approvalPolicy: env.DEFAULT_APPROVAL_POLICY
+    approvalPolicy
   });
 
   return {
     session: toSessionSummary(response.thread, true),
     thread: response.thread
+  };
+});
+
+app.post("/api/sessions/:sessionId/approval-policy", async (request, reply) => {
+  const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
+  if (isSessionPurged(params.sessionId)) {
+    reply.code(410);
+    return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  const body = sessionApprovalPolicyBodySchema.parse(request.body);
+  if (setSessionApprovalPolicy(params.sessionId, body.approvalPolicy)) {
+    await persistSessionMetadata();
+  }
+
+  return {
+    status: "ok",
+    sessionId: params.sessionId,
+    approvalPolicy: resolveSessionApprovalPolicy(params.sessionId)
   };
 });
 
@@ -5073,6 +5170,12 @@ app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
   const body = sendMessageBodySchema.parse(request.body);
+  const approvalPolicy = body.approvalPolicy ?? resolveSessionApprovalPolicy(params.sessionId);
+  if (body.approvalPolicy && setSessionApprovalPolicy(params.sessionId, body.approvalPolicy)) {
+    void persistSessionMetadata().catch((error) => {
+      app.log.warn({ error, sessionId: params.sessionId }, "failed to persist session approval policy after message send");
+    });
+  }
 
   const startTurn = async (): Promise<{ turn: { id: string } }> =>
     supervisor.call<{ turn: { id: string } }>("turn/start", {
@@ -5080,7 +5183,7 @@ app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
       model: body.model,
       effort: body.effort as ReasoningEffort | undefined,
       sandboxPolicy: toTurnSandboxPolicy(env.DEFAULT_SANDBOX_MODE),
-      approvalPolicy: env.DEFAULT_APPROVAL_POLICY,
+      approvalPolicy,
       input: [
         {
           type: "text",
@@ -5099,7 +5202,7 @@ app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
         await callThreadMethodWithRawEventsFallback("thread/resume", {
           threadId: params.sessionId,
           sandbox: env.DEFAULT_SANDBOX_MODE,
-          approvalPolicy: env.DEFAULT_APPROVAL_POLICY
+          approvalPolicy
         });
         turn = await startTurn();
       } catch (retryError) {

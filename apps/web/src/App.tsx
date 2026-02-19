@@ -17,6 +17,7 @@ type SessionSummary = {
   title: string;
   materialized: boolean;
   modelProvider: string;
+  approvalPolicy?: ApprovalPolicy;
   createdAt: number;
   updatedAt: number;
   cwd: string;
@@ -200,6 +201,7 @@ type MoveProjectChatsDestination = "unassigned" | "archive";
 
 type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 type ReasoningEffortSelection = "" | ReasoningEffort;
+type ApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
 
 type ModelOption = {
   id: string;
@@ -231,6 +233,7 @@ function MarkdownText({ content, className }: { content: string; className?: str
 const allReasoningEfforts: Array<ReasoningEffort> = ["none", "minimal", "low", "medium", "high", "xhigh"];
 const preferredReasoningEffortOrder: Array<ReasoningEffort> = ["xhigh", "high", "medium", "low", "minimal", "none"];
 const approvalSnapBackStartDelayMs = 60;
+const defaultApprovalPolicy: ApprovalPolicy = "untrusted";
 const reasoningEffortLabelByValue: Record<ReasoningEffort, string> = {
   none: "None",
   minimal: "Minimal",
@@ -238,6 +241,12 @@ const reasoningEffortLabelByValue: Record<ReasoningEffort, string> = {
   medium: "Medium",
   high: "High",
   xhigh: "XHigh"
+};
+const approvalPolicyLabelByValue: Record<ApprovalPolicy, string> = {
+  untrusted: "Unless Trusted",
+  "on-failure": "On Failure",
+  "on-request": "On Request",
+  never: "Never"
 };
 
 function isReasoningEffortSupportedByModel(model: ModelOption | null, effort: ReasoningEffort): boolean {
@@ -552,8 +561,16 @@ function isReasoningEffort(value: unknown): value is ReasoningEffort {
   );
 }
 
+function isApprovalPolicy(value: unknown): value is ApprovalPolicy {
+  return value === "untrusted" || value === "on-failure" || value === "on-request" || value === "never";
+}
+
 function reasoningEffortLabel(value: ReasoningEffort): string {
   return reasoningEffortLabelByValue[value];
+}
+
+function approvalPolicyLabel(value: ApprovalPolicy): string {
+  return approvalPolicyLabelByValue[value];
 }
 
 function extractReasoningEffort(input: unknown): ReasoningEffort | null {
@@ -1656,6 +1673,7 @@ export function App() {
   const [projectsHeaderMenuPosition, setProjectsHeaderMenuPosition] = useState<SessionMenuPosition | null>(null);
   const [projectsHeaderMenuAnchor, setProjectsHeaderMenuAnchor] = useState<SessionMenuAnchor | null>(null);
   const [sessionActionSessionId, setSessionActionSessionId] = useState<string | null>(null);
+  const [approvalPolicyActionSessionId, setApprovalPolicyActionSessionId] = useState<string | null>(null);
   const [projectActionProjectId, setProjectActionProjectId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Array<ChatMessage>>([]);
   const [messageTimingById, setMessageTimingById] = useState<Record<string, MessageTiming>>({});
@@ -1751,11 +1769,18 @@ export function App() {
   const modelMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const suggestedReplyAbortRef = useRef<AbortController | null>(null);
   const suggestedReplyRequestIdRef = useRef(0);
+  const transcriptLoadRequestIdRef = useRef(0);
+  const approvalsLoadRequestIdRef = useRef(0);
+  const toolInputsLoadRequestIdRef = useRef(0);
+  const previousSessionIdForModelSyncRef = useRef<string | null>(null);
+  const previousSessionIdForEffortSyncRef = useRef<string | null>(null);
   const selectedSessionIdRef = useRef<string | null>(null);
   const approvalActionByIdRef = useRef<Record<string, { decision: ApprovalDecision; scope: ApprovalScope }>>({});
+  const localSendStateByMessageIdRef = useRef<Record<string, LocalSendState>>({});
   const draftRef = useRef("");
   selectedSessionIdRef.current = selectedSessionId;
   approvalActionByIdRef.current = approvalActionById;
+  localSendStateByMessageIdRef.current = localSendStateByMessageId;
   draftRef.current = draft;
   useEffect(() => {
     persistSelectedSessionId(selectedSessionId);
@@ -1774,6 +1799,12 @@ export function App() {
     () => sessions.find((session) => session.sessionId === selectedSessionId) ?? null,
     [sessions, selectedSessionId]
   );
+  const selectedSessionApprovalPolicy = useMemo<ApprovalPolicy>(() => {
+    if (selectedSession && isApprovalPolicy(selectedSession.approvalPolicy)) {
+      return selectedSession.approvalPolicy;
+    }
+    return defaultApprovalPolicy;
+  }, [selectedSession]);
   const sessionsByProjectId = useMemo(() => {
     const byProjectId = new Map<string, Array<SessionSummary>>();
     for (const project of projects) {
@@ -2329,6 +2360,7 @@ export function App() {
       return current;
     });
     setSessionActionSessionId((current) => (current === sessionId ? null : current));
+    setApprovalPolicyActionSessionId((current) => (current === sessionId ? null : current));
     setRenamingSessionId((current) => (current === sessionId ? null : current));
 
     if (selectedSessionId === sessionId) {
@@ -2440,6 +2472,8 @@ export function App() {
   };
 
   const loadSessionTranscript = async (sessionId: string): Promise<void> => {
+    const requestId = transcriptLoadRequestIdRef.current + 1;
+    transcriptLoadRequestIdRef.current = requestId;
     setLoadingTranscript(true);
     setError(null);
 
@@ -2455,6 +2489,10 @@ export function App() {
       }
 
       const payload = (await response.json()) as SessionDetailResponse;
+      if (selectedSessionIdRef.current !== sessionId || transcriptLoadRequestIdRef.current !== requestId) {
+        return;
+      }
+
       const nextTranscriptMessages: Array<ChatMessage> = payload.transcript.map((entry) => ({
         id: entry.messageId,
         turnId: entry.turnId,
@@ -2465,13 +2503,29 @@ export function App() {
         status: entry.status
       }));
       setMessages((current) => {
-        const optimistic = current.filter((message) => message.id.startsWith("local-user-"));
-        if (optimistic.length === 0) {
+        const preserved = current.filter((message) => {
+          if (message.id.startsWith("local-user-")) {
+            const sendState = localSendStateByMessageIdRef.current[message.id];
+            return sendState === "sending" || sendState === "sent" || sendState === "failed";
+          }
+
+          if (message.id.startsWith("approval-") && message.type === "approval.request") {
+            return true;
+          }
+
+          if (message.id.startsWith("tool-input-") && message.type === "tool_input.request") {
+            return true;
+          }
+
+          return false;
+        });
+
+        if (preserved.length === 0) {
           return nextTranscriptMessages;
         }
 
         const byId = new Map(nextTranscriptMessages.map((message) => [message.id, message]));
-        for (const message of optimistic) {
+        for (const message of preserved) {
           if (!byId.has(message.id)) {
             byId.set(message.id, message);
           }
@@ -2502,16 +2556,23 @@ export function App() {
         return next;
       });
     } catch (err) {
+      if (selectedSessionIdRef.current !== sessionId || transcriptLoadRequestIdRef.current !== requestId) {
+        return;
+      }
       setError(err instanceof Error ? err.message : "failed to load transcript");
       setMessages([]);
       setMessageTimingById({});
       setThoughtPanelStateByTurnId({});
     } finally {
-      setLoadingTranscript(false);
+      if (selectedSessionIdRef.current === sessionId && transcriptLoadRequestIdRef.current === requestId) {
+        setLoadingTranscript(false);
+      }
     }
   };
 
   const loadSessionApprovals = async (sessionId: string): Promise<void> => {
+    const requestId = approvalsLoadRequestIdRef.current + 1;
+    approvalsLoadRequestIdRef.current = requestId;
     try {
       const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(sessionId)}/approvals`);
       if (!response.ok) {
@@ -2525,6 +2586,10 @@ export function App() {
       }
 
       const payload = (await response.json()) as { data: Array<PendingApproval> };
+      if (selectedSessionIdRef.current !== sessionId || approvalsLoadRequestIdRef.current !== requestId) {
+        return;
+      }
+
       setPendingApprovals(payload.data);
       setApprovalActionById((current) => {
         const pendingIds = new Set(payload.data.map((approval) => approval.approvalId));
@@ -2545,6 +2610,9 @@ export function App() {
         upsertPendingApprovalMessage(approval);
       }
     } catch (err) {
+      if (selectedSessionIdRef.current !== sessionId || approvalsLoadRequestIdRef.current !== requestId) {
+        return;
+      }
       setError(err instanceof Error ? err.message : "failed to load approvals");
       clearAllApprovalReconcileTimers();
       setPendingApprovals([]);
@@ -2553,6 +2621,8 @@ export function App() {
   };
 
   const loadSessionToolInputs = async (sessionId: string): Promise<void> => {
+    const requestId = toolInputsLoadRequestIdRef.current + 1;
+    toolInputsLoadRequestIdRef.current = requestId;
     try {
       const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(sessionId)}/tool-input`);
       if (!response.ok) {
@@ -2564,11 +2634,18 @@ export function App() {
       }
 
       const payload = (await response.json()) as { data: Array<PendingToolInput> };
+      if (selectedSessionIdRef.current !== sessionId || toolInputsLoadRequestIdRef.current !== requestId) {
+        return;
+      }
+
       setPendingToolInputs(payload.data);
       for (const request of payload.data) {
         upsertPendingToolInputMessage(request);
       }
     } catch (err) {
+      if (selectedSessionIdRef.current !== sessionId || toolInputsLoadRequestIdRef.current !== requestId) {
+        return;
+      }
       setError(err instanceof Error ? err.message : "failed to load tool input requests");
       setPendingToolInputs([]);
     }
@@ -2658,9 +2735,41 @@ export function App() {
       }
 
       const payload = (await response.json()) as { data?: Array<unknown> };
-      const normalized = Array.isArray(payload.data)
+      const normalizedInput = Array.isArray(payload.data)
         ? payload.data.map((entry) => normalizeModelOption(entry)).filter((entry): entry is ModelOption => entry !== null)
         : [];
+      const modelById = new Map<string, ModelOption>();
+      for (const model of normalizedInput) {
+        const existing = modelById.get(model.id);
+        if (!existing) {
+          modelById.set(model.id, model);
+          continue;
+        }
+
+        const mergedSupportedReasoningEfforts =
+          existing.supportedReasoningEfforts.length === 0 || model.supportedReasoningEfforts.length === 0
+            ? []
+            : Array.from(new Set([...existing.supportedReasoningEfforts, ...model.supportedReasoningEfforts]));
+
+        const mergedDefaultReasoningEffort: ReasoningEffortSelection =
+          existing.defaultReasoningEffort && (mergedSupportedReasoningEfforts.length === 0 || mergedSupportedReasoningEfforts.includes(existing.defaultReasoningEffort))
+            ? existing.defaultReasoningEffort
+            : model.defaultReasoningEffort &&
+                (mergedSupportedReasoningEfforts.length === 0 || mergedSupportedReasoningEfforts.includes(model.defaultReasoningEffort))
+              ? model.defaultReasoningEffort
+              : "";
+
+        modelById.set(model.id, {
+          ...existing,
+          // Prefer stable first-seen label/provider for deterministic rendering.
+          label: existing.label || model.label,
+          provider: existing.provider || model.provider,
+          isDefault: existing.isDefault || model.isDefault,
+          supportedReasoningEfforts: mergedSupportedReasoningEfforts,
+          defaultReasoningEffort: mergedDefaultReasoningEffort
+        });
+      }
+      const normalized = Array.from(modelById.values());
       setModels(normalized);
 
       if (normalized.length > 0) {
@@ -3645,7 +3754,8 @@ export function App() {
         body: JSON.stringify({
           text,
           model: selectedModelId || undefined,
-          effort: selectedReasoningEffort || undefined
+          effort: selectedReasoningEffort || undefined,
+          approvalPolicy: selectedSessionApprovalPolicy
         })
       });
 
@@ -3812,6 +3922,83 @@ export function App() {
       ...current,
       [selectedSessionId]: effort
     }));
+  };
+
+  const applyModelSelection = (modelId: string): void => {
+    const targetModel = models.find((model) => model.id === modelId) ?? null;
+    if (!targetModel) {
+      return;
+    }
+
+    const keepCurrentEffort =
+      isReasoningEffort(selectedReasoningEffort) &&
+      isReasoningEffortSupportedByModel(targetModel, selectedReasoningEffort)
+        ? selectedReasoningEffort
+        : null;
+    const fallbackEffort = preferredReasoningEffortForModel(targetModel);
+    const nextEffort = keepCurrentEffort ?? fallbackEffort;
+    if (!nextEffort) {
+      return;
+    }
+
+    applyModelReasoningSelection(modelId, nextEffort);
+  };
+
+  const updateSessionApprovalPolicy = async (approvalPolicy: ApprovalPolicy): Promise<void> => {
+    if (!selectedSessionId) {
+      return;
+    }
+
+    const sessionId = selectedSessionId;
+    setError(null);
+    setApprovalPolicyActionSessionId(sessionId);
+    try {
+      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(sessionId)}/approval-policy`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          approvalPolicy
+        })
+      });
+      if (!response.ok) {
+        if (await handleDeletedSessionResponse(response, sessionId)) {
+          return;
+        }
+        throw new Error(`failed to update approval policy (${response.status})`);
+      }
+
+      const payload = (await response.json()) as {
+        sessionId?: string;
+        approvalPolicy?: ApprovalPolicy;
+      };
+      const targetSessionId = typeof payload.sessionId === "string" && payload.sessionId.trim().length > 0 ? payload.sessionId : sessionId;
+      const nextPolicy = isApprovalPolicy(payload.approvalPolicy) ? payload.approvalPolicy : approvalPolicy;
+      setSessions((current) =>
+        current.map((session) =>
+          session.sessionId === targetSessionId
+            ? {
+                ...session,
+                approvalPolicy: nextPolicy
+              }
+            : session
+        )
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "failed to update approval policy");
+    } finally {
+      setApprovalPolicyActionSessionId((current) => (current === sessionId ? null : current));
+    }
+  };
+
+  const toggleSelectedSessionApprovalPolicy = (): void => {
+    if (!selectedSessionId) {
+      return;
+    }
+
+    const nextPolicy: ApprovalPolicy = selectedSessionApprovalPolicy === "never" ? "untrusted" : "never";
+    void updateSessionApprovalPolicy(nextPolicy);
   };
 
   const interruptTurn = async (): Promise<void> => {
@@ -4714,6 +4901,11 @@ export function App() {
 
     setFollowTranscriptTail(true);
     setShowJumpToBottom(false);
+    setMessages([]);
+    setMessageTimingById({});
+    setThoughtPanelStateByTurnId({});
+    setPendingApprovals([]);
+    setPendingToolInputs([]);
     setLocalSendStateByMessageId({});
     optimisticMessageIdByTurnIdRef.current = {};
     setApprovalActionById({});
@@ -4743,36 +4935,64 @@ export function App() {
   }, [showSettings]);
 
   useEffect(() => {
-    if (selectedSessionId) {
-      const sessionModel = sessionModelById[selectedSessionId];
-      if (sessionModel && models.some((model) => model.id === sessionModel)) {
-        setSelectedModelId(sessionModel);
-        return;
+    const sessionChanged = previousSessionIdForModelSyncRef.current !== selectedSessionId;
+    previousSessionIdForModelSyncRef.current = selectedSessionId;
+
+    const knownModelIds = new Set(models.map((model) => model.id));
+    const storedSessionModelId = selectedSessionId ? sessionModelById[selectedSessionId] ?? "" : "";
+    const storedSessionModelIsValid = storedSessionModelId.length > 0 && knownModelIds.has(storedSessionModelId);
+
+    setSelectedModelId((current) => {
+      const currentIsValid = current.length > 0 && knownModelIds.has(current);
+      if (sessionChanged) {
+        if (storedSessionModelIsValid) {
+          return storedSessionModelId;
+        }
+        if (currentIsValid) {
+          return current;
+        }
+        return defaultModelId || "";
       }
 
-      setSelectedModelId(defaultModelId || "");
-      return;
-    }
-
-    setSelectedModelId(defaultModelId || "");
+      // For the active session, never override a valid local selection.
+      if (currentIsValid) {
+        return current;
+      }
+      if (storedSessionModelIsValid) {
+        return storedSessionModelId;
+      }
+      return defaultModelId || "";
+    });
   }, [selectedSessionId, sessionModelById, defaultModelId, models]);
 
   useEffect(() => {
+    const sessionChanged = previousSessionIdForEffortSyncRef.current !== selectedSessionId;
+    previousSessionIdForEffortSyncRef.current = selectedSessionId;
     const fallbackEffort = preferredReasoningEffortForModel(selectedModelOption);
-    if (!selectedSessionId) {
-      setSelectedReasoningEffort((current) => {
-        if (current && isReasoningEffortSupportedByModel(selectedModelOption, current)) {
-          return current;
-        }
-        return current === fallbackEffort ? current : fallbackEffort;
-      });
-      return;
-    }
+    const sessionEffort = selectedSessionId ? sessionReasoningEffortById[selectedSessionId] ?? "" : "";
+    const sessionEffortIsValid =
+      sessionEffort.length > 0 && isReasoningEffortSupportedByModel(selectedModelOption, sessionEffort as ReasoningEffort);
 
-    const sessionEffort = sessionReasoningEffortById[selectedSessionId];
-    const nextEffort =
-      sessionEffort && isReasoningEffortSupportedByModel(selectedModelOption, sessionEffort) ? sessionEffort : fallbackEffort;
-    setSelectedReasoningEffort((current) => (current === nextEffort ? current : nextEffort));
+    setSelectedReasoningEffort((current) => {
+      const currentIsValid =
+        current.length > 0 && isReasoningEffortSupportedByModel(selectedModelOption, current as ReasoningEffort);
+
+      if (sessionChanged) {
+        if (sessionEffortIsValid) {
+          return sessionEffort as ReasoningEffort;
+        }
+        return fallbackEffort;
+      }
+
+      // For the active session, preserve a valid local selection.
+      if (currentIsValid) {
+        return current as ReasoningEffort;
+      }
+      if (sessionEffortIsValid) {
+        return sessionEffort as ReasoningEffort;
+      }
+      return fallbackEffort;
+    });
   }, [selectedSessionId, sessionReasoningEffortById, selectedModelOption]);
 
   useEffect(() => {
@@ -6784,6 +7004,17 @@ export function App() {
               <span className="model-combo-label">Model</span>
               <span className="model-combo-value">{selectedModelMenuLabel}</span>
             </button>
+            <button
+              type="button"
+              className="ghost"
+              onClick={toggleSelectedSessionApprovalPolicy}
+              disabled={!selectedSessionId || approvalPolicyActionSessionId === selectedSessionId}
+              title="Toggle approval policy for this chat"
+            >
+              {approvalPolicyActionSessionId === selectedSessionId
+                ? "Saving approvals..."
+                : `Approvals: ${approvalPolicyLabel(selectedSessionApprovalPolicy)}`}
+            </button>
             <span className="state-pill">{runtimeStateLabel}</span>
             <button
               ref={threadMenuTriggerRef}
@@ -7212,15 +7443,23 @@ export function App() {
                 const modelSelected = model.id === selectedModelOption?.id;
                 return (
                   <div key={model.id} className="model-submenu-group" role="none">
-                    <div className={`model-submenu-trigger${modelSelected ? " selected" : ""}`} role="menuitem" aria-haspopup="menu" tabIndex={0}>
+                    <button
+                      type="button"
+                      className={`model-submenu-trigger${modelSelected ? " selected" : ""}`}
+                      role="menuitemradio"
+                      aria-checked={modelSelected}
+                      onClick={() => applyModelSelection(model.id)}
+                    >
                       <span>{modelDisplayLabel(model)}</span>
-                    </div>
-                    <div className="model-submenu" role="menu" aria-label={`Reasoning effort for ${model.label}`}>
+                      {modelSelected ? <span className="model-selected-pill">Selected</span> : null}
+                    </button>
+                    <div className="model-submenu" role="group" aria-label={`Reasoning effort for ${model.label}`}>
                       {efforts.map((effort) => (
                         <button
                           key={`${model.id}:${effort}`}
                           type="button"
-                          role="menuitem"
+                          role="menuitemradio"
+                          aria-checked={modelSelected && selectedReasoningEffort === effort}
                           className={modelSelected && selectedReasoningEffort === effort ? "selected" : ""}
                           onClick={() => applyModelReasoningSelection(model.id, effort)}
                         >

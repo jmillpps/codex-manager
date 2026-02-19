@@ -559,6 +559,7 @@ body {
   display: inline-flex;
   flex-direction: column;
   align-items: stretch;
+  gap: 0.14rem;
   width: max-content;
   padding: 0.25rem;
   border: 1px solid #d5dae3;
@@ -568,67 +569,81 @@ body {
 }
 
 .model-submenu-group {
-  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.24rem;
+  padding: 0.2rem;
+  border-radius: 8px;
+}
+
+.model-submenu-group + .model-submenu-group {
+  border-top: 1px solid #e5e9f1;
+  padding-top: 0.34rem;
 }
 
 .model-submenu-trigger {
   width: 100%;
   text-align: left;
-  border: 0;
+  border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
   font-size: 0.81rem;
-  padding: 0.4rem 0.5rem;
+  padding: 0.36rem 0.5rem;
   color: #1f2937;
   font-weight: 600;
   display: inline-flex;
+  justify-content: space-between;
   align-items: center;
   gap: 0.4rem;
   white-space: nowrap;
+  cursor: pointer;
 }
 
 .model-submenu-trigger.selected,
-.model-submenu-group:hover > .model-submenu-trigger,
-.model-submenu-group:focus-within > .model-submenu-trigger {
+.model-submenu-trigger:hover:not(:disabled),
+.model-submenu-trigger:focus-visible {
   background: #f1f4f8;
+  border-color: #d5dae3;
+}
+
+.model-selected-pill {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #0f3b8a;
+  background: #e8f0ff;
+  border-radius: 999px;
+  padding: 0.14rem 0.42rem;
 }
 
 .model-submenu {
-  position: absolute;
-  top: -0.25rem;
-  left: calc(100% - 0.08rem);
-  z-index: 20;
-  flex-direction: column;
-  align-items: stretch;
-  width: max-content;
-  padding: 0.25rem;
-  border: 1px solid #d5dae3;
-  border-radius: 11px;
-  background: #ffffff;
-  box-shadow: 0 10px 24px #0f172a1f;
-  display: none;
-}
-
-.model-submenu-group:hover > .model-submenu,
-.model-submenu-group:focus-within > .model-submenu {
-  display: inline-flex;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.24rem;
+  align-items: center;
 }
 
 .model-submenu button {
   text-align: left;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  font-size: 0.81rem;
-  padding: 0.4rem 0.5rem;
+  border: 1px solid #d5dae3;
+  border-radius: 999px;
+  background: #ffffff;
+  font-size: 0.75rem;
+  padding: 0.22rem 0.48rem;
   color: #1f2937;
   font-weight: 600;
   white-space: nowrap;
+  cursor: pointer;
 }
 
 .model-submenu button:hover:not(:disabled),
+.model-submenu button:focus-visible,
 .model-submenu button.selected {
   background: #f1f4f8;
+  border-color: #9ab0d9;
+}
+
+.model-submenu button.selected {
+  color: #0f3b8a;
 }
 
 .session-rename-form {
