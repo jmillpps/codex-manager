@@ -392,6 +392,243 @@ describe("settings endpoint wiring", () => {
     expect(screen.getByText("B thread message")).toBeInTheDocument();
   });
 
+  it("preserves live approval events when approval hydration resolves with stale empty data", async () => {
+    const session = {
+      sessionId: "session-race",
+      title: "Session Race",
+      materialized: true,
+      modelProvider: "openai",
+      createdAt: 1,
+      updatedAt: 2,
+      cwd: "/tmp",
+      source: "persisted",
+      projectId: null
+    };
+    const approvalsResponse = deferredResponse();
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions?")) {
+        return Promise.resolve(json(200, { data: [session], nextCursor: null, archived: false }));
+      }
+
+      if (url.endsWith("/api/sessions/session-race")) {
+        return Promise.resolve(json(200, { session: { sessionId: "session-race" }, transcript: [] }));
+      }
+
+      if (url.endsWith("/api/sessions/session-race/approvals")) {
+        return approvalsResponse.promise;
+      }
+
+      if (url.endsWith("/api/sessions/session-race/tool-input")) {
+        return Promise.resolve(json(200, { data: [] }));
+      }
+
+      return Promise.resolve(routeResponse(url));
+    });
+
+    render(<App />);
+
+    const sessionButton = await screen.findByRole("button", { name: "Session Race" });
+    fireEvent.click(sessionButton);
+    await waitFor(() => expect(hasFetchCall(fetchMock, "/api/sessions/session-race/approvals")).toBe(true));
+
+    const ws = MockWebSocket.instances.at(-1);
+    expect(ws).toBeDefined();
+
+    await act(async () => {
+      ws?.dispatchEvent(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            type: "approval",
+            threadId: "session-race",
+            payload: {
+              approvalId: "approval-race",
+              method: "item/commandExecution/requestApproval",
+              threadId: "session-race",
+              turnId: "turn-race",
+              itemId: "item-race",
+              summary: "Approval needed for command execution",
+              details: {
+                command: "echo race"
+              },
+              createdAt: new Date().toISOString(),
+              status: "pending"
+            }
+          })
+        })
+      );
+    });
+
+    await screen.findByText("Approval required to run: echo race");
+
+    await act(async () => {
+      approvalsResponse.resolve(json(200, { data: [] }));
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("Approval required to run: echo race")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+  });
+
+  it("keeps approval controls visible when transcript has approval request before approval list sync", async () => {
+    const session = {
+      sessionId: "session-transcript-approval",
+      title: "Transcript Approval",
+      materialized: true,
+      modelProvider: "openai",
+      createdAt: 1,
+      updatedAt: 2,
+      cwd: "/tmp",
+      source: "persisted",
+      projectId: null
+    };
+    const createdAt = new Date().toISOString();
+
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/sessions?")) {
+        return Promise.resolve(json(200, { data: [session], nextCursor: null, archived: false }));
+      }
+
+      if (url.endsWith("/api/sessions/session-transcript-approval")) {
+        return Promise.resolve(
+          json(200, {
+            session: { sessionId: "session-transcript-approval" },
+            transcript: [
+              {
+                messageId: "approval-approval-from-transcript",
+                turnId: "turn-transcript-approval",
+                role: "system",
+                type: "approval.request",
+                content: "Approval required to run: echo transcript",
+                details: JSON.stringify({
+                  method: "item/commandExecution/requestApproval",
+                  command: "echo transcript",
+                  createdAt
+                }),
+                status: "streaming"
+              }
+            ]
+          })
+        );
+      }
+
+      if (url.endsWith("/api/sessions/session-transcript-approval/approvals")) {
+        return Promise.resolve(json(200, { data: [] }));
+      }
+
+      if (url.endsWith("/api/sessions/session-transcript-approval/tool-input")) {
+        return Promise.resolve(json(200, { data: [] }));
+      }
+
+      if (url.endsWith("/api/approvals/approval-from-transcript/decision") && init?.method === "POST") {
+        return Promise.resolve(json(200, { data: { approvalId: "approval-from-transcript" } }));
+      }
+
+      return Promise.resolve(routeResponse(url));
+    });
+
+    render(<App />);
+
+    const sessionButton = await screen.findByRole("button", { name: "Transcript Approval" });
+    fireEvent.click(sessionButton);
+
+    await screen.findByText("Approval required to run: echo transcript");
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    await waitFor(() => expect(hasFetchCall(fetchMock, "/api/approvals/approval-from-transcript/decision")).toBe(true));
+  });
+
+  it("keeps per-session model preference sticky across refresh hydration", async () => {
+    const stickySession = {
+      sessionId: "session-sticky-model",
+      title: "Sticky Session",
+      materialized: true,
+      modelProvider: "openai",
+      createdAt: 1,
+      updatedAt: 2,
+      cwd: "/tmp",
+      source: "persisted",
+      projectId: null
+    };
+    const modelPrefsStorageKey = `codex-manager:session-model-prefs:${window.location.pathname}`;
+    window.localStorage.setItem(
+      modelPrefsStorageKey,
+      JSON.stringify({
+        modelBySessionId: {
+          "session-sticky-model": "codex-max"
+        },
+        effortBySessionId: {
+          "session-sticky-model": "high"
+        }
+      })
+    );
+
+    const sessionsResponse = deferredResponse();
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/sessions?")) {
+        return sessionsResponse.promise;
+      }
+
+      if (url.includes("/api/models?")) {
+        return Promise.resolve(
+          json(200, {
+            data: [
+              {
+                id: "gpt-5.1",
+                name: "GPT 5.1",
+                provider: "openai",
+                isDefault: true,
+                supportedReasoningEfforts: ["minimal", "low", "medium"]
+              },
+              {
+                id: "codex-max",
+                name: "Codex Max",
+                provider: "openai",
+                isDefault: false,
+                supportedReasoningEfforts: ["high", "xhigh"]
+              }
+            ]
+          })
+        );
+      }
+
+      if (url.endsWith("/api/sessions/session-sticky-model")) {
+        return Promise.resolve(json(200, { session: { sessionId: "session-sticky-model" }, transcript: [] }));
+      }
+
+      if (url.endsWith("/api/sessions/session-sticky-model/approvals")) {
+        return Promise.resolve(json(200, { data: [] }));
+      }
+
+      if (url.endsWith("/api/sessions/session-sticky-model/tool-input")) {
+        return Promise.resolve(json(200, { data: [] }));
+      }
+
+      return Promise.resolve(routeResponse(url));
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      sessionsResponse.resolve(json(200, { data: [stickySession], nextCursor: null, archived: false }));
+      await Promise.resolve();
+    });
+
+    await screen.findByRole("button", { name: /Codex Max/i });
+    await waitFor(() => {
+      const persisted = window.localStorage.getItem(modelPrefsStorageKey);
+      expect(persisted).toBeTruthy();
+      const parsed = JSON.parse(persisted ?? "{}") as {
+        modelBySessionId?: Record<string, string>;
+      };
+      expect(parsed.modelBySessionId?.["session-sticky-model"]).toBe("codex-max");
+    });
+  });
+
   it("dedupes duplicate model ids and keeps selected model effort stable", async () => {
     const session = {
       sessionId: "session-model",

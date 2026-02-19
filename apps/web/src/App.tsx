@@ -1040,6 +1040,48 @@ function extractApprovalCreatedAt(message: ChatMessage, pendingApproval?: Pendin
   return findStringInRecordChain(parsedDetails, "createdAt");
 }
 
+function mergePendingApprovalsSnapshot(input: {
+  sessionId: string;
+  baseline: Array<PendingApproval>;
+  incoming: Array<PendingApproval>;
+  requestStartedAt: number;
+}): Array<PendingApproval> {
+  const nextById = new Map(input.incoming.map((approval) => [approval.approvalId, approval]));
+  for (const approval of input.baseline) {
+    if (approval.threadId !== input.sessionId || nextById.has(approval.approvalId)) {
+      continue;
+    }
+
+    const createdAt = toEpochMs(approval.createdAt);
+    if (createdAt === null || createdAt >= input.requestStartedAt) {
+      nextById.set(approval.approvalId, approval);
+    }
+  }
+
+  return Array.from(nextById.values()).sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+}
+
+function mergePendingToolInputsSnapshot(input: {
+  sessionId: string;
+  baseline: Array<PendingToolInput>;
+  incoming: Array<PendingToolInput>;
+  requestStartedAt: number;
+}): Array<PendingToolInput> {
+  const nextById = new Map(input.incoming.map((request) => [request.requestId, request]));
+  for (const request of input.baseline) {
+    if (request.threadId !== input.sessionId || nextById.has(request.requestId)) {
+      continue;
+    }
+
+    const createdAt = toEpochMs(request.createdAt);
+    if (createdAt === null || createdAt >= input.requestStartedAt) {
+      nextById.set(request.requestId, request);
+    }
+  }
+
+  return Array.from(nextById.values()).sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+}
+
 function normalizeProjectRootPath(path: string | null | undefined): string | null {
   if (!path) {
     return null;
@@ -1781,10 +1823,14 @@ export function App() {
   const previousSessionIdForModelSyncRef = useRef<string | null>(null);
   const previousSessionIdForEffortSyncRef = useRef<string | null>(null);
   const selectedSessionIdRef = useRef<string | null>(null);
+  const pendingApprovalsRef = useRef<Array<PendingApproval>>([]);
+  const pendingToolInputsRef = useRef<Array<PendingToolInput>>([]);
   const approvalActionByIdRef = useRef<Record<string, { decision: ApprovalDecision; scope: ApprovalScope }>>({});
   const localSendStateByMessageIdRef = useRef<Record<string, LocalSendState>>({});
   const draftRef = useRef("");
   selectedSessionIdRef.current = selectedSessionId;
+  pendingApprovalsRef.current = pendingApprovals;
+  pendingToolInputsRef.current = pendingToolInputs;
   approvalActionByIdRef.current = approvalActionById;
   localSendStateByMessageIdRef.current = localSendStateByMessageId;
   draftRef.current = draft;
@@ -2032,12 +2078,18 @@ export function App() {
     const pendingIds = new Set<string>();
     for (const message of thoughtMessages) {
       const approvalId = approvalIdFromMessage(message);
-      if (approvalId && pendingApprovalsById.has(approvalId)) {
+      if (
+        approvalId &&
+        (pendingApprovalsById.has(approvalId) || (message.type === "approval.request" && message.status === "streaming"))
+      ) {
         pendingIds.add(`approval:${approvalId}`);
       }
 
       const toolInputRequestId = toolInputRequestIdFromMessage(message);
-      if (toolInputRequestId && pendingToolInputsById.has(toolInputRequestId)) {
+      if (
+        toolInputRequestId &&
+        (pendingToolInputsById.has(toolInputRequestId) || (message.type === "tool_input.request" && message.status === "streaming"))
+      ) {
         pendingIds.add(`tool-input:${toolInputRequestId}`);
       }
     }
@@ -2579,6 +2631,7 @@ export function App() {
   const loadSessionApprovals = async (sessionId: string): Promise<void> => {
     const requestId = approvalsLoadRequestIdRef.current + 1;
     approvalsLoadRequestIdRef.current = requestId;
+    const requestStartedAt = Date.now();
     try {
       const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(sessionId)}/approvals`);
       if (!response.ok) {
@@ -2596,9 +2649,15 @@ export function App() {
         return;
       }
 
-      setPendingApprovals(payload.data);
+      const nextPendingApprovals = mergePendingApprovalsSnapshot({
+        sessionId,
+        baseline: pendingApprovalsRef.current,
+        incoming: payload.data,
+        requestStartedAt
+      });
+      setPendingApprovals(nextPendingApprovals);
       setApprovalActionById((current) => {
-        const pendingIds = new Set(payload.data.map((approval) => approval.approvalId));
+        const pendingIds = new Set(nextPendingApprovals.map((approval) => approval.approvalId));
         let changed = false;
         const next: Record<string, { decision: ApprovalDecision; scope: ApprovalScope }> = {};
         for (const [approvalId, action] of Object.entries(current)) {
@@ -2612,7 +2671,7 @@ export function App() {
 
         return changed ? next : current;
       });
-      for (const approval of payload.data) {
+      for (const approval of nextPendingApprovals) {
         upsertPendingApprovalMessage(approval);
       }
     } catch (err) {
@@ -2629,6 +2688,7 @@ export function App() {
   const loadSessionToolInputs = async (sessionId: string): Promise<void> => {
     const requestId = toolInputsLoadRequestIdRef.current + 1;
     toolInputsLoadRequestIdRef.current = requestId;
+    const requestStartedAt = Date.now();
     try {
       const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(sessionId)}/tool-input`);
       if (!response.ok) {
@@ -2644,8 +2704,14 @@ export function App() {
         return;
       }
 
-      setPendingToolInputs(payload.data);
-      for (const request of payload.data) {
+      const nextPendingToolInputs = mergePendingToolInputsSnapshot({
+        sessionId,
+        baseline: pendingToolInputsRef.current,
+        incoming: payload.data,
+        requestStartedAt
+      });
+      setPendingToolInputs(nextPendingToolInputs);
+      for (const request of nextPendingToolInputs) {
         upsertPendingToolInputMessage(request);
       }
     } catch (err) {
@@ -5098,8 +5164,16 @@ export function App() {
       return;
     }
 
+    const knownModelIds = new Set(models.map((model) => model.id));
     setSessionModelById((current) => {
+      const existingModelId = current[selectedSessionId] ?? "";
+      const existingModelIsValid = existingModelId.length > 0 && knownModelIds.has(existingModelId);
+      const selectedModelIsValid = selectedModelId.length > 0 && knownModelIds.has(selectedModelId);
+
       if (!selectedModelId) {
+        if (existingModelIsValid) {
+          return current;
+        }
         if (!(selectedSessionId in current)) {
           return current;
         }
@@ -5108,7 +5182,17 @@ export function App() {
         return rest;
       }
 
+      if (!selectedModelIsValid) {
+        return current;
+      }
+
       if (current[selectedSessionId] === selectedModelId) {
+        return current;
+      }
+
+      // Preserve an existing valid per-session preference during startup hydration.
+      // Explicit user selections write sessionModelById directly and bypass this guard.
+      if (existingModelIsValid) {
         return current;
       }
 
@@ -5117,7 +5201,7 @@ export function App() {
         [selectedSessionId]: selectedModelId
       };
     });
-  }, [selectedSessionId, selectedModelId]);
+  }, [selectedSessionId, selectedModelId, models]);
 
   useEffect(() => {
     if (!selectedSessionId) {
@@ -5125,7 +5209,20 @@ export function App() {
     }
 
     setSessionReasoningEffortById((current) => {
+      const existingEffort = current[selectedSessionId] ?? "";
+      const existingEffortIsValid =
+        existingEffort.length > 0 &&
+        isReasoningEffort(existingEffort) &&
+        isReasoningEffortSupportedByModel(selectedModelOption, existingEffort);
+      const selectedEffortIsValid =
+        selectedReasoningEffort.length > 0 &&
+        isReasoningEffort(selectedReasoningEffort) &&
+        isReasoningEffortSupportedByModel(selectedModelOption, selectedReasoningEffort);
+
       if (!selectedReasoningEffort) {
+        if (existingEffortIsValid) {
+          return current;
+        }
         if (!(selectedSessionId in current)) {
           return current;
         }
@@ -5134,7 +5231,17 @@ export function App() {
         return rest;
       }
 
+      if (!selectedEffortIsValid) {
+        return current;
+      }
+
       if (current[selectedSessionId] === selectedReasoningEffort) {
+        return current;
+      }
+
+      // Preserve an existing valid per-session preference during startup hydration.
+      // Explicit user selections write sessionReasoningEffortById directly.
+      if (existingEffortIsValid) {
         return current;
       }
 
@@ -5143,7 +5250,7 @@ export function App() {
         [selectedSessionId]: selectedReasoningEffort
       };
     });
-  }, [selectedSessionId, selectedReasoningEffort]);
+  }, [selectedSessionId, selectedReasoningEffort, selectedModelOption]);
 
   useEffect(() => {
     if (!deletedSessionNotice) {
@@ -5280,7 +5387,16 @@ export function App() {
             return;
           }
 
-          const isForActiveSession = !selectedSessionId || approval.threadId === selectedSessionId;
+          const activeSessionId = selectedSessionIdRef.current;
+          const payloadThreadId = typeof approval.threadId === "string" && approval.threadId.trim().length > 0 ? approval.threadId : null;
+          const envelopeThreadId = typeof envelope.threadId === "string" && envelope.threadId.trim().length > 0 ? envelope.threadId : null;
+          const approvalThreadId = payloadThreadId ?? envelopeThreadId ?? activeSessionId;
+          if (!approvalThreadId) {
+            return;
+          }
+          const normalizedApproval = payloadThreadId === approvalThreadId ? approval : { ...approval, threadId: approvalThreadId };
+
+          const isForActiveSession = !activeSessionId || approvalThreadId === activeSessionId;
           if (isForActiveSession) {
             // Force-focus newly requested approvals so users immediately see and act on them.
             armApprovalSnapBack(3200);
@@ -5297,20 +5413,20 @@ export function App() {
           });
 
           setPendingApprovals((current) => {
-            if (selectedSessionId && approval.threadId !== selectedSessionId) {
+            if (activeSessionId && approvalThreadId !== activeSessionId) {
               return current;
             }
 
-            const existingIndex = current.findIndex((entry) => entry.approvalId === approval.approvalId);
+            const existingIndex = current.findIndex((entry) => entry.approvalId === normalizedApproval.approvalId);
             if (existingIndex === -1) {
-              return [...current, approval].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+              return [...current, normalizedApproval].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
             }
 
             const next = [...current];
-            next[existingIndex] = approval;
+            next[existingIndex] = normalizedApproval;
             return next;
           });
-          upsertPendingApprovalMessage(approval);
+          upsertPendingApprovalMessage(normalizedApproval);
           return;
         }
 
@@ -5350,21 +5466,30 @@ export function App() {
             return;
           }
 
+          const activeSessionId = selectedSessionIdRef.current;
+          const payloadThreadId = typeof request.threadId === "string" && request.threadId.trim().length > 0 ? request.threadId : null;
+          const envelopeThreadId = typeof envelope.threadId === "string" && envelope.threadId.trim().length > 0 ? envelope.threadId : null;
+          const requestThreadId = payloadThreadId ?? envelopeThreadId ?? activeSessionId;
+          if (!requestThreadId) {
+            return;
+          }
+          const normalizedRequest = payloadThreadId === requestThreadId ? request : { ...request, threadId: requestThreadId };
+
           setPendingToolInputs((current) => {
-            if (selectedSessionId && request.threadId !== selectedSessionId) {
+            if (activeSessionId && requestThreadId !== activeSessionId) {
               return current;
             }
 
-            const existingIndex = current.findIndex((entry) => entry.requestId === request.requestId);
+            const existingIndex = current.findIndex((entry) => entry.requestId === normalizedRequest.requestId);
             if (existingIndex === -1) {
-              return [...current, request].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+              return [...current, normalizedRequest].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
             }
 
             const next = [...current];
-            next[existingIndex] = request;
+            next[existingIndex] = normalizedRequest;
             return next;
           });
-          upsertPendingToolInputMessage(request);
+          upsertPendingToolInputMessage(normalizedRequest);
           return;
         }
 
@@ -6255,11 +6380,16 @@ export function App() {
       }
 
       if (message.type.startsWith("approval.")) {
+        const isPendingApprovalRequest = message.type === "approval.request" && message.status === "streaming";
         // Completed approval updates are intentionally hidden. We only render approvals while pending.
-        if (!pendingApproval) {
+        if (!pendingApproval && !isPendingApprovalRequest) {
           continue;
         }
 
+        const activeApprovalId = pendingApproval?.approvalId ?? maybeApprovalId;
+        const approvalAction = activeApprovalId ? approvalActionById[activeApprovalId] : undefined;
+        const approvalActionPending = Boolean(approvalAction);
+        const requestedApprovalAt = extractApprovalCreatedAt(message, pendingApproval);
         const method = extractApprovalMethod(message, pendingApproval);
         const command = extractApprovalCommand(message, pendingApproval) ?? "(unknown command)";
         const fileChangeCount = extractApprovalFileChangeCount(message, pendingApproval);
@@ -6274,9 +6404,9 @@ export function App() {
           method === "item/fileChange/requestApproval" ||
           lowerContent.includes("file change approval required") ||
           lowerContent.includes("approval required to apply:");
-        const pendingFileChangePreview = isFileChangeApproval ? summarizePendingFileChangeApproval(pendingApproval) : null;
+        const pendingFileChangePreview = isFileChangeApproval && pendingApproval ? summarizePendingFileChangeApproval(pendingApproval) : null;
         const linkedFileChangeMessage =
-          isFileChangeApproval && pendingApproval.itemId ? fileChangeMessagesById.get(pendingApproval.itemId) ?? null : null;
+          isFileChangeApproval && pendingApproval?.itemId ? fileChangeMessagesById.get(pendingApproval.itemId) ?? null : null;
         const linkedFileChangePreview = linkedFileChangeMessage ? summarizeFileChangeMessage(linkedFileChangeMessage) : null;
         const effectiveFileChangePreview = (() => {
           if (!isFileChangeApproval) {
@@ -6302,8 +6432,6 @@ export function App() {
         })();
 
         if (isCommandApproval || isFileChangeApproval) {
-          const approvalAction = approvalActionById[pendingApproval.approvalId];
-          const approvalActionPending = Boolean(approvalAction);
           const approvalText = (() => {
             if (isCommandApproval) {
               return `Approval required to run: ${command}`;
@@ -6320,7 +6448,7 @@ export function App() {
           const eventRow = (
             <div key={`event-${message.id}`} className="thought-row-event" data-thought-no-collapse="true">
               <p className="thought-row-text">{approvalText}</p>
-              {pendingApproval ? <p className="approval-time">Requested: {formatApprovalDate(pendingApproval.createdAt)}</p> : null}
+              {requestedApprovalAt ? <p className="approval-time">Requested: {formatApprovalDate(requestedApprovalAt)}</p> : null}
               {pendingApproval && isFileChangeApproval && effectiveFileChangePreview ? (
                 effectiveFileChangePreview.diffs.length > 0 ? (
                   effectiveFileChangePreview.diffs.map((diffEntry, diffIndex) => (
@@ -6350,18 +6478,18 @@ export function App() {
                   </p>
                 ) : null
               ) : null}
-              {pendingApproval ? (
+              {activeApprovalId ? (
                 <div className="approval-actions">
                   <button
                     type="button"
-                    onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "accept", "turn")}
+                    onClick={() => void submitApprovalDecision(activeApprovalId, "accept", "turn")}
                     disabled={approvalActionPending}
                   >
                     {approvalAction?.decision === "accept" && approvalAction.scope === "turn" ? "Approving..." : "Approve"}
                   </button>
                   <button
                     type="button"
-                    onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "accept", "session")}
+                    onClick={() => void submitApprovalDecision(activeApprovalId, "accept", "session")}
                     disabled={approvalActionPending}
                   >
                     {approvalAction?.decision === "accept" && approvalAction.scope === "session"
@@ -6371,7 +6499,7 @@ export function App() {
                   <button
                     type="button"
                     className="danger"
-                    onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "decline", "turn")}
+                    onClick={() => void submitApprovalDecision(activeApprovalId, "decline", "turn")}
                     disabled={approvalActionPending}
                   >
                     {approvalAction?.decision === "decline" ? "Denying..." : "Deny"}
@@ -6391,7 +6519,7 @@ export function App() {
           };
           approvalSequence += 1;
           queuedApprovalRows.push(queuedApprovalRow);
-          if (pendingApproval) {
+          if (pendingApproval || isPendingApprovalRequest) {
             queuedPendingApprovalRows.push(queuedApprovalRow);
           }
           continue;
@@ -6416,6 +6544,10 @@ export function App() {
             ? agentSectionHeader.remainder
             : message.content || "(empty)"
           : null;
+      const activeApprovalId = pendingApproval?.approvalId ?? maybeApprovalId;
+      const approvalAction = activeApprovalId ? approvalActionById[activeApprovalId] : undefined;
+      const approvalActionPending = Boolean(approvalAction);
+      const requestedApprovalAt = extractApprovalCreatedAt(message, pendingApproval);
 
       const eventRow = (
         <div key={`event-${message.id}`} className="thought-row-event" data-thought-no-collapse="true">
@@ -6425,7 +6557,7 @@ export function App() {
           ) : (
             <p className="thought-row-text">{message.content}</p>
           )}
-          {pendingApproval ? <p className="approval-time">Requested: {formatApprovalDate(pendingApproval.createdAt)}</p> : null}
+          {requestedApprovalAt ? <p className="approval-time">Requested: {formatApprovalDate(requestedApprovalAt)}</p> : null}
           {pendingToolInput ? <p className="approval-time">Requested: {formatApprovalDate(pendingToolInput.createdAt)}</p> : null}
           {showDetails ? (
             <details className="bubble-details">
@@ -6433,35 +6565,33 @@ export function App() {
               <pre>{message.details}</pre>
             </details>
           ) : null}
-          {pendingApproval ? (
+          {activeApprovalId ? (
             <div className="approval-actions">
               <button
                 type="button"
-                onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "accept", "turn")}
-                disabled={Boolean(approvalActionById[pendingApproval.approvalId])}
+                onClick={() => void submitApprovalDecision(activeApprovalId, "accept", "turn")}
+                disabled={approvalActionPending}
               >
-                {approvalActionById[pendingApproval.approvalId]?.decision === "accept" &&
-                approvalActionById[pendingApproval.approvalId]?.scope === "turn"
+                {approvalAction?.decision === "accept" && approvalAction.scope === "turn"
                   ? "Approving..."
                   : "Approve"}
               </button>
               <button
                 type="button"
-                onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "accept", "session")}
-                disabled={Boolean(approvalActionById[pendingApproval.approvalId])}
+                onClick={() => void submitApprovalDecision(activeApprovalId, "accept", "session")}
+                disabled={approvalActionPending}
               >
-                {approvalActionById[pendingApproval.approvalId]?.decision === "accept" &&
-                approvalActionById[pendingApproval.approvalId]?.scope === "session"
+                {approvalAction?.decision === "accept" && approvalAction.scope === "session"
                   ? "Approving Session..."
                   : "Approve for Session"}
               </button>
               <button
                 type="button"
                 className="danger"
-                onClick={() => void submitApprovalDecision(pendingApproval.approvalId, "decline", "turn")}
-                disabled={Boolean(approvalActionById[pendingApproval.approvalId])}
+                onClick={() => void submitApprovalDecision(activeApprovalId, "decline", "turn")}
+                disabled={approvalActionPending}
               >
-                {approvalActionById[pendingApproval.approvalId]?.decision === "decline" ? "Denying..." : "Deny"}
+                {approvalAction?.decision === "decline" ? "Denying..." : "Deny"}
               </button>
             </div>
           ) : null}
@@ -6517,6 +6647,7 @@ export function App() {
         </div>
       );
       if (message.type.startsWith("approval.")) {
+        const isPendingApprovalRequest = message.type === "approval.request" && message.status === "streaming";
         const queuedApprovalRow = {
           row: {
             key: `event-${message.id}`,
@@ -6528,7 +6659,7 @@ export function App() {
         };
         approvalSequence += 1;
         queuedApprovalRows.push(queuedApprovalRow);
-        if (pendingApproval) {
+        if (pendingApproval || isPendingApprovalRequest) {
           queuedPendingApprovalRows.push(queuedApprovalRow);
         }
       } else {
