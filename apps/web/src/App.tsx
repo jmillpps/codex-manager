@@ -6460,6 +6460,29 @@ export function App() {
     );
   };
 
+  const renderedTurnGroups = useMemo(
+    () => visibleTurnGroups.map((group) => renderTurnGroup(group)),
+    [
+      activeTurnId,
+      apiBase,
+      approvalActionById,
+      collapsedThoughtSectionsByTurnId,
+      localSendStateByMessageId,
+      loadingTranscript,
+      messageTimingById,
+      pendingApprovalsById,
+      pendingFileChangeApprovalsByItemId,
+      pendingToolInputsById,
+      selectedSession,
+      selectedSessionId,
+      thoughtPanelStateByTurnId,
+      toolInputActionRequestId,
+      toolInputDraftById,
+      visibleTurnGroups,
+      wsState
+    ]
+  );
+
   const renderSessionRow = (session: SessionSummary) => {
     const isSelected = session.sessionId === selectedSessionId;
     const isMenuOpen = session.sessionId === sessionMenuSessionId;
@@ -6866,7 +6889,7 @@ export function App() {
 
                 {!loadingTranscript && visibleTurnGroups.length === 0 ? <p className="hint">No entries yet.</p> : null}
 
-                {visibleTurnGroups.map((group) => renderTurnGroup(group))}
+                {renderedTurnGroups}
               </div>
             </div>
 
