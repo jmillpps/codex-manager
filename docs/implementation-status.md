@@ -136,6 +136,7 @@ Use this with:
   - chat view includes a pinned `Session Controls` panel that defaults to a collapsed summary chip and expands on demand, with explicit Apply/Revert semantics for `Model`, `Approval Policy` (`never` / `unless-trusted` / `on-request`), `Network Access` (`restricted` / `enabled`), and `Filesystem Sandbox` (`read-only` / `workspace-write` / `danger-full-access`).
   - panel also exposes `Thinking Level` (`none` / `minimal` / `low` / `medium` / `high` / `xhigh`) as an immediate per-chat selector (local preference used on send/suggest), constrained to model-supported effort options when the selected model reports them.
   - after a successful `Apply`, and when switching chats, the panel auto-collapses into the summary chip so controls stay out of the way until reopened.
+  - when no session-control tuple edits are pending, the primary action becomes `Close` so users can collapse the expanded panel without sending a no-op apply request.
   - scope toggle supports `This chat` vs `New chats default`; when defaults are harness-locked, `New chats default` remains viewable in read-only mode (lock icons + `Set by harness at session start`) while per-chat controls remain editable.
   - panel summary line is rendered in monospace as `<model> | <approval> | <network> | <sandbox>`, announced for assistive tech as `Current session controls: ...`, and apply success surfaces a toast with the full applied tuple.
   - when approval policy is `never`, panel displays `Escalation requests disabled for this chat.` and runtime state avoids approval-focused copy.

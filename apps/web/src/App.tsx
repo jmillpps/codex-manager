@@ -4190,6 +4190,13 @@ export function App() {
       setSessionControlsError("Select a chat to edit session controls.");
       return;
     }
+
+    if (!controlsDraftDirty) {
+      setSessionControlsError(null);
+      setSessionControlsCollapsed(true);
+      return;
+    }
+
     if (sessionControlsScope === "default" && defaultsLocked) {
       setSessionControlsError("Managed by harness configuration");
       return;
@@ -7618,16 +7625,9 @@ export function App() {
               <button
                 type="button"
                 onClick={() => void applySessionControlsChanges()}
-                disabled={
-                  !selectedSessionId ||
-                  sessionControlsApplying ||
-                  sessionControlsLoading ||
-                  !controlsDraftDirty ||
-                  defaultScopeReadOnly ||
-                  Boolean(sessionControlsError)
-                }
+                disabled={!selectedSessionId || sessionControlsApplying || sessionControlsLoading}
               >
-                {sessionControlsApplying ? "Applying..." : "Apply"}
+                {sessionControlsApplying ? "Applying..." : controlsDraftDirty ? "Apply" : "Close"}
               </button>
             </div>
           </section>

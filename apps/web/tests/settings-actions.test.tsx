@@ -705,6 +705,9 @@ describe("settings endpoint wiring", () => {
     const thinkingSelect = (await screen.findByLabelText("Thinking Level selector")) as HTMLSelectElement;
     expect(thinkingSelect.value).toBe("high");
     fireEvent.change(thinkingSelect, { target: { value: "xhigh" } });
+    expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByLabelText("Thinking Level selector")).not.toBeInTheDocument();
     await waitFor(() => {
       const persisted = window.localStorage.getItem(modelPrefsStorageKey);
       expect(persisted).toBeTruthy();
