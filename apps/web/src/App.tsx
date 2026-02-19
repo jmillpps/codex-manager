@@ -232,6 +232,7 @@ function MarkdownText({ content, className }: { content: string; className?: str
 
 const allReasoningEfforts: Array<ReasoningEffort> = ["none", "minimal", "low", "medium", "high", "xhigh"];
 const preferredReasoningEffortOrder: Array<ReasoningEffort> = ["xhigh", "high", "medium", "low", "minimal", "none"];
+const allApprovalPolicies: Array<ApprovalPolicy> = ["untrusted", "on-failure", "on-request", "never"];
 const approvalSnapBackStartDelayMs = 60;
 const defaultApprovalPolicy: ApprovalPolicy = "untrusted";
 const reasoningEffortLabelByValue: Record<ReasoningEffort, string> = {
@@ -1722,6 +1723,9 @@ export function App() {
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [modelMenuPosition, setModelMenuPosition] = useState<SessionMenuPosition | null>(null);
   const [modelMenuAnchor, setModelMenuAnchor] = useState<SessionMenuAnchor | null>(null);
+  const [approvalPolicyMenuOpen, setApprovalPolicyMenuOpen] = useState(false);
+  const [approvalPolicyMenuPosition, setApprovalPolicyMenuPosition] = useState<SessionMenuPosition | null>(null);
+  const [approvalPolicyMenuAnchor, setApprovalPolicyMenuAnchor] = useState<SessionMenuAnchor | null>(null);
   const [threadActionPending, setThreadActionPending] = useState<string | null>(null);
   const [loadingModels, setLoadingModels] = useState(false);
   const [mcpServers, setMcpServers] = useState<Array<McpServerSummary>>([]);
@@ -1767,6 +1771,8 @@ export function App() {
   const threadMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
   const modelMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const approvalPolicyMenuRef = useRef<HTMLDivElement | null>(null);
+  const approvalPolicyMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const suggestedReplyAbortRef = useRef<AbortController | null>(null);
   const suggestedReplyRequestIdRef = useRef(0);
   const transcriptLoadRequestIdRef = useRef(0);
@@ -3320,6 +3326,13 @@ export function App() {
     modelMenuTriggerRef.current = null;
   };
 
+  const closeApprovalPolicyMenu = (): void => {
+    setApprovalPolicyMenuOpen(false);
+    setApprovalPolicyMenuPosition(null);
+    setApprovalPolicyMenuAnchor(null);
+    approvalPolicyMenuTriggerRef.current = null;
+  };
+
   const toggleSessionMenu = (sessionId: string, trigger: HTMLButtonElement): void => {
     if (sessionMenuSessionId === sessionId) {
       closeSessionMenu();
@@ -3329,6 +3342,7 @@ export function App() {
     closeProjectMenu();
     closeProjectsHeaderMenu();
     closeModelMenu();
+    closeApprovalPolicyMenu();
     const anchor = toMenuAnchor(trigger);
 
     sessionMenuTriggerRef.current = trigger;
@@ -3346,6 +3360,7 @@ export function App() {
     closeProjectMenu();
     closeSessionMenu();
     closeModelMenu();
+    closeApprovalPolicyMenu();
     const anchor = toMenuAnchor(trigger);
     projectsHeaderMenuTriggerRef.current = trigger;
     setProjectsHeaderMenuAnchor(anchor);
@@ -3362,6 +3377,7 @@ export function App() {
     closeSessionMenu();
     closeProjectsHeaderMenu();
     closeModelMenu();
+    closeApprovalPolicyMenu();
     const anchor = toMenuAnchor(trigger);
     projectMenuTriggerRef.current = trigger;
     setProjectMenuAnchor(anchor);
@@ -3378,12 +3394,31 @@ export function App() {
     closeSessionMenu();
     closeProjectMenu();
     closeProjectsHeaderMenu();
+    closeApprovalPolicyMenu();
     setThreadMenuOpen(false);
     const anchor = toMenuAnchor(trigger);
     modelMenuTriggerRef.current = trigger;
     setModelMenuAnchor(anchor);
     setModelMenuPosition(resolveSessionMenuPosition(anchor));
     setModelMenuOpen(true);
+  };
+
+  const toggleApprovalPolicyMenu = (trigger: HTMLButtonElement): void => {
+    if (approvalPolicyMenuOpen) {
+      closeApprovalPolicyMenu();
+      return;
+    }
+
+    closeSessionMenu();
+    closeProjectMenu();
+    closeProjectsHeaderMenu();
+    closeModelMenu();
+    setThreadMenuOpen(false);
+    const anchor = toMenuAnchor(trigger);
+    approvalPolicyMenuTriggerRef.current = trigger;
+    setApprovalPolicyMenuAnchor(anchor);
+    setApprovalPolicyMenuPosition(resolveSessionMenuPosition(anchor));
+    setApprovalPolicyMenuOpen(true);
   };
 
   const submitRenameSession = async (sessionId: string): Promise<void> => {
@@ -3992,13 +4027,12 @@ export function App() {
     }
   };
 
-  const toggleSelectedSessionApprovalPolicy = (): void => {
-    if (!selectedSessionId) {
+  const applySelectedSessionApprovalPolicy = (approvalPolicy: ApprovalPolicy): void => {
+    closeApprovalPolicyMenu();
+    if (approvalPolicy === selectedSessionApprovalPolicy) {
       return;
     }
-
-    const nextPolicy: ApprovalPolicy = selectedSessionApprovalPolicy === "never" ? "untrusted" : "never";
-    void updateSessionApprovalPolicy(nextPolicy);
+    void updateSessionApprovalPolicy(approvalPolicy);
   };
 
   const interruptTurn = async (): Promise<void> => {
@@ -4611,6 +4645,44 @@ export function App() {
   }, [modelMenuOpen]);
 
   useEffect(() => {
+    if (!approvalPolicyMenuOpen) {
+      return;
+    }
+
+    const handleClickOutside = (event: MouseEvent): void => {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+
+      const insideMenu = approvalPolicyMenuRef.current?.contains(target) ?? false;
+      const insideTrigger = approvalPolicyMenuTriggerRef.current?.contains(target) ?? false;
+      if (!insideMenu && !insideTrigger) {
+        closeApprovalPolicyMenu();
+      }
+    };
+
+    const handleEscape = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        closeApprovalPolicyMenu();
+      }
+    };
+
+    const handleResize = (): void => {
+      closeApprovalPolicyMenu();
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleEscape);
+    window.addEventListener("resize", handleResize);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleEscape);
+      window.removeEventListener("resize", handleResize);
+    };
+  }, [approvalPolicyMenuOpen]);
+
+  useEffect(() => {
     if (!sessionMenuSessionId) {
       return;
     }
@@ -4761,6 +4833,7 @@ export function App() {
     closeProjectMenu();
     closeProjectsHeaderMenu();
     closeModelMenu();
+    closeApprovalPolicyMenu();
     setThreadMenuOpen(false);
   }, [selectedSessionId, showArchived]);
 
@@ -4782,6 +4855,25 @@ export function App() {
       return next;
     });
   }, [modelMenuOpen, modelMenuAnchor, models, selectedModelId, selectedReasoningEffort]);
+
+  useEffect(() => {
+    if (!approvalPolicyMenuOpen || !approvalPolicyMenuAnchor || !approvalPolicyMenuRef.current) {
+      return;
+    }
+
+    const measured = approvalPolicyMenuRef.current.getBoundingClientRect();
+    const next = resolveSessionMenuPosition(approvalPolicyMenuAnchor, {
+      width: measured.width,
+      height: measured.height
+    });
+
+    setApprovalPolicyMenuPosition((current) => {
+      if (current && Math.abs(current.top - next.top) < 0.5 && Math.abs(current.left - next.left) < 0.5) {
+        return current;
+      }
+      return next;
+    });
+  }, [approvalPolicyMenuOpen, approvalPolicyMenuAnchor, selectedSessionApprovalPolicy, approvalPolicyActionSessionId, selectedSessionId]);
 
   useEffect(() => {
     if (!sessionMenuSessionId || !sessionMenuAnchor || !openSessionMenuRef.current) {
@@ -4862,6 +4954,12 @@ export function App() {
       closeModelMenu();
     }
   }, [modelMenuOpen, models.length]);
+
+  useEffect(() => {
+    if (!selectedSessionId && approvalPolicyMenuOpen) {
+      closeApprovalPolicyMenu();
+    }
+  }, [selectedSessionId, approvalPolicyMenuOpen]);
 
   useEffect(() => {
     void loadSessions(showArchived);
@@ -7005,11 +7103,14 @@ export function App() {
               <span className="model-combo-value">{selectedModelMenuLabel}</span>
             </button>
             <button
+              ref={approvalPolicyMenuTriggerRef}
               type="button"
               className="ghost"
-              onClick={toggleSelectedSessionApprovalPolicy}
+              onClick={(event) => toggleApprovalPolicyMenu(event.currentTarget)}
               disabled={!selectedSessionId || approvalPolicyActionSessionId === selectedSessionId}
-              title="Toggle approval policy for this chat"
+              title="Choose approval policy for this chat"
+              aria-haspopup="menu"
+              aria-expanded={approvalPolicyMenuOpen}
             >
               {approvalPolicyActionSessionId === selectedSessionId
                 ? "Saving approvals..."
@@ -7470,6 +7571,35 @@ export function App() {
                   </div>
                 );
               })}
+            </div>,
+            document.body
+          )
+        : null}
+      {approvalPolicyMenuOpen && approvalPolicyMenuPosition
+        ? createPortal(
+            <div
+              ref={approvalPolicyMenuRef}
+              className="session-context-menu approval-policy-menu"
+              role="menu"
+              aria-label="Select approval policy"
+              style={{
+                top: `${approvalPolicyMenuPosition.top}px`,
+                left: `${approvalPolicyMenuPosition.left}px`
+              }}
+            >
+              {allApprovalPolicies.map((policy) => (
+                <button
+                  key={policy}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={selectedSessionApprovalPolicy === policy}
+                  className={selectedSessionApprovalPolicy === policy ? "selected" : ""}
+                  disabled={!selectedSessionId || approvalPolicyActionSessionId === selectedSessionId}
+                  onClick={() => applySelectedSessionApprovalPolicy(policy)}
+                >
+                  {approvalPolicyLabel(policy)}
+                </button>
+              ))}
             </div>,
             document.body
           )

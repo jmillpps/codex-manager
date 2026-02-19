@@ -452,6 +452,11 @@ body {
   background: #f1f4f8;
 }
 
+.approval-policy-menu button.selected {
+  background: #f1f4f8;
+  color: #0f3b8a;
+}
+
 .session-context-menu button.danger {
   color: #8a3232;
   background: transparent;

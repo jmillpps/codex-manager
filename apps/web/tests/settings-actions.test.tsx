@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 
@@ -540,6 +540,8 @@ describe("settings endpoint wiring", () => {
     expect(screen.getByRole("button", { name: "Approvals: Unless Trusted" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Approvals: Unless Trusted" }));
+    const approvalPolicyMenu = await screen.findByRole("menu", { name: "Select approval policy" });
+    fireEvent.click(within(approvalPolicyMenu).getByRole("menuitemradio", { name: "Never" }));
     await screen.findByRole("button", { name: "Approvals: Never" });
 
     const composer = screen.getByPlaceholderText("Type your message...");
