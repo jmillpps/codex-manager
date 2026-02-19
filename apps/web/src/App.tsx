@@ -18,6 +18,7 @@ type SessionSummary = {
   materialized: boolean;
   modelProvider: string;
   approvalPolicy?: ApprovalPolicy;
+  sessionControls?: SessionControlsTuple;
   createdAt: number;
   updatedAt: number;
   cwd: string;
@@ -202,6 +203,24 @@ type MoveProjectChatsDestination = "unassigned" | "archive";
 type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 type ReasoningEffortSelection = "" | ReasoningEffort;
 type ApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
+type SessionControlApprovalPolicy = "never" | "unless-trusted" | "on-request";
+type NetworkAccess = "restricted" | "enabled";
+type FilesystemSandbox = "read-only" | "workspace-write" | "danger-full-access";
+type SessionControlScope = "session" | "default";
+type SessionControlsTuple = {
+  model: string | null;
+  approvalPolicy: SessionControlApprovalPolicy;
+  networkAccess: NetworkAccess;
+  filesystemSandbox: FilesystemSandbox;
+};
+type SessionControlsSnapshotResponse = {
+  status: string;
+  sessionId: string;
+  controls: SessionControlsTuple;
+  defaults: SessionControlsTuple;
+  defaultsEditable: boolean;
+  defaultLockReason: string | null;
+};
 
 type ModelOption = {
   id: string;
@@ -232,22 +251,29 @@ function MarkdownText({ content, className }: { content: string; className?: str
 
 const allReasoningEfforts: Array<ReasoningEffort> = ["none", "minimal", "low", "medium", "high", "xhigh"];
 const preferredReasoningEffortOrder: Array<ReasoningEffort> = ["xhigh", "high", "medium", "low", "minimal", "none"];
-const allApprovalPolicies: Array<ApprovalPolicy> = ["untrusted", "on-failure", "on-request", "never"];
 const approvalSnapBackStartDelayMs = 60;
-const defaultApprovalPolicy: ApprovalPolicy = "untrusted";
-const reasoningEffortLabelByValue: Record<ReasoningEffort, string> = {
-  none: "None",
-  minimal: "Minimal",
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  xhigh: "XHigh"
+const sessionControlApprovalPolicies: Array<SessionControlApprovalPolicy> = ["never", "unless-trusted", "on-request"];
+const networkAccessModes: Array<NetworkAccess> = ["restricted", "enabled"];
+const filesystemSandboxModes: Array<FilesystemSandbox> = ["read-only", "workspace-write", "danger-full-access"];
+const defaultSessionControlsTuple: SessionControlsTuple = {
+  model: null,
+  approvalPolicy: "unless-trusted",
+  networkAccess: "restricted",
+  filesystemSandbox: "read-only"
 };
-const approvalPolicyLabelByValue: Record<ApprovalPolicy, string> = {
-  untrusted: "Unless Trusted",
-  "on-failure": "On Failure",
-  "on-request": "On Request",
-  never: "Never"
+const sessionControlApprovalPolicyHelperText: Record<SessionControlApprovalPolicy, string> = {
+  never: "No escalation requests will be issued.",
+  "unless-trusted": "Prompts for escalation when trust is required.",
+  "on-request": "Only asks when the model explicitly requests escalation."
+};
+const networkAccessHelperText: Record<NetworkAccess, string> = {
+  restricted: "No outbound network access.",
+  enabled: "Allow outbound network access for tool execution."
+};
+const filesystemSandboxHelperText: Record<FilesystemSandbox, string> = {
+  "read-only": "Read-only filesystem sandbox.",
+  "workspace-write": "Allow writes in workspace paths.",
+  "danger-full-access": "Full filesystem access."
 };
 
 function isReasoningEffortSupportedByModel(model: ModelOption | null, effort: ReasoningEffort): boolean {
@@ -308,14 +334,6 @@ function preferredReasoningEffortForModel(model: ModelOption | null): ReasoningE
   }
 
   return supported[0] ?? "";
-}
-
-function modelDisplayLabel(model: ModelOption): string {
-  if (!model.provider || model.provider.toLowerCase() === "unknown") {
-    return model.label;
-  }
-
-  return `${model.label} (${model.provider})`;
 }
 
 type McpServerSummary = {
@@ -566,12 +584,75 @@ function isApprovalPolicy(value: unknown): value is ApprovalPolicy {
   return value === "untrusted" || value === "on-failure" || value === "on-request" || value === "never";
 }
 
-function reasoningEffortLabel(value: ReasoningEffort): string {
-  return reasoningEffortLabelByValue[value];
+function isSessionControlApprovalPolicy(value: unknown): value is SessionControlApprovalPolicy {
+  return value === "never" || value === "unless-trusted" || value === "on-request";
 }
 
-function approvalPolicyLabel(value: ApprovalPolicy): string {
-  return approvalPolicyLabelByValue[value];
+function isNetworkAccess(value: unknown): value is NetworkAccess {
+  return value === "restricted" || value === "enabled";
+}
+
+function isFilesystemSandbox(value: unknown): value is FilesystemSandbox {
+  return value === "read-only" || value === "workspace-write" || value === "danger-full-access";
+}
+
+function sessionControlApprovalPolicyFromProtocol(policy: ApprovalPolicy): SessionControlApprovalPolicy {
+  if (policy === "never") {
+    return "never";
+  }
+  if (policy === "on-request") {
+    return "on-request";
+  }
+  return "unless-trusted";
+}
+
+function protocolApprovalPolicyFromSessionControl(policy: SessionControlApprovalPolicy): ApprovalPolicy {
+  if (policy === "never") {
+    return "never";
+  }
+  if (policy === "on-request") {
+    return "on-request";
+  }
+  return "untrusted";
+}
+
+function normalizeSessionControlsTuple(input: unknown): SessionControlsTuple | null {
+  const value = asRecord(input);
+  if (!value) {
+    return null;
+  }
+
+  const approvalPolicy = isSessionControlApprovalPolicy(value.approvalPolicy)
+    ? value.approvalPolicy
+    : isApprovalPolicy(value.approvalPolicy)
+      ? sessionControlApprovalPolicyFromProtocol(value.approvalPolicy)
+      : null;
+  const networkAccess = isNetworkAccess(value.networkAccess) ? value.networkAccess : null;
+  const filesystemSandbox = isFilesystemSandbox(value.filesystemSandbox) ? value.filesystemSandbox : null;
+  if (!approvalPolicy || !networkAccess || !filesystemSandbox) {
+    return null;
+  }
+
+  const model = typeof value.model === "string" && value.model.trim().length > 0 ? value.model.trim() : null;
+  return {
+    model,
+    approvalPolicy,
+    networkAccess,
+    filesystemSandbox
+  };
+}
+
+function sessionControlsSummary(tuple: SessionControlsTuple): string {
+  return `${tuple.model ?? "default"} | ${tuple.approvalPolicy} | ${tuple.networkAccess} | ${tuple.filesystemSandbox}`;
+}
+
+function sessionControlsEqual(left: SessionControlsTuple, right: SessionControlsTuple): boolean {
+  return (
+    left.model === right.model &&
+    left.approvalPolicy === right.approvalPolicy &&
+    left.networkAccess === right.networkAccess &&
+    left.filesystemSandbox === right.filesystemSandbox
+  );
 }
 
 function extractReasoningEffort(input: unknown): ReasoningEffort | null {
@@ -1716,7 +1797,6 @@ export function App() {
   const [projectsHeaderMenuPosition, setProjectsHeaderMenuPosition] = useState<SessionMenuPosition | null>(null);
   const [projectsHeaderMenuAnchor, setProjectsHeaderMenuAnchor] = useState<SessionMenuAnchor | null>(null);
   const [sessionActionSessionId, setSessionActionSessionId] = useState<string | null>(null);
-  const [approvalPolicyActionSessionId, setApprovalPolicyActionSessionId] = useState<string | null>(null);
   const [projectActionProjectId, setProjectActionProjectId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Array<ChatMessage>>([]);
   const [messageTimingById, setMessageTimingById] = useState<Record<string, MessageTiming>>({});
@@ -1742,6 +1822,18 @@ export function App() {
   const [sessionReasoningEffortById, setSessionReasoningEffortById] = useState<Record<string, ReasoningEffort>>(
     () => readPersistedSessionModelPrefs().effortBySessionId
   );
+  const [sessionControlsSnapshot, setSessionControlsSnapshot] = useState<SessionControlsSnapshotResponse | null>(null);
+  const [sessionControlsDraft, setSessionControlsDraft] = useState<SessionControlsTuple | null>(null);
+  const [sessionControlsScope, setSessionControlsScope] = useState<SessionControlScope>("session");
+  const [sessionControlsLoading, setSessionControlsLoading] = useState(false);
+  const [sessionControlsApplying, setSessionControlsApplying] = useState(false);
+  const [sessionControlsError, setSessionControlsError] = useState<string | null>(null);
+  const [sessionControlsToast, setSessionControlsToast] = useState<string | null>(null);
+  const [lastKnownSessionControlsBySessionId, setLastKnownSessionControlsBySessionId] = useState<Record<string, SessionControlsTuple>>({});
+  const [sessionControlsCollapsed, setSessionControlsCollapsed] = useState(true);
+  const [mobileViewport, setMobileViewport] = useState(
+    () => (typeof window !== "undefined" && "matchMedia" in window ? window.matchMedia("(max-width: 880px)").matches : false)
+  );
   const [capabilities, setCapabilities] = useState<CapabilitiesResponse | null>(null);
   const [loadingCapabilities, setLoadingCapabilities] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -1762,12 +1854,6 @@ export function App() {
   const [diffBySession, setDiffBySession] = useState<Record<string, Array<Record<string, unknown>>>>({});
   const [usageBySession, setUsageBySession] = useState<Record<string, Array<Record<string, unknown>>>>({});
   const [threadMenuOpen, setThreadMenuOpen] = useState(false);
-  const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  const [modelMenuPosition, setModelMenuPosition] = useState<SessionMenuPosition | null>(null);
-  const [modelMenuAnchor, setModelMenuAnchor] = useState<SessionMenuAnchor | null>(null);
-  const [approvalPolicyMenuOpen, setApprovalPolicyMenuOpen] = useState(false);
-  const [approvalPolicyMenuPosition, setApprovalPolicyMenuPosition] = useState<SessionMenuPosition | null>(null);
-  const [approvalPolicyMenuAnchor, setApprovalPolicyMenuAnchor] = useState<SessionMenuAnchor | null>(null);
   const [threadActionPending, setThreadActionPending] = useState<string | null>(null);
   const [loadingModels, setLoadingModels] = useState(false);
   const [mcpServers, setMcpServers] = useState<Array<McpServerSummary>>([]);
@@ -1811,16 +1897,12 @@ export function App() {
   const approvalReconcileTimersRef = useRef<Record<string, number>>({});
   const threadMenuRef = useRef<HTMLDivElement | null>(null);
   const threadMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const modelMenuRef = useRef<HTMLDivElement | null>(null);
-  const modelMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const approvalPolicyMenuRef = useRef<HTMLDivElement | null>(null);
-  const approvalPolicyMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const suggestedReplyAbortRef = useRef<AbortController | null>(null);
   const suggestedReplyRequestIdRef = useRef(0);
   const transcriptLoadRequestIdRef = useRef(0);
   const approvalsLoadRequestIdRef = useRef(0);
   const toolInputsLoadRequestIdRef = useRef(0);
-  const previousSessionIdForModelSyncRef = useRef<string | null>(null);
+  const sessionControlsLoadRequestIdRef = useRef(0);
   const previousSessionIdForEffortSyncRef = useRef<string | null>(null);
   const selectedSessionIdRef = useRef<string | null>(null);
   const pendingApprovalsRef = useRef<Array<PendingApproval>>([]);
@@ -1851,12 +1933,6 @@ export function App() {
     () => sessions.find((session) => session.sessionId === selectedSessionId) ?? null,
     [sessions, selectedSessionId]
   );
-  const selectedSessionApprovalPolicy = useMemo<ApprovalPolicy>(() => {
-    if (selectedSession && isApprovalPolicy(selectedSession.approvalPolicy)) {
-      return selectedSession.approvalPolicy;
-    }
-    return defaultApprovalPolicy;
-  }, [selectedSession]);
   const sessionsByProjectId = useMemo(() => {
     const byProjectId = new Map<string, Array<SessionSummary>>();
     for (const project of projects) {
@@ -1914,18 +1990,73 @@ export function App() {
 
     return models[0] ?? null;
   }, [defaultModelId, models, selectedModelId]);
-  const selectedModelMenuLabel = useMemo(() => {
-    if (loadingModels) {
-      return "Loading models...";
+  const selectedSessionFallbackControls = useMemo<SessionControlsTuple>(() => {
+    const fromSummary = normalizeSessionControlsTuple(selectedSession?.sessionControls);
+    if (fromSummary) {
+      return fromSummary;
     }
 
-    if (!selectedModelOption) {
-      return "No models available";
+    const sessionModelPreference = selectedSessionId ? sessionModelById[selectedSessionId] ?? null : null;
+    const model = sessionModelPreference && sessionModelPreference.trim().length > 0 ? sessionModelPreference : defaultModelId || null;
+    const approvalPolicy =
+      selectedSession && isApprovalPolicy(selectedSession.approvalPolicy)
+        ? sessionControlApprovalPolicyFromProtocol(selectedSession.approvalPolicy)
+        : defaultSessionControlsTuple.approvalPolicy;
+
+    return {
+      ...defaultSessionControlsTuple,
+      model,
+      approvalPolicy
+    };
+  }, [selectedSession, selectedSessionId, sessionModelById, defaultModelId]);
+  const effectiveSessionControlsForChat = useMemo<SessionControlsTuple>(() => {
+    if (sessionControlsSnapshot && selectedSessionId && sessionControlsSnapshot.sessionId === selectedSessionId) {
+      return sessionControlsSnapshot.controls;
+    }
+    if (selectedSessionId && lastKnownSessionControlsBySessionId[selectedSessionId]) {
+      return lastKnownSessionControlsBySessionId[selectedSessionId];
+    }
+    return selectedSessionFallbackControls;
+  }, [sessionControlsSnapshot, selectedSessionId, lastKnownSessionControlsBySessionId, selectedSessionFallbackControls]);
+  const controlsTargetForScope = useMemo<SessionControlsTuple>(() => {
+    if (sessionControlsScope === "default") {
+      const defaultsFromSnapshot = sessionControlsSnapshot?.defaults;
+      return defaultsFromSnapshot ?? defaultSessionControlsTuple;
+    }
+    return effectiveSessionControlsForChat;
+  }, [sessionControlsScope, sessionControlsSnapshot, effectiveSessionControlsForChat]);
+  const controlsDraftForScope = sessionControlsDraft ?? controlsTargetForScope;
+  const controlsDraftDirty = !sessionControlsEqual(controlsDraftForScope, controlsTargetForScope);
+  const defaultsLocked = Boolean(sessionControlsSnapshot && !sessionControlsSnapshot.defaultsEditable);
+  const defaultScopeReadOnly = sessionControlsScope === "default" && defaultsLocked;
+  const availableReasoningEfforts = useMemo<Array<ReasoningEffort>>(
+    () => reasoningEffortsForModel(selectedModelOption),
+    [selectedModelOption]
+  );
+  const selectedThinkingLevel = useMemo<ReasoningEffort>(() => {
+    if (
+      selectedReasoningEffort &&
+      isReasoningEffort(selectedReasoningEffort) &&
+      availableReasoningEfforts.includes(selectedReasoningEffort)
+    ) {
+      return selectedReasoningEffort;
     }
 
-    const effortLabel = selectedReasoningEffort ? reasoningEffortLabel(selectedReasoningEffort) : "Unavailable";
-    return `${modelDisplayLabel(selectedModelOption)} · ${effortLabel}`;
-  }, [loadingModels, selectedModelOption, selectedReasoningEffort]);
+    const preferred = preferredReasoningEffortForModel(selectedModelOption);
+    if (preferred && isReasoningEffort(preferred) && availableReasoningEfforts.includes(preferred)) {
+      return preferred;
+    }
+
+    return availableReasoningEfforts[0] ?? "medium";
+  }, [selectedReasoningEffort, selectedModelOption, availableReasoningEfforts]);
+  const thinkingLevelDisabled =
+    !selectedSessionId ||
+    sessionControlsLoading ||
+    sessionControlsApplying ||
+    sessionControlsScope === "default" ||
+    Boolean(sessionControlsError);
+  const sessionControlsSummaryText = sessionControlsSummary(controlsTargetForScope);
+  const escalationDisabledForChat = effectiveSessionControlsForChat.approvalPolicy === "never";
   const pendingApprovalsById = useMemo(() => {
     return new Map(pendingApprovals.map((approval) => [approval.approvalId, approval]));
   }, [pendingApprovals]);
@@ -1955,7 +2086,7 @@ export function App() {
   const runtimeStateLabel =
     pendingToolInputs.length > 0
       ? "Needs input"
-      : pendingApprovals.length > 0
+      : pendingApprovals.length > 0 && !escalationDisabledForChat
         ? "Waiting for approval"
         : streaming
           ? "Streaming"
@@ -2418,7 +2549,6 @@ export function App() {
       return current;
     });
     setSessionActionSessionId((current) => (current === sessionId ? null : current));
-    setApprovalPolicyActionSessionId((current) => (current === sessionId ? null : current));
     setRenamingSessionId((current) => (current === sessionId ? null : current));
 
     if (selectedSessionId === sessionId) {
@@ -2494,6 +2624,27 @@ export function App() {
 
       const payload = (await response.json()) as { data: Array<SessionSummary>; nextCursor: string | null };
       setSessionsNextCursor(payload.nextCursor);
+      const controlsFromList: Record<string, SessionControlsTuple> = {};
+      for (const session of payload.data) {
+        const fromSummary = normalizeSessionControlsTuple(session.sessionControls);
+        if (fromSummary) {
+          controlsFromList[session.sessionId] = fromSummary;
+          continue;
+        }
+        if (isApprovalPolicy(session.approvalPolicy)) {
+          controlsFromList[session.sessionId] = {
+            ...defaultSessionControlsTuple,
+            model: null,
+            approvalPolicy: sessionControlApprovalPolicyFromProtocol(session.approvalPolicy)
+          };
+        }
+      }
+      if (Object.keys(controlsFromList).length > 0) {
+        setLastKnownSessionControlsBySessionId((current) => ({
+          ...current,
+          ...controlsFromList
+        }));
+      }
 
       if (append) {
         setSessions((current) => {
@@ -2624,6 +2775,71 @@ export function App() {
     } finally {
       if (selectedSessionIdRef.current === sessionId && transcriptLoadRequestIdRef.current === requestId) {
         setLoadingTranscript(false);
+      }
+    }
+  };
+
+  const loadSessionControls = async (sessionId: string): Promise<void> => {
+    const requestId = sessionControlsLoadRequestIdRef.current + 1;
+    sessionControlsLoadRequestIdRef.current = requestId;
+    setSessionControlsLoading(true);
+    setSessionControlsError(null);
+
+    try {
+      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(sessionId)}/session-controls`);
+      if (!response.ok) {
+        if (await handleDeletedSessionResponse(response, sessionId)) {
+          return;
+        }
+        throw new Error(`failed to load session controls (${response.status})`);
+      }
+
+      const payload = (await response.json()) as SessionControlsSnapshotResponse;
+      if (selectedSessionIdRef.current !== sessionId || sessionControlsLoadRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      const normalizedControls = normalizeSessionControlsTuple(payload.controls) ?? selectedSessionFallbackControls;
+      const normalizedDefaults = normalizeSessionControlsTuple(payload.defaults) ?? defaultSessionControlsTuple;
+      const normalizedPayload: SessionControlsSnapshotResponse = {
+        status: payload.status,
+        sessionId: typeof payload.sessionId === "string" && payload.sessionId.trim().length > 0 ? payload.sessionId : sessionId,
+        controls: normalizedControls,
+        defaults: normalizedDefaults,
+        defaultsEditable: payload.defaultsEditable !== false,
+        defaultLockReason: typeof payload.defaultLockReason === "string" ? payload.defaultLockReason : null
+      };
+      setSessionControlsSnapshot(normalizedPayload);
+      setSessionControlsDraft(null);
+      setLastKnownSessionControlsBySessionId((current) => ({
+        ...current,
+        [sessionId]: normalizedControls
+      }));
+      setSessions((current) =>
+        current.map((session) =>
+          session.sessionId === sessionId
+            ? {
+                ...session,
+                approvalPolicy: protocolApprovalPolicyFromSessionControl(normalizedControls.approvalPolicy),
+                sessionControls: normalizedControls
+              }
+            : session
+        )
+      );
+      if (normalizedControls.model) {
+        setSelectedModelId(normalizedControls.model);
+      } else if (defaultModelId) {
+        setSelectedModelId(defaultModelId);
+      }
+    } catch (err) {
+      if (selectedSessionIdRef.current !== sessionId || sessionControlsLoadRequestIdRef.current !== requestId) {
+        return;
+      }
+      setSessionControlsSnapshot(null);
+      setSessionControlsError(err instanceof Error ? err.message : "failed to load session controls");
+    } finally {
+      if (selectedSessionIdRef.current === sessionId && sessionControlsLoadRequestIdRef.current === requestId) {
+        setSessionControlsLoading(false);
       }
     }
   };
@@ -3244,7 +3460,6 @@ export function App() {
           "content-type": "application/json"
         },
         body: JSON.stringify({
-          model: selectedModelId || undefined,
           cwd: projectWorkingDirectory ?? undefined
         })
       });
@@ -3277,18 +3492,6 @@ export function App() {
       }
       setShowArchived(false);
       await loadSessions(false, payload.session.sessionId);
-      if (selectedModelId) {
-        setSessionModelById((current) => ({
-          ...current,
-          [payload.session.sessionId]: selectedModelId
-        }));
-      }
-      if (selectedReasoningEffort) {
-        setSessionReasoningEffortById((current) => ({
-          ...current,
-          [payload.session.sessionId]: selectedReasoningEffort
-        }));
-      }
       setMessages([]);
       setThoughtPanelStateByTurnId({});
       setPendingApprovals([]);
@@ -3385,20 +3588,6 @@ export function App() {
     projectsHeaderMenuTriggerRef.current = null;
   };
 
-  const closeModelMenu = (): void => {
-    setModelMenuOpen(false);
-    setModelMenuPosition(null);
-    setModelMenuAnchor(null);
-    modelMenuTriggerRef.current = null;
-  };
-
-  const closeApprovalPolicyMenu = (): void => {
-    setApprovalPolicyMenuOpen(false);
-    setApprovalPolicyMenuPosition(null);
-    setApprovalPolicyMenuAnchor(null);
-    approvalPolicyMenuTriggerRef.current = null;
-  };
-
   const toggleSessionMenu = (sessionId: string, trigger: HTMLButtonElement): void => {
     if (sessionMenuSessionId === sessionId) {
       closeSessionMenu();
@@ -3407,8 +3596,6 @@ export function App() {
 
     closeProjectMenu();
     closeProjectsHeaderMenu();
-    closeModelMenu();
-    closeApprovalPolicyMenu();
     const anchor = toMenuAnchor(trigger);
 
     sessionMenuTriggerRef.current = trigger;
@@ -3425,8 +3612,6 @@ export function App() {
 
     closeProjectMenu();
     closeSessionMenu();
-    closeModelMenu();
-    closeApprovalPolicyMenu();
     const anchor = toMenuAnchor(trigger);
     projectsHeaderMenuTriggerRef.current = trigger;
     setProjectsHeaderMenuAnchor(anchor);
@@ -3442,49 +3627,11 @@ export function App() {
 
     closeSessionMenu();
     closeProjectsHeaderMenu();
-    closeModelMenu();
-    closeApprovalPolicyMenu();
     const anchor = toMenuAnchor(trigger);
     projectMenuTriggerRef.current = trigger;
     setProjectMenuAnchor(anchor);
     setProjectMenuPosition(resolveSessionMenuPosition(anchor));
     setProjectMenuProjectId(projectId);
-  };
-
-  const toggleModelMenu = (trigger: HTMLButtonElement): void => {
-    if (modelMenuOpen) {
-      closeModelMenu();
-      return;
-    }
-
-    closeSessionMenu();
-    closeProjectMenu();
-    closeProjectsHeaderMenu();
-    closeApprovalPolicyMenu();
-    setThreadMenuOpen(false);
-    const anchor = toMenuAnchor(trigger);
-    modelMenuTriggerRef.current = trigger;
-    setModelMenuAnchor(anchor);
-    setModelMenuPosition(resolveSessionMenuPosition(anchor));
-    setModelMenuOpen(true);
-  };
-
-  const toggleApprovalPolicyMenu = (trigger: HTMLButtonElement): void => {
-    if (approvalPolicyMenuOpen) {
-      closeApprovalPolicyMenu();
-      return;
-    }
-
-    closeSessionMenu();
-    closeProjectMenu();
-    closeProjectsHeaderMenu();
-    closeModelMenu();
-    setThreadMenuOpen(false);
-    const anchor = toMenuAnchor(trigger);
-    approvalPolicyMenuTriggerRef.current = trigger;
-    setApprovalPolicyMenuAnchor(anchor);
-    setApprovalPolicyMenuPosition(resolveSessionMenuPosition(anchor));
-    setApprovalPolicyMenuOpen(true);
   };
 
   const submitRenameSession = async (sessionId: string): Promise<void> => {
@@ -3833,10 +3980,11 @@ export function App() {
       }
     }));
     setStreaming(true);
-    if (selectedModelId) {
+    const activeControls = effectiveSessionControlsForChat;
+    if (activeControls.model) {
       setSessionModelById((current) => ({
         ...current,
-        [selectedSessionId]: selectedModelId
+        [selectedSessionId]: activeControls.model as string
       }));
     }
     if (selectedReasoningEffort) {
@@ -3854,9 +4002,11 @@ export function App() {
         },
         body: JSON.stringify({
           text,
-          model: selectedModelId || undefined,
+          model: activeControls.model ?? undefined,
           effort: selectedReasoningEffort || undefined,
-          approvalPolicy: selectedSessionApprovalPolicy
+          approvalPolicy: protocolApprovalPolicyFromSessionControl(activeControls.approvalPolicy),
+          networkAccess: activeControls.networkAccess,
+          filesystemSandbox: activeControls.filesystemSandbox
         })
       });
 
@@ -3944,7 +4094,7 @@ export function App() {
           "content-type": "application/json"
         },
         body: JSON.stringify({
-          model: selectedModelId || undefined,
+          model: (effectiveSessionControlsForChat.model ?? selectedModelId) || undefined,
           effort: selectedReasoningEffort || undefined,
           draft: draftAtStart || undefined
         }),
@@ -3996,109 +4146,119 @@ export function App() {
     void sendMessage();
   };
 
-  const applyModelReasoningSelection = (modelId: string, effort: ReasoningEffort): void => {
-    const targetModel = models.find((model) => model.id === modelId) ?? null;
-    if (!targetModel) {
-      return;
-    }
-
-    if (!isReasoningEffortSupportedByModel(targetModel, effort)) {
-      return;
-    }
-
-    setSelectedModelId(modelId);
-    setSelectedReasoningEffort(effort);
-    closeModelMenu();
-
-    if (!selectedSessionId || !modelId) {
-      return;
-    }
-
-    setSessionModelById((current) => ({
-      ...current,
-      [selectedSessionId]: modelId
+  const updateSessionControlsDraft = <K extends keyof SessionControlsTuple>(
+    field: K,
+    value: SessionControlsTuple[K]
+  ): void => {
+    setSessionControlsDraft((current) => ({
+      ...(current ?? controlsTargetForScope),
+      [field]: value
     }));
 
-    setSessionReasoningEffortById((current) => ({
-      ...current,
-      [selectedSessionId]: effort
-    }));
+    if (field === "model") {
+      const modelId = typeof value === "string" ? value : "";
+      if (modelId && sessionControlsScope === "session") {
+        setSelectedModelId(modelId);
+        const modelOption = models.find((model) => model.id === modelId) ?? null;
+        const nextEffort = preferredReasoningEffortForModel(modelOption);
+        if (nextEffort) {
+          setSelectedReasoningEffort(nextEffort);
+        }
+      }
+    }
   };
 
-  const applyModelSelection = (modelId: string): void => {
-    const targetModel = models.find((model) => model.id === modelId) ?? null;
-    if (!targetModel) {
-      return;
-    }
-
-    const keepCurrentEffort =
-      isReasoningEffort(selectedReasoningEffort) &&
-      isReasoningEffortSupportedByModel(targetModel, selectedReasoningEffort)
-        ? selectedReasoningEffort
-        : null;
-    const fallbackEffort = preferredReasoningEffortForModel(targetModel);
-    const nextEffort = keepCurrentEffort ?? fallbackEffort;
-    if (!nextEffort) {
-      return;
-    }
-
-    applyModelReasoningSelection(modelId, nextEffort);
-  };
-
-  const updateSessionApprovalPolicy = async (approvalPolicy: ApprovalPolicy): Promise<void> => {
+  const updateThinkingLevel = (value: ReasoningEffort): void => {
+    setSelectedReasoningEffort(value);
     if (!selectedSessionId) {
       return;
     }
 
-    const sessionId = selectedSessionId;
+    setSessionReasoningEffortById((current) => ({
+      ...current,
+      [selectedSessionId]: value
+    }));
+  };
+
+  const revertSessionControlsDraft = (): void => {
+    setSessionControlsDraft(controlsTargetForScope);
+    setSessionControlsError(null);
+  };
+
+  const applySessionControlsChanges = async (): Promise<void> => {
+    if (!selectedSessionId) {
+      setSessionControlsError("Select a chat to edit session controls.");
+      return;
+    }
+    if (sessionControlsScope === "default" && defaultsLocked) {
+      setSessionControlsError("Managed by harness configuration");
+      return;
+    }
+
+    const controlsToApply = controlsDraftForScope;
+    setSessionControlsApplying(true);
+    setSessionControlsError(null);
     setError(null);
-    setApprovalPolicyActionSessionId(sessionId);
     try {
-      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(sessionId)}/approval-policy`, {
+      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(selectedSessionId)}/session-controls`, {
         method: "POST",
         headers: {
           "content-type": "application/json"
         },
         body: JSON.stringify({
-          approvalPolicy
+          scope: sessionControlsScope,
+          controls: controlsToApply,
+          actor: "user",
+          source: "ui"
         })
       });
       if (!response.ok) {
-        if (await handleDeletedSessionResponse(response, sessionId)) {
+        if (await handleDeletedSessionResponse(response, selectedSessionId)) {
           return;
         }
-        throw new Error(`failed to update approval policy (${response.status})`);
+        throw new Error(`failed to apply session controls (${response.status})`);
       }
 
-      const payload = (await response.json()) as {
-        sessionId?: string;
-        approvalPolicy?: ApprovalPolicy;
+      const payload = (await response.json()) as SessionControlsSnapshotResponse & {
+        applied?: SessionControlsTuple;
       };
-      const targetSessionId = typeof payload.sessionId === "string" && payload.sessionId.trim().length > 0 ? payload.sessionId : sessionId;
-      const nextPolicy = isApprovalPolicy(payload.approvalPolicy) ? payload.approvalPolicy : approvalPolicy;
+      const normalizedControls = normalizeSessionControlsTuple(payload.controls) ?? controlsToApply;
+      const normalizedDefaults = normalizeSessionControlsTuple(payload.defaults) ?? defaultSessionControlsTuple;
+      const normalizedPayload: SessionControlsSnapshotResponse = {
+        status: payload.status,
+        sessionId: typeof payload.sessionId === "string" && payload.sessionId.trim().length > 0 ? payload.sessionId : selectedSessionId,
+        controls: normalizedControls,
+        defaults: normalizedDefaults,
+        defaultsEditable: payload.defaultsEditable !== false,
+        defaultLockReason: typeof payload.defaultLockReason === "string" ? payload.defaultLockReason : null
+      };
+      setSessionControlsSnapshot(normalizedPayload);
+      setLastKnownSessionControlsBySessionId((current) => ({
+        ...current,
+        [selectedSessionId]: normalizedControls
+      }));
+      setSessionControlsDraft(null);
       setSessions((current) =>
         current.map((session) =>
-          session.sessionId === targetSessionId
+          session.sessionId === selectedSessionId
             ? {
                 ...session,
-                approvalPolicy: nextPolicy
+                approvalPolicy: protocolApprovalPolicyFromSessionControl(normalizedControls.approvalPolicy),
+                sessionControls: normalizedControls
               }
             : session
         )
       );
+      const appliedTuple = normalizeSessionControlsTuple(payload.applied) ?? controlsToApply;
+      setSessionControlsToast(`Applied: ${sessionControlsSummary(appliedTuple)}`);
+      setSessionControlsCollapsed(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "failed to update approval policy");
+      const message = err instanceof Error ? err.message : "failed to apply session controls";
+      setSessionControlsError(message);
+      setError(message);
     } finally {
-      setApprovalPolicyActionSessionId((current) => (current === sessionId ? null : current));
+      setSessionControlsApplying(false);
     }
-  };
-
-  const applySelectedSessionApprovalPolicy = (approvalPolicy: ApprovalPolicy): void => {
-    closeApprovalPolicyMenu();
-    if (approvalPolicy === selectedSessionApprovalPolicy) {
-      return;
-    }
-    void updateSessionApprovalPolicy(approvalPolicy);
   };
 
   const interruptTurn = async (): Promise<void> => {
@@ -4673,82 +4833,6 @@ export function App() {
   };
 
   useEffect(() => {
-    if (!modelMenuOpen) {
-      return;
-    }
-
-    const handleClickOutside = (event: MouseEvent): void => {
-      const target = event.target;
-      if (!(target instanceof Node)) {
-        return;
-      }
-
-      const insideMenu = modelMenuRef.current?.contains(target) ?? false;
-      const insideTrigger = modelMenuTriggerRef.current?.contains(target) ?? false;
-      if (!insideMenu && !insideTrigger) {
-        closeModelMenu();
-      }
-    };
-
-    const handleEscape = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") {
-        closeModelMenu();
-      }
-    };
-
-    const handleResize = (): void => {
-      closeModelMenu();
-    };
-
-    document.addEventListener("mousedown", handleClickOutside);
-    document.addEventListener("keydown", handleEscape);
-    window.addEventListener("resize", handleResize);
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-      document.removeEventListener("keydown", handleEscape);
-      window.removeEventListener("resize", handleResize);
-    };
-  }, [modelMenuOpen]);
-
-  useEffect(() => {
-    if (!approvalPolicyMenuOpen) {
-      return;
-    }
-
-    const handleClickOutside = (event: MouseEvent): void => {
-      const target = event.target;
-      if (!(target instanceof Node)) {
-        return;
-      }
-
-      const insideMenu = approvalPolicyMenuRef.current?.contains(target) ?? false;
-      const insideTrigger = approvalPolicyMenuTriggerRef.current?.contains(target) ?? false;
-      if (!insideMenu && !insideTrigger) {
-        closeApprovalPolicyMenu();
-      }
-    };
-
-    const handleEscape = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") {
-        closeApprovalPolicyMenu();
-      }
-    };
-
-    const handleResize = (): void => {
-      closeApprovalPolicyMenu();
-    };
-
-    document.addEventListener("mousedown", handleClickOutside);
-    document.addEventListener("keydown", handleEscape);
-    window.addEventListener("resize", handleResize);
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-      document.removeEventListener("keydown", handleEscape);
-      window.removeEventListener("resize", handleResize);
-    };
-  }, [approvalPolicyMenuOpen]);
-
-  useEffect(() => {
     if (!sessionMenuSessionId) {
       return;
     }
@@ -4898,48 +4982,8 @@ export function App() {
     closeSessionMenu();
     closeProjectMenu();
     closeProjectsHeaderMenu();
-    closeModelMenu();
-    closeApprovalPolicyMenu();
     setThreadMenuOpen(false);
   }, [selectedSessionId, showArchived]);
-
-  useEffect(() => {
-    if (!modelMenuOpen || !modelMenuAnchor || !modelMenuRef.current) {
-      return;
-    }
-
-    const measured = modelMenuRef.current.getBoundingClientRect();
-    const next = resolveSessionMenuPosition(modelMenuAnchor, {
-      width: measured.width,
-      height: measured.height
-    });
-
-    setModelMenuPosition((current) => {
-      if (current && Math.abs(current.top - next.top) < 0.5 && Math.abs(current.left - next.left) < 0.5) {
-        return current;
-      }
-      return next;
-    });
-  }, [modelMenuOpen, modelMenuAnchor, models, selectedModelId, selectedReasoningEffort]);
-
-  useEffect(() => {
-    if (!approvalPolicyMenuOpen || !approvalPolicyMenuAnchor || !approvalPolicyMenuRef.current) {
-      return;
-    }
-
-    const measured = approvalPolicyMenuRef.current.getBoundingClientRect();
-    const next = resolveSessionMenuPosition(approvalPolicyMenuAnchor, {
-      width: measured.width,
-      height: measured.height
-    });
-
-    setApprovalPolicyMenuPosition((current) => {
-      if (current && Math.abs(current.top - next.top) < 0.5 && Math.abs(current.left - next.left) < 0.5) {
-        return current;
-      }
-      return next;
-    });
-  }, [approvalPolicyMenuOpen, approvalPolicyMenuAnchor, selectedSessionApprovalPolicy, approvalPolicyActionSessionId, selectedSessionId]);
 
   useEffect(() => {
     if (!sessionMenuSessionId || !sessionMenuAnchor || !openSessionMenuRef.current) {
@@ -5016,16 +5060,42 @@ export function App() {
   }, [showProjectsSection]);
 
   useEffect(() => {
-    if (modelMenuOpen && models.length === 0) {
-      closeModelMenu();
+    if (typeof window === "undefined" || !("matchMedia" in window)) {
+      return;
     }
-  }, [modelMenuOpen, models.length]);
+    const media = window.matchMedia("(max-width: 880px)");
+    const handleChange = (event: MediaQueryListEvent): void => {
+      setMobileViewport(event.matches);
+    };
+    setMobileViewport(media.matches);
+    media.addEventListener("change", handleChange);
+    return () => {
+      media.removeEventListener("change", handleChange);
+    };
+  }, []);
 
   useEffect(() => {
-    if (!selectedSessionId && approvalPolicyMenuOpen) {
-      closeApprovalPolicyMenu();
+    // Keep controls tucked away by default when chat context changes.
+    setSessionControlsCollapsed(true);
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    if (mobileViewport) {
+      setSessionControlsCollapsed(true);
     }
-  }, [selectedSessionId, approvalPolicyMenuOpen]);
+  }, [mobileViewport]);
+
+  useEffect(() => {
+    if (!sessionControlsToast) {
+      return;
+    }
+    const timerId = window.setTimeout(() => {
+      setSessionControlsToast(null);
+    }, 4200);
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, [sessionControlsToast]);
 
   useEffect(() => {
     void loadSessions(showArchived);
@@ -5060,6 +5130,10 @@ export function App() {
       setRetryPrompt(null);
       setLoadingSuggestedReply(false);
       setSteerDraft("");
+      setSessionControlsSnapshot(null);
+      setSessionControlsDraft(null);
+      setSessionControlsError(null);
+      setSessionControlsScope("session");
       return;
     }
 
@@ -5075,7 +5149,12 @@ export function App() {
     setApprovalActionById({});
     setRetryPrompt(null);
     setLoadingSuggestedReply(false);
+    setSessionControlsSnapshot(null);
+    setSessionControlsDraft(null);
+    setSessionControlsError(null);
+    setSessionControlsScope("session");
     void loadSessionTranscript(selectedSessionId);
+    void loadSessionControls(selectedSessionId);
     void loadSessionApprovals(selectedSessionId);
     void loadSessionToolInputs(selectedSessionId);
   }, [selectedSessionId]);
@@ -5099,35 +5178,23 @@ export function App() {
   }, [showSettings]);
 
   useEffect(() => {
-    const sessionChanged = previousSessionIdForModelSyncRef.current !== selectedSessionId;
-    previousSessionIdForModelSyncRef.current = selectedSessionId;
-
     const knownModelIds = new Set(models.map((model) => model.id));
-    const storedSessionModelId = selectedSessionId ? sessionModelById[selectedSessionId] ?? "" : "";
-    const storedSessionModelIsValid = storedSessionModelId.length > 0 && knownModelIds.has(storedSessionModelId);
+    const preferredFromDraft = sessionControlsDraft?.model ?? "";
+    const preferredFromSession = effectiveSessionControlsForChat.model ?? "";
+    const preferredModel = preferredFromDraft || preferredFromSession || defaultModelId || "";
 
     setSelectedModelId((current) => {
       const currentIsValid = current.length > 0 && knownModelIds.has(current);
-      if (sessionChanged) {
-        if (storedSessionModelIsValid) {
-          return storedSessionModelId;
-        }
-        if (currentIsValid) {
-          return current;
-        }
-        return defaultModelId || "";
+      const preferredIsValid = preferredModel.length > 0 && knownModelIds.has(preferredModel);
+      if (preferredIsValid) {
+        return preferredModel;
       }
-
-      // For the active session, never override a valid local selection.
       if (currentIsValid) {
         return current;
       }
-      if (storedSessionModelIsValid) {
-        return storedSessionModelId;
-      }
       return defaultModelId || "";
     });
-  }, [selectedSessionId, sessionModelById, defaultModelId, models]);
+  }, [models, sessionControlsDraft, effectiveSessionControlsForChat.model, defaultModelId]);
 
   useEffect(() => {
     const sessionChanged = previousSessionIdForEffortSyncRef.current !== selectedSessionId;
@@ -7221,32 +7288,6 @@ export function App() {
         <header className="chat-header">
           <h2>{selectedSession ? selectedSession.title : selectedSessionId ? `Session ${selectedSessionId}` : "No active session"}</h2>
           <div className="chat-actions">
-            <button
-              ref={modelMenuTriggerRef}
-              type="button"
-              className="model-combo-trigger"
-              onClick={(event) => toggleModelMenu(event.currentTarget)}
-              disabled={loadingModels || models.length === 0}
-              aria-haspopup="menu"
-              aria-expanded={modelMenuOpen}
-            >
-              <span className="model-combo-label">Model</span>
-              <span className="model-combo-value">{selectedModelMenuLabel}</span>
-            </button>
-            <button
-              ref={approvalPolicyMenuTriggerRef}
-              type="button"
-              className="ghost"
-              onClick={(event) => toggleApprovalPolicyMenu(event.currentTarget)}
-              disabled={!selectedSessionId || approvalPolicyActionSessionId === selectedSessionId}
-              title="Choose approval policy for this chat"
-              aria-haspopup="menu"
-              aria-expanded={approvalPolicyMenuOpen}
-            >
-              {approvalPolicyActionSessionId === selectedSessionId
-                ? "Saving approvals..."
-                : `Approvals: ${approvalPolicyLabel(selectedSessionApprovalPolicy)}`}
-            </button>
             <span className="state-pill">{runtimeStateLabel}</span>
             <button
               ref={threadMenuTriggerRef}
@@ -7314,6 +7355,288 @@ export function App() {
             </div>
           ) : null}
         </header>
+        {mobileViewport || sessionControlsCollapsed ? (
+          <button
+            type="button"
+            className="session-controls-chip"
+            onClick={() => setSessionControlsCollapsed((current) => !current)}
+            aria-expanded={!sessionControlsCollapsed}
+            aria-controls="session-controls-panel"
+          >
+            <span>Session Controls</span>
+            <code>{sessionControlsSummaryText}</code>
+          </button>
+        ) : null}
+        {sessionControlsCollapsed ? null : (
+          <section id="session-controls-panel" className="session-controls-panel" aria-label="Session Controls">
+            <div className="session-controls-header">
+              <div className="session-controls-title-wrap">
+                <h3>Session Controls</h3>
+                <p
+                  className="session-controls-summary"
+                  aria-live="polite"
+                  aria-label={`Current session controls: ${sessionControlsSummaryText}`}
+                >
+                  <code>{sessionControlsSummaryText}</code>
+                </p>
+              </div>
+              <div className="session-controls-scope">
+                <span>Applies to:</span>
+                <div className="session-controls-scope-toggle" role="group" aria-label="Session controls scope">
+                  <button
+                    type="button"
+                    className={sessionControlsScope === "session" ? "active" : ""}
+                    onClick={() => {
+                      setSessionControlsScope("session");
+                      setSessionControlsDraft(null);
+                      setSessionControlsError(null);
+                    }}
+                    disabled={!selectedSessionId || sessionControlsLoading || sessionControlsApplying}
+                  >
+                    This chat
+                  </button>
+                  <button
+                    type="button"
+                    className={sessionControlsScope === "default" ? "active" : ""}
+                    onClick={() => {
+                      setSessionControlsScope("default");
+                      setSessionControlsDraft(null);
+                      setSessionControlsError(null);
+                    }}
+                    disabled={!selectedSessionId || sessionControlsLoading || sessionControlsApplying}
+                  >
+                    New chats default
+                  </button>
+                </div>
+                {defaultsLocked ? (
+                  <span className="session-controls-lock" title="Managed by harness configuration" aria-label="Managed by harness configuration">
+                    🔒
+                  </span>
+                ) : null}
+              </div>
+            </div>
+            {sessionControlsLoading && !sessionControlsError ? <p className="hint">Loading session controls...</p> : null}
+            {sessionControlsError ? (
+              <div className="session-controls-error">
+                <span>{sessionControlsError}</span>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    if (selectedSessionId) {
+                      void loadSessionControls(selectedSessionId);
+                    }
+                  }}
+                  disabled={!selectedSessionId || sessionControlsLoading || sessionControlsApplying}
+                >
+                  Retry
+                </button>
+              </div>
+            ) : null}
+            {escalationDisabledForChat ? <p className="session-controls-note">Escalation requests disabled for this chat.</p> : null}
+            <div className="session-controls-grid">
+              <label className="session-control-field">
+                <span className="session-control-label">
+                  Model
+                  {defaultScopeReadOnly ? (
+                    <span className="session-control-lock" title="Managed by harness configuration" aria-label="Managed by harness configuration">
+                      🔒
+                    </span>
+                  ) : null}
+                </span>
+                <select
+                  aria-label="Model selector"
+                  value={controlsDraftForScope.model ?? "__default__"}
+                  onChange={(event) =>
+                    updateSessionControlsDraft("model", event.target.value === "__default__" ? null : event.target.value)
+                  }
+                  disabled={
+                    !selectedSessionId ||
+                    loadingModels ||
+                    sessionControlsLoading ||
+                    sessionControlsApplying ||
+                    defaultScopeReadOnly ||
+                    Boolean(sessionControlsError)
+                  }
+                >
+                  <option value="__default__">default</option>
+                  {models.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.id}
+                    </option>
+                  ))}
+                </select>
+                <small>{loadingModels ? "Loading workspace models..." : "Use a workspace-provided model id."}</small>
+              </label>
+              <label className="session-control-field session-control-field-thinking">
+                <span className="session-control-label">Thinking Level</span>
+                <select
+                  aria-label="Thinking Level selector"
+                  value={selectedThinkingLevel}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    if (isReasoningEffort(next)) {
+                      updateThinkingLevel(next);
+                    }
+                  }}
+                  disabled={thinkingLevelDisabled}
+                >
+                  {availableReasoningEfforts.map((effort) => (
+                    <option key={effort} value={effort}>
+                      {effort}
+                    </option>
+                  ))}
+                </select>
+                <small>
+                  {sessionControlsScope === "default"
+                    ? "Thinking level applies per chat. Switch scope to This chat to edit."
+                    : "Per-chat reasoning effort used for Send and Suggest Reply."}
+                </small>
+              </label>
+              <label className="session-control-field">
+                <span className="session-control-label">
+                  Approval Policy
+                  {defaultScopeReadOnly ? (
+                    <span className="session-control-lock" title="Managed by harness configuration" aria-label="Managed by harness configuration">
+                      🔒
+                    </span>
+                  ) : null}
+                </span>
+                <select
+                  aria-label="Approval Policy selector"
+                  value={controlsDraftForScope.approvalPolicy}
+                  onChange={(event) =>
+                    updateSessionControlsDraft(
+                      "approvalPolicy",
+                      (isSessionControlApprovalPolicy(event.target.value)
+                        ? event.target.value
+                        : controlsDraftForScope.approvalPolicy) as SessionControlApprovalPolicy
+                    )
+                  }
+                  disabled={
+                    !selectedSessionId ||
+                    sessionControlsLoading ||
+                    sessionControlsApplying ||
+                    defaultScopeReadOnly ||
+                    Boolean(sessionControlsError)
+                  }
+                >
+                  {sessionControlApprovalPolicies.map((policy) => (
+                    <option key={policy} value={policy}>
+                      {policy}
+                    </option>
+                  ))}
+                </select>
+                <small>{sessionControlApprovalPolicyHelperText[controlsDraftForScope.approvalPolicy]}</small>
+              </label>
+              <label className="session-control-field">
+                <span className="session-control-label">
+                  Network Access
+                  {defaultScopeReadOnly ? (
+                    <span className="session-control-lock" title="Managed by harness configuration" aria-label="Managed by harness configuration">
+                      🔒
+                    </span>
+                  ) : null}
+                </span>
+                <select
+                  aria-label="Network Access selector"
+                  value={controlsDraftForScope.networkAccess}
+                  onChange={(event) =>
+                    updateSessionControlsDraft(
+                      "networkAccess",
+                      (isNetworkAccess(event.target.value) ? event.target.value : controlsDraftForScope.networkAccess) as NetworkAccess
+                    )
+                  }
+                  disabled={
+                    !selectedSessionId ||
+                    sessionControlsLoading ||
+                    sessionControlsApplying ||
+                    defaultScopeReadOnly ||
+                    Boolean(sessionControlsError)
+                  }
+                >
+                  {networkAccessModes.map((mode) => (
+                    <option key={mode} value={mode}>
+                      {mode}
+                    </option>
+                  ))}
+                </select>
+                <small>{networkAccessHelperText[controlsDraftForScope.networkAccess]}</small>
+              </label>
+              <label className="session-control-field">
+                <span className="session-control-label">
+                  Filesystem Sandbox
+                  {defaultScopeReadOnly ? (
+                    <span className="session-control-lock" title="Managed by harness configuration" aria-label="Managed by harness configuration">
+                      🔒
+                    </span>
+                  ) : null}
+                </span>
+                <select
+                  aria-label="Filesystem Sandbox selector"
+                  value={controlsDraftForScope.filesystemSandbox}
+                  onChange={(event) =>
+                    updateSessionControlsDraft(
+                      "filesystemSandbox",
+                      (isFilesystemSandbox(event.target.value)
+                        ? event.target.value
+                        : controlsDraftForScope.filesystemSandbox) as FilesystemSandbox
+                    )
+                  }
+                  disabled={
+                    !selectedSessionId ||
+                    sessionControlsLoading ||
+                    sessionControlsApplying ||
+                    defaultScopeReadOnly ||
+                    Boolean(sessionControlsError)
+                  }
+                >
+                  {filesystemSandboxModes.map((mode) => (
+                    <option key={mode} value={mode}>
+                      {mode}
+                    </option>
+                  ))}
+                </select>
+                <small>{filesystemSandboxHelperText[controlsDraftForScope.filesystemSandbox]}</small>
+              </label>
+            </div>
+            {defaultScopeReadOnly ? (
+              <p className="session-controls-lock-reason">
+                <span aria-hidden="true">🔒</span> Set by harness at session start
+              </p>
+            ) : null}
+            {sessionControlsError ? <p className="session-controls-readonly-note">Showing last known state in read-only mode.</p> : null}
+            <div className="session-controls-actions">
+              <button
+                type="button"
+                className="ghost"
+                onClick={revertSessionControlsDraft}
+                disabled={!selectedSessionId || sessionControlsApplying || sessionControlsLoading || !controlsDraftDirty}
+              >
+                Revert
+              </button>
+              <button
+                type="button"
+                onClick={() => void applySessionControlsChanges()}
+                disabled={
+                  !selectedSessionId ||
+                  sessionControlsApplying ||
+                  sessionControlsLoading ||
+                  !controlsDraftDirty ||
+                  defaultScopeReadOnly ||
+                  Boolean(sessionControlsError)
+                }
+              >
+                {sessionControlsApplying ? "Applying..." : "Apply"}
+              </button>
+            </div>
+          </section>
+        )}
+        {sessionControlsToast ? (
+          <div className="session-controls-toast" role="status" aria-live="polite">
+            {sessionControlsToast}
+          </div>
+        ) : null}
 
         {deletedSessionNotice ? (
           <div className="chat-blocking-overlay" role="alertdialog" aria-modal="true" aria-live="assertive">
@@ -7658,83 +7981,6 @@ export function App() {
           </div>
         </div>
       ) : null}
-      {modelMenuOpen && modelMenuPosition
-        ? createPortal(
-            <div
-              ref={modelMenuRef}
-              className="model-context-menu"
-              role="menu"
-              aria-label="Select model and reasoning effort"
-              style={{
-                top: `${modelMenuPosition.top}px`,
-                left: `${modelMenuPosition.left}px`
-              }}
-            >
-              {models.map((model) => {
-                const efforts = reasoningEffortsForModel(model);
-                const modelSelected = model.id === selectedModelOption?.id;
-                return (
-                  <div key={model.id} className="model-submenu-group" role="none">
-                    <button
-                      type="button"
-                      className={`model-submenu-trigger${modelSelected ? " selected" : ""}`}
-                      role="menuitemradio"
-                      aria-checked={modelSelected}
-                      onClick={() => applyModelSelection(model.id)}
-                    >
-                      <span>{modelDisplayLabel(model)}</span>
-                      {modelSelected ? <span className="model-selected-pill">Selected</span> : null}
-                    </button>
-                    <div className="model-submenu" role="group" aria-label={`Reasoning effort for ${model.label}`}>
-                      {efforts.map((effort) => (
-                        <button
-                          key={`${model.id}:${effort}`}
-                          type="button"
-                          role="menuitemradio"
-                          aria-checked={modelSelected && selectedReasoningEffort === effort}
-                          className={modelSelected && selectedReasoningEffort === effort ? "selected" : ""}
-                          onClick={() => applyModelReasoningSelection(model.id, effort)}
-                        >
-                          {reasoningEffortLabel(effort)}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>,
-            document.body
-          )
-        : null}
-      {approvalPolicyMenuOpen && approvalPolicyMenuPosition
-        ? createPortal(
-            <div
-              ref={approvalPolicyMenuRef}
-              className="session-context-menu approval-policy-menu"
-              role="menu"
-              aria-label="Select approval policy"
-              style={{
-                top: `${approvalPolicyMenuPosition.top}px`,
-                left: `${approvalPolicyMenuPosition.left}px`
-              }}
-            >
-              {allApprovalPolicies.map((policy) => (
-                <button
-                  key={policy}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={selectedSessionApprovalPolicy === policy}
-                  className={selectedSessionApprovalPolicy === policy ? "selected" : ""}
-                  disabled={!selectedSessionId || approvalPolicyActionSessionId === selectedSessionId}
-                  onClick={() => applySelectedSessionApprovalPolicy(policy)}
-                >
-                  {approvalPolicyLabel(policy)}
-                </button>
-              ))}
-            </div>,
-            document.body
-          )
-        : null}
       {sessionMenuSession && sessionMenuPosition
         ? createPortal(
             <div

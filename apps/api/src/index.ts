@@ -60,6 +60,7 @@ type SessionSummary = {
   materialized: boolean;
   modelProvider: string;
   approvalPolicy: ApprovalPolicy;
+  sessionControls: SessionControlsTuple;
   createdAt: number;
   updatedAt: number;
   cwd: string;
@@ -176,6 +177,15 @@ type ApprovalDecisionInput = "accept" | "decline" | "cancel";
 type DefaultSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 type ApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
+type SessionControlApprovalPolicy = "never" | "unless-trusted" | "on-request";
+type NetworkAccess = "restricted" | "enabled";
+type SessionControlsTuple = {
+  model: string | null;
+  approvalPolicy: SessionControlApprovalPolicy;
+  networkAccess: NetworkAccess;
+  filesystemSandbox: DefaultSandboxMode;
+};
+type SessionControlScope = "session" | "default";
 type AuthStatus = {
   hasOpenAiApiKey: boolean;
   codexHomeAuthFile: boolean;
@@ -187,6 +197,8 @@ type SessionMetadataStore = {
   projects: Record<string, ProjectRecord>;
   sessionProjectById: Record<string, string>;
   sessionApprovalPolicyById: Record<string, ApprovalPolicy>;
+  sessionControlsById: Record<string, SessionControlsTuple>;
+  defaultSessionControls: SessionControlsTuple;
   projectOrchestratorSessionById: Record<string, string>;
   suggestionHelperSessionIds: Record<string, true>;
   turnTimingBySessionId: Record<string, Record<string, TurnTimingRecord>>;
@@ -227,18 +239,37 @@ const createSessionBodySchema = z
   .object({
     cwd: z.string().min(1).optional(),
     model: z.string().min(1).optional(),
-    approvalPolicy: z.enum(["untrusted", "on-failure", "on-request", "never"]).optional()
+    approvalPolicy: z.enum(["untrusted", "on-failure", "on-request", "never"]).optional(),
+    networkAccess: z.enum(["restricted", "enabled"]).optional(),
+    filesystemSandbox: z.enum(["read-only", "workspace-write", "danger-full-access"]).optional()
   })
   .optional();
 
 const reasoningEffortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const approvalPolicySchema = z.enum(["untrusted", "on-failure", "on-request", "never"]);
+const sessionControlApprovalPolicySchema = z.enum(["never", "unless-trusted", "on-request"]);
+const networkAccessSchema = z.enum(["restricted", "enabled"]);
+const filesystemSandboxSchema = z.enum(["read-only", "workspace-write", "danger-full-access"]);
+const sessionControlsTupleSchema = z.object({
+  model: z.string().trim().min(1).nullable(),
+  approvalPolicy: sessionControlApprovalPolicySchema,
+  networkAccess: networkAccessSchema,
+  filesystemSandbox: filesystemSandboxSchema
+});
+const applySessionControlsBodySchema = z.object({
+  scope: z.enum(["session", "default"]),
+  controls: sessionControlsTupleSchema,
+  actor: z.string().trim().min(1).max(120).optional(),
+  source: z.string().trim().min(1).max(64).optional()
+});
 
 const sendMessageBodySchema = z.object({
   text: z.string().trim().min(1),
   model: z.string().min(1).optional(),
   effort: reasoningEffortSchema.optional(),
-  approvalPolicy: approvalPolicySchema.optional()
+  approvalPolicy: approvalPolicySchema.optional(),
+  networkAccess: networkAccessSchema.optional(),
+  filesystemSandbox: filesystemSandboxSchema.optional()
 });
 
 const suggestedReplyBodySchema = z
@@ -1271,6 +1302,77 @@ function isApprovalPolicy(value: unknown): value is ApprovalPolicy {
   return value === "untrusted" || value === "on-failure" || value === "on-request" || value === "never";
 }
 
+function isSessionControlApprovalPolicy(value: unknown): value is SessionControlApprovalPolicy {
+  return value === "never" || value === "unless-trusted" || value === "on-request";
+}
+
+function isNetworkAccess(value: unknown): value is NetworkAccess {
+  return value === "restricted" || value === "enabled";
+}
+
+function isDefaultSandboxMode(value: unknown): value is DefaultSandboxMode {
+  return value === "read-only" || value === "workspace-write" || value === "danger-full-access";
+}
+
+function sessionControlApprovalPolicyFromProtocol(policy: ApprovalPolicy): SessionControlApprovalPolicy {
+  if (policy === "never") {
+    return "never";
+  }
+  if (policy === "on-request") {
+    return "on-request";
+  }
+  return "unless-trusted";
+}
+
+function protocolApprovalPolicyFromSessionControl(policy: SessionControlApprovalPolicy): ApprovalPolicy {
+  if (policy === "never") {
+    return "never";
+  }
+  if (policy === "on-request") {
+    return "on-request";
+  }
+  return "untrusted";
+}
+
+function defaultSessionControlsFromEnv(): SessionControlsTuple {
+  return {
+    model: null,
+    approvalPolicy: sessionControlApprovalPolicyFromProtocol(env.DEFAULT_APPROVAL_POLICY),
+    networkAccess: env.DEFAULT_NETWORK_ACCESS,
+    filesystemSandbox: env.DEFAULT_SANDBOX_MODE
+  };
+}
+
+function parseSessionControlsTuple(value: unknown): SessionControlsTuple | null {
+  if (!isObjectRecord(value)) {
+    return null;
+  }
+
+  const approvalPolicy = isSessionControlApprovalPolicy(value.approvalPolicy)
+    ? value.approvalPolicy
+    : isApprovalPolicy(value.approvalPolicy)
+      ? sessionControlApprovalPolicyFromProtocol(value.approvalPolicy)
+      : null;
+  const networkAccess = isNetworkAccess(value.networkAccess) ? value.networkAccess : null;
+  const filesystemSandbox = isDefaultSandboxMode(value.filesystemSandbox)
+    ? value.filesystemSandbox
+    : isDefaultSandboxMode(value.sandbox)
+      ? value.sandbox
+      : null;
+
+  if (!approvalPolicy || !networkAccess || !filesystemSandbox) {
+    return null;
+  }
+
+  const model = typeof value.model === "string" ? value.model.trim() : value.model === null ? null : null;
+  return {
+    model: model && model.length > 0 ? model : null,
+    approvalPolicy,
+    networkAccess,
+    filesystemSandbox
+  };
+}
+
 async function loadSessionMetadata(): Promise<SessionMetadataStore> {
   try {
     const raw = await readFile(sessionMetadataPath, "utf8");
@@ -1279,6 +1381,8 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
     const projects: Record<string, ProjectRecord> = {};
     const sessionProjectById: Record<string, string> = {};
     const sessionApprovalPolicyById: Record<string, ApprovalPolicy> = {};
+    const sessionControlsById: Record<string, SessionControlsTuple> = {};
+    const defaultSessionControls = defaultSessionControlsFromEnv();
     const projectOrchestratorSessionById: Record<string, string> = {};
     const suggestionHelperSessionIds: Record<string, true> = {};
     const turnTimingBySessionId: Record<string, Record<string, TurnTimingRecord>> = {};
@@ -1337,6 +1441,37 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
           sessionApprovalPolicyById[sessionId] = approvalPolicy;
         }
       }
+    }
+
+    if (isObjectRecord(parsed)) {
+      const maybeDefaultControls = parseSessionControlsTuple(parsed.defaultSessionControls);
+      if (maybeDefaultControls) {
+        defaultSessionControls.model = maybeDefaultControls.model;
+        defaultSessionControls.approvalPolicy = maybeDefaultControls.approvalPolicy;
+        defaultSessionControls.networkAccess = maybeDefaultControls.networkAccess;
+        defaultSessionControls.filesystemSandbox = maybeDefaultControls.filesystemSandbox;
+      }
+    }
+
+    if (isObjectRecord(parsed) && isObjectRecord(parsed.sessionControlsById)) {
+      for (const [sessionId, rawControls] of Object.entries(parsed.sessionControlsById)) {
+        const controls = parseSessionControlsTuple(rawControls);
+        if (controls) {
+          sessionControlsById[sessionId] = controls;
+        }
+      }
+    }
+
+    // Legacy migration: preserve stored approval overrides inside the new controls tuple.
+    for (const [sessionId, approvalPolicy] of Object.entries(sessionApprovalPolicyById)) {
+      const existing = sessionControlsById[sessionId];
+      if (existing) {
+        continue;
+      }
+      sessionControlsById[sessionId] = {
+        ...defaultSessionControls,
+        approvalPolicy: sessionControlApprovalPolicyFromProtocol(approvalPolicy)
+      };
     }
 
     if (isObjectRecord(parsed) && isObjectRecord(parsed.projectOrchestratorSessionById)) {
@@ -1405,6 +1540,8 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
       projects,
       sessionProjectById,
       sessionApprovalPolicyById,
+      sessionControlsById,
+      defaultSessionControls,
       projectOrchestratorSessionById,
       suggestionHelperSessionIds,
       turnTimingBySessionId
@@ -1419,6 +1556,8 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
       projects: {},
       sessionProjectById: {},
       sessionApprovalPolicyById: {},
+      sessionControlsById: {},
+      defaultSessionControls: defaultSessionControlsFromEnv(),
       projectOrchestratorSessionById: {},
       suggestionHelperSessionIds: {},
       turnTimingBySessionId: {}
@@ -1502,30 +1641,158 @@ function resolveSessionProjectId(sessionId: string): string | null {
   return storedProjectId;
 }
 
-function resolveSessionApprovalPolicy(sessionId: string): ApprovalPolicy {
-  const storedApprovalPolicy = sessionMetadata.sessionApprovalPolicyById[sessionId];
-  if (isApprovalPolicy(storedApprovalPolicy)) {
-    return storedApprovalPolicy;
+function sessionControlsEqual(left: SessionControlsTuple, right: SessionControlsTuple): boolean {
+  return (
+    left.model === right.model &&
+    left.approvalPolicy === right.approvalPolicy &&
+    left.networkAccess === right.networkAccess &&
+    left.filesystemSandbox === right.filesystemSandbox
+  );
+}
+
+function resolveDefaultSessionControls(): SessionControlsTuple {
+  const fallback = defaultSessionControlsFromEnv();
+  const stored = parseSessionControlsTuple(sessionMetadata.defaultSessionControls);
+  if (!stored) {
+    return fallback;
+  }
+  return stored;
+}
+
+function resolveSessionControls(sessionId: string): SessionControlsTuple {
+  const stored = parseSessionControlsTuple(sessionMetadata.sessionControlsById[sessionId]);
+  if (stored) {
+    return stored;
   }
 
-  return env.DEFAULT_APPROVAL_POLICY;
+  const defaultControls = resolveDefaultSessionControls();
+  const legacyApproval = sessionMetadata.sessionApprovalPolicyById[sessionId];
+  if (isApprovalPolicy(legacyApproval)) {
+    return {
+      ...defaultControls,
+      approvalPolicy: sessionControlApprovalPolicyFromProtocol(legacyApproval)
+    };
+  }
+
+  return defaultControls;
+}
+
+function setDefaultSessionControls(nextControls: SessionControlsTuple): boolean {
+  const normalizedNext = parseSessionControlsTuple(nextControls);
+  if (!normalizedNext) {
+    return false;
+  }
+
+  const current = resolveDefaultSessionControls();
+  if (sessionControlsEqual(current, normalizedNext)) {
+    return false;
+  }
+
+  sessionMetadata.defaultSessionControls = normalizedNext;
+  return true;
+}
+
+function setSessionControls(sessionId: string, nextControls: SessionControlsTuple | null): boolean {
+  if (nextControls === null) {
+    const hadSessionControls = sessionId in sessionMetadata.sessionControlsById;
+    if (hadSessionControls) {
+      delete sessionMetadata.sessionControlsById[sessionId];
+    }
+
+    const hadLegacyApproval = sessionId in sessionMetadata.sessionApprovalPolicyById;
+    if (hadLegacyApproval) {
+      delete sessionMetadata.sessionApprovalPolicyById[sessionId];
+    }
+    return hadSessionControls || hadLegacyApproval;
+  }
+
+  const normalizedNext = parseSessionControlsTuple(nextControls);
+  if (!normalizedNext) {
+    return false;
+  }
+
+  const current = parseSessionControlsTuple(sessionMetadata.sessionControlsById[sessionId]);
+  const changed = !current || !sessionControlsEqual(current, normalizedNext);
+  if (changed) {
+    sessionMetadata.sessionControlsById[sessionId] = normalizedNext;
+  }
+
+  const runtimeApprovalPolicy = protocolApprovalPolicyFromSessionControl(normalizedNext.approvalPolicy);
+  const approvalPolicyChanged = sessionMetadata.sessionApprovalPolicyById[sessionId] !== runtimeApprovalPolicy;
+  if (approvalPolicyChanged) {
+    sessionMetadata.sessionApprovalPolicyById[sessionId] = runtimeApprovalPolicy;
+  }
+
+  return changed || approvalPolicyChanged;
+}
+
+function resolveSessionApprovalPolicy(sessionId: string): ApprovalPolicy {
+  return protocolApprovalPolicyFromSessionControl(resolveSessionControls(sessionId).approvalPolicy);
 }
 
 function setSessionApprovalPolicy(sessionId: string, approvalPolicy: ApprovalPolicy | null): boolean {
   if (approvalPolicy === null) {
-    if (sessionId in sessionMetadata.sessionApprovalPolicyById) {
-      delete sessionMetadata.sessionApprovalPolicyById[sessionId];
-      return true;
-    }
-    return false;
+    return setSessionControls(sessionId, null);
   }
 
-  if (sessionMetadata.sessionApprovalPolicyById[sessionId] === approvalPolicy) {
-    return false;
-  }
+  const nextControls = {
+    ...resolveSessionControls(sessionId),
+    approvalPolicy: sessionControlApprovalPolicyFromProtocol(approvalPolicy)
+  };
+  return setSessionControls(sessionId, nextControls);
+}
 
-  sessionMetadata.sessionApprovalPolicyById[sessionId] = approvalPolicy;
-  return true;
+function formatSessionControlsTuple(tuple: SessionControlsTuple): string {
+  return `${tuple.model ?? "default"} | ${tuple.approvalPolicy} | ${tuple.networkAccess} | ${tuple.filesystemSandbox}`;
+}
+
+function appendSessionControlsAuditEntry(input: {
+  sessionId: string;
+  scope: SessionControlScope;
+  actor: string;
+  source: string;
+  previous: SessionControlsTuple;
+  next: SessionControlsTuple;
+}): void {
+  const occurredAt = new Date().toISOString();
+  const eventId = `session-controls-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const previousTuple = formatSessionControlsTuple(input.previous);
+  const nextTuple = formatSessionControlsTuple(input.next);
+  const scopeLabel = input.scope === "default" ? "new chats default" : "this chat";
+  upsertSupplementalTranscriptEntry(input.sessionId, {
+    messageId: eventId,
+    turnId: "session-controls",
+    role: "system",
+    type: "session.controls.updated",
+    content: `Session controls updated (${scopeLabel}) by ${input.actor} via ${input.source}: ${previousTuple} -> ${nextTuple}`,
+    details: JSON.stringify({
+      occurredAt,
+      actor: input.actor,
+      source: input.source,
+      scope: input.scope,
+      previous: input.previous,
+      next: input.next
+    }),
+    startedAt: Date.parse(occurredAt),
+    completedAt: Date.parse(occurredAt),
+    status: "complete"
+  });
+}
+
+function sessionControlsResponse(sessionId: string): {
+  sessionId: string;
+  controls: SessionControlsTuple;
+  defaults: SessionControlsTuple;
+  defaultsEditable: boolean;
+  defaultLockReason: string | null;
+} {
+  return {
+    sessionId,
+    controls: resolveSessionControls(sessionId),
+    defaults: resolveDefaultSessionControls(),
+    defaultsEditable: !env.SESSION_DEFAULTS_LOCKED,
+    defaultLockReason: env.SESSION_DEFAULTS_LOCKED ? "Managed by harness configuration" : null
+  };
 }
 
 function setSessionProjectAssignment(sessionId: string, nextProjectId: string | null): boolean {
@@ -1743,12 +2010,14 @@ function resolveSessionTitle(thread: CodexThread): string {
 }
 
 function toSessionSummary(thread: CodexThread, materialized = true): SessionSummary {
+  const sessionControls = resolveSessionControls(thread.id);
   return {
     sessionId: thread.id,
     title: resolveSessionTitle(thread),
     materialized,
     modelProvider: thread.modelProvider,
     approvalPolicy: resolveSessionApprovalPolicy(thread.id),
+    sessionControls,
     createdAt: thread.createdAt,
     updatedAt: thread.updatedAt,
     cwd: thread.cwd,
@@ -3321,13 +3590,16 @@ function approvalDecisionPayload(
   return { decision: mappedDecision };
 }
 
-function toTurnSandboxPolicy(mode: DefaultSandboxMode): { type: "readOnly" | "workspaceWrite" | "dangerFullAccess" } {
+function toTurnSandboxPolicy(
+  mode: DefaultSandboxMode,
+  networkAccess: NetworkAccess = "restricted"
+): { type: "readOnly" | "workspaceWrite" | "dangerFullAccess"; networkAccess?: boolean } {
   if (mode === "read-only") {
     return { type: "readOnly" };
   }
 
   if (mode === "workspace-write") {
-    return { type: "workspaceWrite" };
+    return { type: "workspaceWrite", networkAccess: networkAccess === "enabled" };
   }
 
   return { type: "dangerFullAccess" };
@@ -4557,19 +4829,27 @@ app.get("/api/sessions", async (request) => {
 
 app.post("/api/sessions", async (request) => {
   const body = createSessionBodySchema.parse(request.body);
-  const approvalPolicy = body?.approvalPolicy ?? env.DEFAULT_APPROVAL_POLICY;
+  const defaultControls = resolveDefaultSessionControls();
+  const requestedControls: SessionControlsTuple = {
+    model: body?.model?.trim() ? body.model.trim() : defaultControls.model,
+    approvalPolicy: body?.approvalPolicy
+      ? sessionControlApprovalPolicyFromProtocol(body.approvalPolicy)
+      : defaultControls.approvalPolicy,
+    networkAccess: body?.networkAccess ?? defaultControls.networkAccess,
+    filesystemSandbox: body?.filesystemSandbox ?? defaultControls.filesystemSandbox
+  };
 
   const response = await callThreadMethodWithRawEventsFallback<{
     thread: CodexThread;
   }>("thread/start", {
     cwd: body?.cwd ?? env.WORKSPACE_ROOT,
-    model: body?.model,
-    sandbox: env.DEFAULT_SANDBOX_MODE,
-    approvalPolicy
+    model: requestedControls.model ?? undefined,
+    sandbox: requestedControls.filesystemSandbox,
+    approvalPolicy: protocolApprovalPolicyFromSessionControl(requestedControls.approvalPolicy)
   });
 
   await setSessionTitle(response.thread.id, defaultSessionTitle());
-  if (body?.approvalPolicy && setSessionApprovalPolicy(response.thread.id, body.approvalPolicy)) {
+  if (setSessionControls(response.thread.id, requestedControls)) {
     await persistSessionMetadata();
   }
 
@@ -4626,13 +4906,13 @@ app.post("/api/sessions/:sessionId/fork", async (request, reply) => {
   }
 
   try {
-    const sourceApprovalPolicy = resolveSessionApprovalPolicy(params.sessionId);
+    const sourceControls = resolveSessionControls(params.sessionId);
     const response = await callThreadMethodWithRawEventsFallback<{ thread: CodexThread }>("thread/fork", {
       threadId: params.sessionId,
-      sandbox: env.DEFAULT_SANDBOX_MODE,
-      approvalPolicy: sourceApprovalPolicy
+      sandbox: sourceControls.filesystemSandbox,
+      approvalPolicy: protocolApprovalPolicyFromSessionControl(sourceControls.approvalPolicy)
     });
-    if (setSessionApprovalPolicy(response.thread.id, sourceApprovalPolicy)) {
+    if (setSessionControls(response.thread.id, sourceControls)) {
       await persistSessionMetadata();
     }
 
@@ -4981,16 +5261,102 @@ app.post("/api/sessions/:sessionId/resume", async (request, reply) => {
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
 
-  const approvalPolicy = resolveSessionApprovalPolicy(params.sessionId);
+  const sessionControls = resolveSessionControls(params.sessionId);
   const response = await callThreadMethodWithRawEventsFallback<{ thread: CodexThread }>("thread/resume", {
     threadId: params.sessionId,
-    sandbox: env.DEFAULT_SANDBOX_MODE,
-    approvalPolicy
+    sandbox: sessionControls.filesystemSandbox,
+    approvalPolicy: protocolApprovalPolicyFromSessionControl(sessionControls.approvalPolicy)
   });
 
   return {
     session: toSessionSummary(response.thread, true),
     thread: response.thread
+  };
+});
+
+app.get("/api/sessions/:sessionId/session-controls", async (request, reply) => {
+  const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
+  if (isSessionPurged(params.sessionId)) {
+    reply.code(410);
+    return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  const exists = await sessionExistsForProjectAssignment(params.sessionId);
+  if (!exists) {
+    reply.code(404);
+    return {
+      status: "not_found",
+      sessionId: params.sessionId
+    };
+  }
+
+  return {
+    status: "ok",
+    ...sessionControlsResponse(params.sessionId)
+  };
+});
+
+app.post("/api/sessions/:sessionId/session-controls", async (request, reply) => {
+  const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
+  if (isSessionPurged(params.sessionId)) {
+    reply.code(410);
+    return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  const exists = await sessionExistsForProjectAssignment(params.sessionId);
+  if (!exists) {
+    reply.code(404);
+    return {
+      status: "not_found",
+      sessionId: params.sessionId
+    };
+  }
+
+  const body = applySessionControlsBodySchema.parse(request.body);
+  const actor = body.actor ?? "user";
+  const source = body.source ?? "ui";
+
+  if (body.scope === "default" && env.SESSION_DEFAULTS_LOCKED) {
+    reply.code(423);
+    return {
+      status: "locked",
+      scope: body.scope,
+      message: "Managed by harness configuration",
+      ...sessionControlsResponse(params.sessionId)
+    };
+  }
+
+  const previousSessionControls = resolveSessionControls(params.sessionId);
+  const previousDefaultControls = resolveDefaultSessionControls();
+  const previous = body.scope === "default" ? previousDefaultControls : previousSessionControls;
+
+  const changed =
+    body.scope === "default"
+      ? setDefaultSessionControls(body.controls)
+      : setSessionControls(params.sessionId, body.controls);
+
+  const nextSessionControls = resolveSessionControls(params.sessionId);
+  const nextDefaultControls = resolveDefaultSessionControls();
+  const next = body.scope === "default" ? nextDefaultControls : nextSessionControls;
+
+  if (changed) {
+    appendSessionControlsAuditEntry({
+      sessionId: params.sessionId,
+      scope: body.scope,
+      actor,
+      source,
+      previous,
+      next
+    });
+    await persistSessionMetadata();
+  }
+
+  return {
+    status: changed ? "ok" : "unchanged",
+    scope: body.scope,
+    applied: next,
+    summary: formatSessionControlsTuple(next),
+    ...sessionControlsResponse(params.sessionId)
   };
 });
 
@@ -5170,19 +5536,30 @@ app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
   const body = sendMessageBodySchema.parse(request.body);
-  const approvalPolicy = body.approvalPolicy ?? resolveSessionApprovalPolicy(params.sessionId);
-  if (body.approvalPolicy && setSessionApprovalPolicy(params.sessionId, body.approvalPolicy)) {
+
+  const currentControls = resolveSessionControls(params.sessionId);
+  const requestedControls: SessionControlsTuple = {
+    model: body.model?.trim() ? body.model.trim() : currentControls.model,
+    approvalPolicy: body.approvalPolicy
+      ? sessionControlApprovalPolicyFromProtocol(body.approvalPolicy)
+      : currentControls.approvalPolicy,
+    networkAccess: body.networkAccess ?? currentControls.networkAccess,
+    filesystemSandbox: body.filesystemSandbox ?? currentControls.filesystemSandbox
+  };
+
+  if (setSessionControls(params.sessionId, requestedControls)) {
     void persistSessionMetadata().catch((error) => {
-      app.log.warn({ error, sessionId: params.sessionId }, "failed to persist session approval policy after message send");
+      app.log.warn({ error, sessionId: params.sessionId }, "failed to persist session controls after message send");
     });
   }
+  const approvalPolicy = protocolApprovalPolicyFromSessionControl(requestedControls.approvalPolicy);
 
   const startTurn = async (): Promise<{ turn: { id: string } }> =>
     supervisor.call<{ turn: { id: string } }>("turn/start", {
       threadId: params.sessionId,
-      model: body.model,
+      model: requestedControls.model ?? undefined,
       effort: body.effort as ReasoningEffort | undefined,
-      sandboxPolicy: toTurnSandboxPolicy(env.DEFAULT_SANDBOX_MODE),
+      sandboxPolicy: toTurnSandboxPolicy(requestedControls.filesystemSandbox, requestedControls.networkAccess),
       approvalPolicy,
       input: [
         {
@@ -5201,7 +5578,7 @@ app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
       try {
         await callThreadMethodWithRawEventsFallback("thread/resume", {
           threadId: params.sessionId,
-          sandbox: env.DEFAULT_SANDBOX_MODE,
+          sandbox: requestedControls.filesystemSandbox,
           approvalPolicy
         });
         turn = await startTurn();

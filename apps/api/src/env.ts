@@ -14,7 +14,9 @@ const envSchema = z.object({
   DATA_DIR: z.string().min(1).default(".data"),
   OPENAI_API_KEY: z.string().optional(),
   DEFAULT_APPROVAL_POLICY: z.enum(["untrusted", "on-failure", "on-request", "never"]).default("untrusted"),
-  DEFAULT_SANDBOX_MODE: z.enum(["read-only", "workspace-write", "danger-full-access"]).default("read-only")
+  DEFAULT_SANDBOX_MODE: z.enum(["read-only", "workspace-write", "danger-full-access"]).default("read-only"),
+  DEFAULT_NETWORK_ACCESS: z.enum(["restricted", "enabled"]).default("restricted"),
+  SESSION_DEFAULTS_LOCKED: z.enum(["true", "false"]).default("false")
 });
 
 const parsed = envSchema.parse(process.env);
@@ -44,6 +46,7 @@ function resolveFromWorkspaceRoot(value: string): string {
 
 export const env = {
   ...parsed,
+  SESSION_DEFAULTS_LOCKED: parsed.SESSION_DEFAULTS_LOCKED === "true",
   WORKSPACE_ROOT: workspaceRoot,
   DATA_DIR: resolveFromWorkspaceRoot(parsed.DATA_DIR),
   CODEX_HOME: parsed.CODEX_HOME ? resolveFromWorkspaceRoot(parsed.CODEX_HOME) : undefined

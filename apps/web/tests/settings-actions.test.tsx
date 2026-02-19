@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 
@@ -47,7 +47,70 @@ function json(status: number, body: unknown): Response {
   });
 }
 
+function defaultSessionControlsPayload(sessionId: string, overrides?: {
+  controls?: Partial<{
+    model: string | null;
+    approvalPolicy: "never" | "unless-trusted" | "on-request";
+    networkAccess: "restricted" | "enabled";
+    filesystemSandbox: "read-only" | "workspace-write" | "danger-full-access";
+  }>;
+  defaults?: Partial<{
+    model: string | null;
+    approvalPolicy: "never" | "unless-trusted" | "on-request";
+    networkAccess: "restricted" | "enabled";
+    filesystemSandbox: "read-only" | "workspace-write" | "danger-full-access";
+  }>;
+  defaultsEditable?: boolean;
+}): {
+  status: string;
+  sessionId: string;
+  controls: {
+    model: string | null;
+    approvalPolicy: "never" | "unless-trusted" | "on-request";
+    networkAccess: "restricted" | "enabled";
+    filesystemSandbox: "read-only" | "workspace-write" | "danger-full-access";
+  };
+  defaults: {
+    model: string | null;
+    approvalPolicy: "never" | "unless-trusted" | "on-request";
+    networkAccess: "restricted" | "enabled";
+    filesystemSandbox: "read-only" | "workspace-write" | "danger-full-access";
+  };
+  defaultsEditable: boolean;
+  defaultLockReason: string | null;
+} {
+  const controls = {
+    model: null,
+    approvalPolicy: "unless-trusted" as const,
+    networkAccess: "restricted" as const,
+    filesystemSandbox: "read-only" as const,
+    ...(overrides?.controls ?? {})
+  };
+  const defaults = {
+    model: null,
+    approvalPolicy: "unless-trusted" as const,
+    networkAccess: "restricted" as const,
+    filesystemSandbox: "read-only" as const,
+    ...(overrides?.defaults ?? {})
+  };
+  const defaultsEditable = overrides?.defaultsEditable ?? true;
+  return {
+    status: "ok",
+    sessionId,
+    controls,
+    defaults,
+    defaultsEditable,
+    defaultLockReason: defaultsEditable ? null : "Managed by harness configuration"
+  };
+}
+
 function routeResponse(url: string): Response {
+  const sessionControlsMatch = url.match(/\/api\/sessions\/([^/]+)\/session-controls$/);
+  if (sessionControlsMatch) {
+    const sessionId = decodeURIComponent(sessionControlsMatch[1]);
+    return json(200, defaultSessionControlsPayload(sessionId));
+  }
+
   if (url.includes("/api/sessions?")) {
     return json(200, { data: [], nextCursor: null, archived: false });
   }
@@ -120,6 +183,11 @@ function hasFetchCall(fetchMock: ReturnType<typeof vi.fn>, fragment: string): bo
     const input = args[0];
     return String(input).includes(fragment);
   });
+}
+
+async function openSessionControlsPanel(): Promise<void> {
+  const toggle = await screen.findByRole("button", { name: /Session Controls/i });
+  fireEvent.click(toggle);
 }
 
 function deferredResponse(): { promise: Promise<Response>; resolve: (response: Response) => void } {
@@ -608,6 +676,19 @@ describe("settings endpoint wiring", () => {
         return Promise.resolve(json(200, { data: [] }));
       }
 
+      if (url.endsWith("/api/sessions/session-sticky-model/session-controls")) {
+        return Promise.resolve(
+          json(
+            200,
+            defaultSessionControlsPayload("session-sticky-model", {
+              controls: {
+                model: "codex-max"
+              }
+            })
+          )
+        );
+      }
+
       return Promise.resolve(routeResponse(url));
     });
 
@@ -618,14 +699,21 @@ describe("settings endpoint wiring", () => {
       await Promise.resolve();
     });
 
-    await screen.findByRole("button", { name: /Codex Max/i });
+    await openSessionControlsPanel();
+    const modelSelect = (await screen.findByLabelText("Model selector")) as HTMLSelectElement;
+    await waitFor(() => expect(modelSelect.value).toBe("codex-max"));
+    const thinkingSelect = (await screen.findByLabelText("Thinking Level selector")) as HTMLSelectElement;
+    expect(thinkingSelect.value).toBe("high");
+    fireEvent.change(thinkingSelect, { target: { value: "xhigh" } });
     await waitFor(() => {
       const persisted = window.localStorage.getItem(modelPrefsStorageKey);
       expect(persisted).toBeTruthy();
       const parsed = JSON.parse(persisted ?? "{}") as {
         modelBySessionId?: Record<string, string>;
+        effortBySessionId?: Record<string, string>;
       };
       expect(parsed.modelBySessionId?.["session-sticky-model"]).toBe("codex-max");
+      expect(parsed.effortBySessionId?.["session-sticky-model"]).toBe("xhigh");
     });
   });
 
@@ -689,29 +777,44 @@ describe("settings endpoint wiring", () => {
         return Promise.resolve(json(200, { data: [] }));
       }
 
+      if (url.endsWith("/api/sessions/session-model/session-controls")) {
+        return Promise.resolve(
+          json(
+            200,
+            defaultSessionControlsPayload("session-model", {
+              controls: {
+                model: "codex-max"
+              }
+            })
+          )
+        );
+      }
+
       return Promise.resolve(routeResponse(url));
     });
 
     render(<App />);
 
-    const modelButton = await screen.findByRole("button", { name: /Codex Max/i });
-    fireEvent.click(modelButton);
+    await openSessionControlsPanel();
+    const modelSelect = (await screen.findByLabelText("Model selector")) as HTMLSelectElement;
+    const thinkingSelect = (await screen.findByLabelText("Thinking Level selector")) as HTMLSelectElement;
+    await waitFor(() => expect(modelSelect.value).toBe("codex-max"));
+    expect(thinkingSelect.value).toBe("high");
 
-    const menu = await screen.findByRole("menu", { name: "Select model and reasoning effort" });
-    expect(menu.querySelectorAll(".model-submenu-group").length).toBe(2);
+    const optionValues = Array.from(modelSelect.options).map((entry) => entry.value);
+    expect(optionValues.filter((value) => value === "codex-max")).toHaveLength(1);
+    expect(optionValues).toContain("gpt-lite");
 
-    const xhighOption = screen.getByRole("menuitemradio", { name: "XHigh" });
-    fireEvent.click(xhighOption);
-
-    await waitFor(() => {
-      const trigger = document.querySelector<HTMLButtonElement>(".model-combo-trigger");
-      expect(trigger).not.toBeNull();
-      expect(trigger.textContent ?? "").toContain("Codex Max");
-      expect(trigger.textContent ?? "").toContain("XHigh");
-    });
+    fireEvent.change(modelSelect, { target: { value: "gpt-lite" } });
+    expect(modelSelect.value).toBe("gpt-lite");
+    await waitFor(() => expect(thinkingSelect.value).toBe("low"));
+    const effortValues = Array.from(thinkingSelect.options).map((entry) => entry.value);
+    expect(effortValues).toContain("minimal");
+    expect(effortValues).toContain("low");
+    expect(effortValues).not.toContain("high");
   });
 
-  it("toggles per-chat approval policy and sends never for that chat", async () => {
+  it("applies per-chat approval policy via session controls and sends never for that chat", async () => {
     const session = {
       sessionId: "session-approval",
       title: "Session Approval",
@@ -748,13 +851,31 @@ describe("settings endpoint wiring", () => {
         return Promise.resolve(json(200, { data: [] }));
       }
 
-      if (url.endsWith("/api/sessions/session-approval/approval-policy") && init?.method === "POST") {
+      if (url.endsWith("/api/sessions/session-approval/session-controls") && (!init?.method || init.method === "GET")) {
         return Promise.resolve(
-          json(200, {
-            status: "ok",
-            sessionId: "session-approval",
-            approvalPolicy: "never"
-          })
+          json(200, defaultSessionControlsPayload("session-approval", { controls: { model: "gpt-5.1" } }))
+        );
+      }
+
+      if (url.endsWith("/api/sessions/session-approval/session-controls") && init?.method === "POST") {
+        return Promise.resolve(
+          json(
+            200,
+            {
+              ...defaultSessionControlsPayload("session-approval", {
+                controls: {
+                  model: "gpt-5.1",
+                  approvalPolicy: "never"
+                }
+              }),
+              applied: {
+                model: "gpt-5.1",
+                approvalPolicy: "never",
+                networkAccess: "restricted",
+                filesystemSandbox: "read-only"
+              }
+            }
+          )
         );
       }
 
@@ -774,12 +895,15 @@ describe("settings endpoint wiring", () => {
     render(<App />);
 
     await screen.findByRole("button", { name: "Session Approval" });
-    expect(screen.getByRole("button", { name: "Approvals: Unless Trusted" })).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Approvals: Unless Trusted" }));
-    const approvalPolicyMenu = await screen.findByRole("menu", { name: "Select approval policy" });
-    fireEvent.click(within(approvalPolicyMenu).getByRole("menuitemradio", { name: "Never" }));
-    await screen.findByRole("button", { name: "Approvals: Never" });
+    await openSessionControlsPanel();
+    const policySelect = (await screen.findByLabelText("Approval Policy selector")) as HTMLSelectElement;
+    expect(policySelect.value).toBe("unless-trusted");
+    fireEvent.change(policySelect, { target: { value: "never" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await screen.findByText(/Applied: gpt-5.1 \| never \| restricted \| read-only/i);
+    await waitFor(() => expect(hasFetchCall(fetchMock, "/api/sessions/session-approval/session-controls")).toBe(true));
+    expect(screen.queryByLabelText("Approval Policy selector")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Session Controls/i })).toBeInTheDocument();
 
     const composer = screen.getByPlaceholderText("Type your message...");
     fireEvent.change(composer, { target: { value: "policy test message" } });
@@ -792,5 +916,97 @@ describe("settings endpoint wiring", () => {
       approvalPolicy?: string;
     };
     expect(requestBody.approvalPolicy).toBe("never");
+  });
+
+  it("renders default scope controls as read-only when defaults are harness-managed", async () => {
+    const session = {
+      sessionId: "session-defaults-locked",
+      title: "Locked Defaults",
+      materialized: true,
+      modelProvider: "openai",
+      approvalPolicy: "untrusted",
+      createdAt: 1,
+      updatedAt: 2,
+      cwd: "/tmp",
+      source: "persisted",
+      projectId: null
+    };
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes("/api/sessions?")) {
+        return Promise.resolve(json(200, { data: [session], nextCursor: null, archived: false }));
+      }
+
+      if (url.includes("/api/models?")) {
+        return Promise.resolve(
+          json(200, {
+            data: [
+              {
+                id: "gpt-5.1",
+                name: "GPT 5.1",
+                provider: "openai",
+                isDefault: true,
+                supportedReasoningEfforts: ["low", "medium", "high"]
+              }
+            ]
+          })
+        );
+      }
+
+      if (url.endsWith("/api/sessions/session-defaults-locked")) {
+        return Promise.resolve(json(200, { session, transcript: [] }));
+      }
+
+      if (url.endsWith("/api/sessions/session-defaults-locked/approvals")) {
+        return Promise.resolve(json(200, { data: [] }));
+      }
+
+      if (url.endsWith("/api/sessions/session-defaults-locked/tool-input")) {
+        return Promise.resolve(json(200, { data: [] }));
+      }
+
+      if (url.endsWith("/api/sessions/session-defaults-locked/session-controls")) {
+        return Promise.resolve(
+          json(
+            200,
+            defaultSessionControlsPayload("session-defaults-locked", {
+              controls: {
+                model: "gpt-5.1"
+              },
+              defaults: {
+                model: "gpt-5.1",
+                approvalPolicy: "on-request",
+                networkAccess: "enabled",
+                filesystemSandbox: "workspace-write"
+              },
+              defaultsEditable: false
+            })
+          )
+        );
+      }
+
+      return Promise.resolve(routeResponse(url));
+    });
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "Locked Defaults" });
+    await openSessionControlsPanel();
+    fireEvent.click(screen.getByRole("button", { name: "New chats default" }));
+
+    await screen.findByText("Set by harness at session start");
+    const modelSelect = (await screen.findByLabelText("Model selector")) as HTMLSelectElement;
+    const policySelect = (await screen.findByLabelText("Approval Policy selector")) as HTMLSelectElement;
+    const networkSelect = (await screen.findByLabelText("Network Access selector")) as HTMLSelectElement;
+    const sandboxSelect = (await screen.findByLabelText("Filesystem Sandbox selector")) as HTMLSelectElement;
+
+    expect(modelSelect.disabled).toBe(true);
+    expect(policySelect.disabled).toBe(true);
+    expect(networkSelect.disabled).toBe(true);
+    expect(sandboxSelect.disabled).toBe(true);
+    expect(screen.getAllByLabelText("Managed by harness configuration").length).toBeGreaterThan(0);
+    await screen.findByText(/gpt-5.1 \| on-request \| enabled \| workspace-write/i);
   });
 });
