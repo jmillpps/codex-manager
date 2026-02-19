@@ -59,6 +59,8 @@ type ChatMessage = {
   status: "streaming" | "complete" | "canceled" | "error";
 };
 
+type LocalSendState = "sending" | "sent" | "delivered" | "failed";
+
 type MessageTiming = {
   startedAt: number;
   completedAt?: number;
@@ -332,6 +334,7 @@ type SessionMenuAnchor = {
 };
 
 const selectedSessionStorageKeyPrefix = "codex-manager:selected-session-id";
+const sessionModelPrefsStorageKeyPrefix = "codex-manager:session-model-prefs";
 
 function selectedSessionStorageKey(): string {
   return `${selectedSessionStorageKeyPrefix}:${window.location.pathname}`;
@@ -384,6 +387,78 @@ function persistSelectedSessionId(sessionId: string | null): void {
     window.localStorage.removeItem(key);
   } catch {
     // Ignore local storage write failures.
+  }
+}
+
+type PersistedSessionModelPrefs = {
+  modelBySessionId: Record<string, string>;
+  effortBySessionId: Record<string, ReasoningEffort>;
+};
+
+function sessionModelPrefsStorageKey(): string {
+  return `${sessionModelPrefsStorageKeyPrefix}:${window.location.pathname}`;
+}
+
+function readPersistedSessionModelPrefs(): PersistedSessionModelPrefs {
+  try {
+    const raw = window.localStorage.getItem(sessionModelPrefsStorageKey());
+    if (!raw) {
+      return {
+        modelBySessionId: {},
+        effortBySessionId: {}
+      };
+    }
+
+    const parsed = JSON.parse(raw) as {
+      modelBySessionId?: Record<string, unknown>;
+      effortBySessionId?: Record<string, unknown>;
+    };
+
+    const nextModelBySessionId: Record<string, string> = {};
+    if (parsed.modelBySessionId && typeof parsed.modelBySessionId === "object") {
+      for (const [sessionId, modelId] of Object.entries(parsed.modelBySessionId)) {
+        if (typeof sessionId === "string" && sessionId.trim().length > 0 && typeof modelId === "string" && modelId.trim().length > 0) {
+          nextModelBySessionId[sessionId] = modelId;
+        }
+      }
+    }
+
+    const nextEffortBySessionId: Record<string, ReasoningEffort> = {};
+    if (parsed.effortBySessionId && typeof parsed.effortBySessionId === "object") {
+      for (const [sessionId, effort] of Object.entries(parsed.effortBySessionId)) {
+        if (typeof sessionId !== "string" || sessionId.trim().length === 0 || !isReasoningEffort(effort)) {
+          continue;
+        }
+        nextEffortBySessionId[sessionId] = effort;
+      }
+    }
+
+    return {
+      modelBySessionId: nextModelBySessionId,
+      effortBySessionId: nextEffortBySessionId
+    };
+  } catch {
+    return {
+      modelBySessionId: {},
+      effortBySessionId: {}
+    };
+  }
+}
+
+function persistSessionModelPrefs(
+  modelBySessionId: Record<string, string>,
+  effortBySessionId: Record<string, ReasoningEffort>
+): void {
+  try {
+    window.localStorage.setItem(
+      sessionModelPrefsStorageKey(),
+      JSON.stringify({
+        modelBySessionId,
+        effortBySessionId
+      })
+    );
+  } catch {
+    // Ignore storage write failures (private mode, quota, etc.).
   }
 }
 
@@ -1599,9 +1674,13 @@ export function App() {
   const [retryPrompt, setRetryPrompt] = useState<string | null>(null);
   const [models, setModels] = useState<Array<ModelOption>>([]);
   const [selectedModelId, setSelectedModelId] = useState<string>("");
-  const [sessionModelById, setSessionModelById] = useState<Record<string, string>>({});
+  const [sessionModelById, setSessionModelById] = useState<Record<string, string>>(
+    () => readPersistedSessionModelPrefs().modelBySessionId
+  );
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<ReasoningEffortSelection>("");
-  const [sessionReasoningEffortById, setSessionReasoningEffortById] = useState<Record<string, ReasoningEffort>>({});
+  const [sessionReasoningEffortById, setSessionReasoningEffortById] = useState<Record<string, ReasoningEffort>>(
+    () => readPersistedSessionModelPrefs().effortBySessionId
+  );
   const [capabilities, setCapabilities] = useState<CapabilitiesResponse | null>(null);
   const [loadingCapabilities, setLoadingCapabilities] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -1636,6 +1715,7 @@ export function App() {
   const [loadingTranscript, setLoadingTranscript] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [wsState, setWsState] = useState<"connecting" | "connected" | "disconnected">("disconnected");
+  const [localSendStateByMessageId, setLocalSendStateByMessageId] = useState<Record<string, LocalSendState>>({});
   const [error, setError] = useState<string | null>(null);
   const [wsReconnectNonce, setWsReconnectNonce] = useState(0);
   const [followTranscriptTail, setFollowTranscriptTail] = useState(true);
@@ -1651,7 +1731,8 @@ export function App() {
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptRef = useRef(0);
   const sendAckTimerRef = useRef<number | null>(null);
-  const pendingSendAckRef = useRef<{ sessionId: string; turnId: string | null } | null>(null);
+  const pendingSendAckRef = useRef<{ sessionId: string; turnId: string | null; messageId: string } | null>(null);
+  const optimisticMessageIdByTurnIdRef = useRef<Record<string, string>>({});
   const openSessionMenuRef = useRef<HTMLDivElement | null>(null);
   const sessionMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const projectMenuRef = useRef<HTMLDivElement | null>(null);
@@ -1679,6 +1760,9 @@ export function App() {
   useEffect(() => {
     persistSelectedSessionId(selectedSessionId);
   }, [selectedSessionId]);
+  useEffect(() => {
+    persistSessionModelPrefs(sessionModelById, sessionReasoningEffortById);
+  }, [sessionModelById, sessionReasoningEffortById]);
   useEffect(() => {
     for (const approvalId of Object.keys(approvalReconcileTimersRef.current)) {
       if (!(approvalId in approvalActionById)) {
@@ -1794,6 +1878,26 @@ export function App() {
           ? "Streaming"
           : "Idle";
   const showDisconnectedOverlay = wsState === "disconnected" && !deletedSessionNotice;
+  const updateLocalSendState = (messageId: string, nextState: LocalSendState): void => {
+    setLocalSendStateByMessageId((current) => {
+      if (current[messageId] === nextState) {
+        return current;
+      }
+      return {
+        ...current,
+        [messageId]: nextState
+      };
+    });
+  };
+  const clearLocalSendState = (messageId: string): void => {
+    setLocalSendStateByMessageId((current) => {
+      if (!(messageId in current)) {
+        return current;
+      }
+      const { [messageId]: _removed, ...rest } = current;
+      return rest;
+    });
+  };
   const clearPendingSendAck = (): void => {
     pendingSendAckRef.current = null;
     if (sendAckTimerRef.current !== null) {
@@ -1802,6 +1906,15 @@ export function App() {
     }
   };
   const markSendActivityObserved = (sessionId: string, turnId?: string): void => {
+    if (typeof turnId === "string") {
+      const optimisticMessageId = optimisticMessageIdByTurnIdRef.current[turnId];
+      if (optimisticMessageId) {
+        updateLocalSendState(optimisticMessageId, "delivered");
+        const { [turnId]: _removed, ...rest } = optimisticMessageIdByTurnIdRef.current;
+        optimisticMessageIdByTurnIdRef.current = rest;
+      }
+    }
+
     const pending = pendingSendAckRef.current;
     if (!pending || pending.sessionId !== sessionId) {
       return;
@@ -1811,13 +1924,15 @@ export function App() {
       return;
     }
 
+    updateLocalSendState(pending.messageId, "delivered");
     clearPendingSendAck();
   };
-  const startPendingSendAck = (sessionId: string, turnId: string | null): void => {
+  const startPendingSendAck = (sessionId: string, turnId: string | null, messageId: string): void => {
     clearPendingSendAck();
     pendingSendAckRef.current = {
       sessionId,
-      turnId
+      turnId,
+      messageId
     };
     sendAckTimerRef.current = window.setTimeout(() => {
       const pending = pendingSendAckRef.current;
@@ -1825,6 +1940,7 @@ export function App() {
         return;
       }
 
+      updateLocalSendState(pending.messageId, "failed");
       pendingSendAckRef.current = null;
       sendAckTimerRef.current = null;
       setWsState("disconnected");
@@ -3497,6 +3613,7 @@ export function App() {
     };
 
     setMessages((current) => [...current, optimisticMessage]);
+    updateLocalSendState(optimisticId, "sending");
     const optimisticStartedAt = Date.now();
     setMessageTimingById((current) => ({
       ...current,
@@ -3536,6 +3653,7 @@ export function App() {
         if (await handleDeletedSessionResponse(response, selectedSessionId)) {
           setStreaming(false);
           setMessages((current) => current.filter((message) => message.id !== optimisticId));
+          clearLocalSendState(optimisticId);
           return;
         }
         throw new Error(`failed to send message (${response.status})`);
@@ -3543,6 +3661,10 @@ export function App() {
 
       const payload = (await response.json()) as { turnId?: string };
       if (typeof payload.turnId === "string") {
+        optimisticMessageIdByTurnIdRef.current = {
+          ...optimisticMessageIdByTurnIdRef.current,
+          [payload.turnId]: optimisticId
+        };
         setActiveTurnIdBySession((current) => ({
           ...current,
           [selectedSessionId]: payload.turnId as string
@@ -3558,17 +3680,11 @@ export function App() {
           )
         );
       }
-      startPendingSendAck(selectedSessionId, typeof payload.turnId === "string" ? payload.turnId : null);
+      updateLocalSendState(optimisticId, "sent");
+      startPendingSendAck(selectedSessionId, typeof payload.turnId === "string" ? payload.turnId : null, optimisticId);
     } catch (err) {
       setStreaming(false);
-      setMessages((current) => current.filter((message) => message.id !== optimisticId));
-      setMessageTimingById((current) => {
-        if (!(optimisticId in current)) {
-          return current;
-        }
-        const { [optimisticId]: _removed, ...rest } = current;
-        return rest;
-      });
+      updateLocalSendState(optimisticId, "failed");
       setDraft(text);
       clearPendingSendAck();
       setError(err instanceof Error ? err.message : "failed to send message");
@@ -4582,6 +4698,8 @@ export function App() {
     if (!selectedSessionId) {
       setMessages([]);
       setMessageTimingById({});
+      setLocalSendStateByMessageId({});
+      optimisticMessageIdByTurnIdRef.current = {};
       setThoughtPanelStateByTurnId({});
       setPendingApprovals([]);
       setApprovalActionById({});
@@ -4596,6 +4714,8 @@ export function App() {
 
     setFollowTranscriptTail(true);
     setShowJumpToBottom(false);
+    setLocalSendStateByMessageId({});
+    optimisticMessageIdByTurnIdRef.current = {};
     setApprovalActionById({});
     setRetryPrompt(null);
     setLoadingSuggestedReply(false);
@@ -4654,6 +4774,32 @@ export function App() {
       sessionEffort && isReasoningEffortSupportedByModel(selectedModelOption, sessionEffort) ? sessionEffort : fallbackEffort;
     setSelectedReasoningEffort((current) => (current === nextEffort ? current : nextEffort));
   }, [selectedSessionId, sessionReasoningEffortById, selectedModelOption]);
+
+  useEffect(() => {
+    if (!selectedSessionId) {
+      return;
+    }
+
+    setSessionModelById((current) => {
+      if (!selectedModelId) {
+        if (!(selectedSessionId in current)) {
+          return current;
+        }
+
+        const { [selectedSessionId]: _removed, ...rest } = current;
+        return rest;
+      }
+
+      if (current[selectedSessionId] === selectedModelId) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [selectedSessionId]: selectedModelId
+      };
+    });
+  }, [selectedSessionId, selectedModelId]);
 
   useEffect(() => {
     if (!selectedSessionId) {
@@ -5438,6 +5584,42 @@ export function App() {
   const renderTurnGroup = (group: TurnMessageGroup) => {
     const userMessages = group.messages.filter((message) => message.role === "user");
     const { responseMessages, thoughtMessages, finalAssistantMessage, thinkingActive } = inspectTurnGroupState(group);
+    const userMessageSendState = (message: ChatMessage): LocalSendState | null => {
+      if (message.role !== "user") {
+        return null;
+      }
+      return localSendStateByMessageId[message.id] ?? (message.id.startsWith("local-user-") ? "delivered" : null);
+    };
+    const userMessageSendStateLabel = (state: LocalSendState): string => {
+      if (state === "sending") {
+        return "Sending";
+      }
+      if (state === "sent") {
+        return "Sent";
+      }
+      if (state === "delivered") {
+        return "";
+      }
+      return "Failed";
+    };
+    const assistantReceiveState = (): "receiving" | "disconnected" | null => {
+      if (!thinkingActive) {
+        return null;
+      }
+      if (wsState === "disconnected") {
+        return "disconnected";
+      }
+      return "receiving";
+    };
+    const assistantReceiveStateLabel = (state: "receiving" | "disconnected"): string => {
+      if (state === "receiving") {
+        return "Receiving";
+      }
+      return "Disconnected";
+    };
+    const assistantComplete = Boolean(
+      finalAssistantMessage && finalAssistantMessage.status !== "streaming" && assistantReceiveState() === null && !thinkingActive
+    );
 
     const resolveMessageTiming = (message: ChatMessage): MessageTiming | null => {
       return messageTimingById[message.id] ?? parseMessageTimingFromDetails(message.details);
@@ -6183,11 +6365,25 @@ export function App() {
 
     return (
       <section key={`turn-${group.turnId}`} className="turn-group">
-        {userMessages.map((message) => (
-          <article key={message.id} className={`bubble ${message.role}`}>
-            <pre>{message.content || "(empty)"}</pre>
-          </article>
-        ))}
+        {userMessages.map((message) => {
+          const sendState = userMessageSendState(message);
+          return (
+            <article key={message.id} className={`bubble ${message.role}`}>
+              <pre>{message.content || "(empty)"}</pre>
+              {sendState ? (
+                <footer
+                  className={`message-send-state ${sendState}`}
+                  aria-label={`Message ${userMessageSendStateLabel(sendState) || "Delivered"}`}
+                >
+                  <span className={`message-send-state-icon ${sendState}`} aria-hidden="true" />
+                  {userMessageSendStateLabel(sendState) ? (
+                    <span className="message-send-state-label">{userMessageSendStateLabel(sendState)}</span>
+                  ) : null}
+                </footer>
+              ) : null}
+            </article>
+          );
+        })}
         {responseMessages.length > 0 ? (
           <article className={`response-card${thinkingActive ? " streaming" : ""}`}>
             {thoughtMessages.length > 0 ? (
@@ -6240,6 +6436,22 @@ export function App() {
                     {finalAssistantMessage.content || "(empty)"}
                   </ReactMarkdown>
                 </div>
+                {assistantReceiveState() ? (
+                  <footer
+                    className={`message-receive-state ${assistantReceiveState()}`}
+                    aria-label={`Assistant ${assistantReceiveStateLabel(assistantReceiveState() as "receiving" | "disconnected")}`}
+                  >
+                    <span className={`message-receive-state-icon ${assistantReceiveState()}`} aria-hidden="true" />
+                    <span className="message-receive-state-label">
+                      {assistantReceiveStateLabel(assistantReceiveState() as "receiving" | "disconnected")}
+                    </span>
+                  </footer>
+                ) : null}
+                {assistantComplete ? (
+                  <footer className="message-complete-state" aria-label="Assistant complete">
+                    <span className="message-complete-icon" aria-hidden="true" />
+                  </footer>
+                ) : null}
               </div>
             ) : null}
           </article>

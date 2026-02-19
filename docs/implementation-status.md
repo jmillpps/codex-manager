@@ -107,6 +107,9 @@ Use this with:
   - websocket reconnect/backoff.
   - disconnected websocket state now blocks the chat pane with a reconnect overlay/action until connectivity resumes.
   - send-message health check: when no turn/activity response arrives shortly after send, the UI marks websocket as effectively disconnected and prompts reconnect.
+  - outgoing user bubbles include local delivery-state indicators (`Sending`, `Sent`, `Delivered`, `Failed`) with circle/check-style icons driven by optimistic send + websocket activity/timeout state.
+  - incoming assistant responses show a live receive indicator (spinner) while turn activity is streaming and flip to a red disconnect marker if websocket drops mid-stream.
+  - assistant completion adds a green check icon on final responses, and transcript rendering is memoized so composer typing does not re-render the full history on each keystroke.
   - message send/cancel/retry flows.
   - streamed transcript rendering always shows full turn chronology (no top-level transcript filter bar), and each turn card preserves full in-order thought activity (reasoning/tools/approvals) for auditability.
   - transcript tail-follow uses bottom-distance hysteresis (wider disengage threshold than re-engage threshold) to avoid flicker between follow/manual modes during rapid approval/event layout updates.
@@ -125,7 +128,7 @@ Use this with:
   - expanded thought details render reasoning summary/content line rows and inline tool/approval/tool-input context with actions.
   - command and file-change approvals render as compact action-first rows (`Approval required to run …`, `Approval required to create/modify/delete/move file …`) with inline decision actions; decision UX is websocket-authoritative (buttons enter submitting state locally, pending/resolved transitions are applied from runtime events, and a bounded fallback reconcile reloads pending approvals after submit if a resolution event is missed), approval rows are rendered only while pending (resolved/expired approval update rows are intentionally suppressed), pending file-change approvals include an inline dark-theme diff/content preview above decision buttons and suppress duplicate pending file-change item rows until approved, command-execution rows render inline terminal-style dark blocks (no nested wrapper bubble) with prompt lines whose `~` prefix is mapped to inferred user home from runtime cwd paths, and file-change rows render structured dark-theme diffs with add/remove/hunk/context coloring where displayed file paths and absolute home-path text in diff lines are normalized to `~`.
   - composer uses a single message input; `Suggest Reply` populates that same draft box and `Ctrl+Enter` sends.
-  - header uses a combined nested selector (`Model -> Reasoning`): model rows open right-side reasoning submenus, users pick model+effort in one action, `Thread default` is removed from UI choices, and per-session effort/model selections are forwarded on send/suggest requests.
+  - header uses a combined nested selector (`Model -> Reasoning`): model rows open right-side reasoning submenus, users pick model+effort in one action, `Thread default` is removed from UI choices, and per-session effort/model selections persist immediately when changed, survive app/browser restarts via local storage, and are forwarded on send/suggest requests.
   - suggest-reply requests are race-guarded so late responses do not overwrite the draft after session switches or user edits.
   - pending approval cards and approval decisions.
   - tool-input request cards with answer submission.

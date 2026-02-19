@@ -1044,11 +1044,180 @@ body {
   background: #1f2937;
   border-color: #1f2937;
   color: #ffffff;
+  display: flex;
+  flex-direction: column;
+  gap: 0.36rem;
 }
 
 .bubble.user header,
 .bubble.user pre {
   color: #ffffff;
+}
+
+.message-send-state {
+  align-self: flex-end;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  font-size: 0.67rem;
+  line-height: 1;
+  color: #d1d5db;
+}
+
+.message-send-state.sent {
+  color: #bfdbfe;
+}
+
+.message-send-state.delivered {
+  color: #86efac;
+}
+
+.message-send-state.failed {
+  color: #fca5a5;
+}
+
+.message-send-state-icon {
+  width: 0.78rem;
+  height: 0.78rem;
+  border-radius: 999px;
+  border: 1.5px solid currentColor;
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.message-send-state-icon.sending {
+  border-color: currentColor;
+}
+
+.message-send-state-icon.sent::after,
+.message-send-state-icon.delivered::after {
+  content: "";
+  position: absolute;
+  left: 0.22rem;
+  top: 0.07rem;
+  width: 0.2rem;
+  height: 0.4rem;
+  border: solid currentColor;
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+
+.message-send-state-icon.delivered {
+  background: #14532d;
+}
+
+.message-send-state-icon.failed::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0.12rem;
+  width: 0.08rem;
+  height: 0.35rem;
+  background: currentColor;
+  transform: translateX(-50%);
+  border-radius: 1px;
+}
+
+.message-send-state-icon.failed::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 0.11rem;
+  width: 0.08rem;
+  height: 0.08rem;
+  background: currentColor;
+  transform: translateX(-50%);
+  border-radius: 999px;
+}
+
+.message-receive-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  font-size: 0.72rem;
+  color: #1f2937;
+  margin-top: 0.4rem;
+}
+
+.message-receive-state.disconnected {
+  color: #b91c1c;
+}
+
+.message-receive-state-icon {
+  width: 0.9rem;
+  height: 0.9rem;
+  border-radius: 999px;
+  border: 1.5px solid currentColor;
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.message-receive-state-icon.receiving {
+  border-top-color: transparent;
+  animation: receive-spin 900ms linear infinite;
+}
+
+.message-receive-state-icon.disconnected::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0.18rem;
+  width: 0.1rem;
+  height: 0.45rem;
+  background: currentColor;
+  transform: translateX(-50%);
+  border-radius: 1px;
+}
+
+.message-receive-state-icon.disconnected::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 0.16rem;
+  width: 0.1rem;
+  height: 0.1rem;
+  background: currentColor;
+  transform: translateX(-50%);
+  border-radius: 999px;
+}
+
+@keyframes receive-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.message-complete-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  font-size: 0.72rem;
+  color: #16a34a;
+  margin-top: 0.32rem;
+}
+
+.message-complete-icon {
+  width: 0.9rem;
+  height: 0.9rem;
+  border-radius: 999px;
+  border: 1.5px solid currentColor;
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.message-complete-icon::after {
+  content: "";
+  position: absolute;
+  left: 0.24rem;
+  top: 0.12rem;
+  width: 0.22rem;
+  height: 0.42rem;
+  border: solid currentColor;
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
 }
 
 .bubble.assistant {
