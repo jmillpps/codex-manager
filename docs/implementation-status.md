@@ -75,6 +75,9 @@ Use this with:
   - Session summaries expose `materialized` (`true` when backed by persisted rollout state; `false` for loaded in-memory threads read via `includeTurns: false` fallback).
   - Session summaries expose `projectId` (`string | null`) so assigned chats render under project sections and unassigned chats render under `Your chats`.
   - Session summaries expose `sessionControls` (`model | approvalPolicy | networkAccess | filesystemSandbox`) and retain `approvalPolicy` for backward compatibility.
+  - `POST /api/sessions/:sessionId/approval-policy` and `POST /api/sessions/:sessionId/messages` now require the target session to resolve via runtime existence checks; unknown/invalid/deleted-after-restart ids return `404 not_found` and do not create session-control metadata entries.
+  - `POST /api/sessions/:sessionId/messages` persists per-chat session controls only after turn acceptance (`202`), preventing orphan control writes when `turn/start` fails.
+  - Startup prunes stale `sessionControlsById` / `sessionApprovalPolicyById` entries whose session ids are no longer known to active, archived, or loaded runtime threads.
   - Non-materialized sessions are movable/assignable but are not guaranteed to survive API/Codex restart before first-turn rollout materialization.
   - `POST /api/sessions/:sessionId/archive` returns HTTP `409` + `status: "not_materialized"` when no rollout exists yet.
   - `DELETE /api/sessions/:sessionId` returns `status: "ok"` on successful purge, `status: "not_found"` when the session cannot be resolved, and returns HTTP `410` deleted payloads for already-purged ids.

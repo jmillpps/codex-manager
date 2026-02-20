@@ -2485,6 +2485,15 @@ function isNoRolloutFoundError(error: unknown): boolean {
   );
 }
 
+function isInvalidThreadIdError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message.toLowerCase();
+  return message.includes("invalid thread id") || message.includes("invalid conversation id");
+}
+
 function isSessionPurged(sessionId: string): boolean {
   return purgedSessionIds.has(sessionId);
 }
@@ -3179,6 +3188,10 @@ async function sessionExistsForProjectAssignment(sessionId: string): Promise<boo
     });
     return true;
   } catch (error) {
+    if (isInvalidThreadIdError(error)) {
+      return false;
+    }
+
     if (!isNoRolloutFoundError(error)) {
       throw error;
     }
@@ -3266,6 +3279,35 @@ async function classifyProjectSessionAssignments(sessionIds: Array<string>): Pro
     existingSessionIds,
     staleSessionIds
   };
+}
+
+async function pruneStaleSessionControlMetadata(): Promise<number> {
+  const sessionIds = new Set<string>([
+    ...Object.keys(sessionMetadata.sessionControlsById),
+    ...Object.keys(sessionMetadata.sessionApprovalPolicyById)
+  ]);
+
+  if (sessionIds.size === 0) {
+    return 0;
+  }
+
+  const classification = await classifyProjectSessionAssignments(Array.from(sessionIds));
+  if (classification.staleSessionIds.length === 0) {
+    return 0;
+  }
+
+  let changed = false;
+  for (const sessionId of classification.staleSessionIds) {
+    if (setSessionControls(sessionId, null)) {
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    await persistSessionMetadata();
+  }
+
+  return classification.staleSessionIds.length;
 }
 
 async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOutcome> {
@@ -5361,6 +5403,15 @@ app.post("/api/sessions/:sessionId/approval-policy", async (request, reply) => {
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
 
+  const exists = await sessionExistsForProjectAssignment(params.sessionId);
+  if (!exists) {
+    reply.code(404);
+    return {
+      status: "not_found",
+      sessionId: params.sessionId
+    };
+  }
+
   const body = sessionApprovalPolicyBodySchema.parse(request.body);
   if (setSessionApprovalPolicy(params.sessionId, body.approvalPolicy)) {
     await persistSessionMetadata();
@@ -5529,6 +5580,16 @@ app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
     reply.code(410);
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
+
+  const exists = await sessionExistsForProjectAssignment(params.sessionId);
+  if (!exists) {
+    reply.code(404);
+    return {
+      status: "not_found",
+      sessionId: params.sessionId
+    };
+  }
+
   const body = sendMessageBodySchema.parse(request.body);
 
   const currentControls = resolveSessionControls(params.sessionId);
@@ -5541,11 +5602,6 @@ app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
     filesystemSandbox: body.filesystemSandbox ?? currentControls.filesystemSandbox
   };
 
-  if (setSessionControls(params.sessionId, requestedControls)) {
-    void persistSessionMetadata().catch((error) => {
-      app.log.warn({ error, sessionId: params.sessionId }, "failed to persist session controls after message send");
-    });
-  }
   const approvalPolicy = protocolApprovalPolicyFromSessionControl(requestedControls.approvalPolicy);
 
   const startTurn = async (): Promise<{ turn: { id: string } }> =>
@@ -5588,6 +5644,12 @@ app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
         sessionId: params.sessionId
       });
     }
+  }
+
+  if (!isSessionPurged(params.sessionId) && setSessionControls(params.sessionId, requestedControls)) {
+    void persistSessionMetadata().catch((error) => {
+      app.log.warn({ error, sessionId: params.sessionId }, "failed to persist session controls after message send");
+    });
   }
 
   activeTurnByThread.set(params.sessionId, turn.turn.id);
@@ -5789,6 +5851,10 @@ process.on("SIGTERM", () => {
 
 await supervisor.start();
 try {
+  const prunedControlEntries = await pruneStaleSessionControlMetadata();
+  if (prunedControlEntries > 0) {
+    app.log.info({ prunedControlEntries }, "pruned stale session-control metadata entries");
+  }
   await cleanupSuggestionHelperSessions();
   await ensureProjectOrchestrationSessions();
   await refreshCapabilities();

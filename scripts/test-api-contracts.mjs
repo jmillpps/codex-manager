@@ -14,6 +14,7 @@ const runtimeId = `api-contract-${Date.now()}`;
 const dataDir = path.join(root, ".data", runtimeId);
 const codexHome = path.join(dataDir, "codex-home");
 const supplementalTranscriptPath = path.join(dataDir, "supplemental-transcript.json");
+const sessionMetadataPath = path.join(dataDir, "session-metadata.json");
 
 function makeJsonResponse(status, body) {
   return { status, ok: status >= 200 && status < 300, body };
@@ -168,6 +169,51 @@ async function appendSyntheticSupplementalEntries(threadId, entries) {
   await writeFile(supplementalTranscriptPath, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
 }
 
+async function readSessionMetadata() {
+  try {
+    const raw = await readFile(sessionMetadataPath, "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return {
+      sessionControlsById: {},
+      sessionApprovalPolicyById: {}
+    };
+  }
+}
+
+async function injectSessionControlMetadata(sessionId, controls, approvalPolicy) {
+  const metadata = await readSessionMetadata();
+  const next = {
+    ...metadata,
+    sessionControlsById:
+      metadata && typeof metadata.sessionControlsById === "object" && metadata.sessionControlsById !== null
+        ? { ...metadata.sessionControlsById }
+        : {},
+    sessionApprovalPolicyById:
+      metadata && typeof metadata.sessionApprovalPolicyById === "object" && metadata.sessionApprovalPolicyById !== null
+        ? { ...metadata.sessionApprovalPolicyById }
+        : {}
+  };
+
+  next.sessionControlsById[sessionId] = controls;
+  next.sessionApprovalPolicyById[sessionId] = approvalPolicy;
+  await writeFile(sessionMetadataPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+}
+
+async function assertNoStoredSessionControlEntries(sessionId, reason) {
+  const metadata = await readSessionMetadata();
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(metadata?.sessionControlsById ?? {}, sessionId),
+    false,
+    `unexpected sessionControlsById entry for ${sessionId} (${reason})`
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(metadata?.sessionApprovalPolicyById ?? {}, sessionId),
+    false,
+    `unexpected sessionApprovalPolicyById entry for ${sessionId} (${reason})`
+  );
+}
+
 async function main() {
   await mkdir(codexHome, { recursive: true });
   let apiProcess = startApiProcess();
@@ -221,6 +267,59 @@ async function main() {
     assert.equal(controlsAfterCreate.status, 200);
     assert.equal(controlsAfterCreate.body?.controls?.approvalPolicy, "on-failure");
     assert.equal(controlsAfterCreate.body?.defaults?.approvalPolicy, "on-failure");
+
+    const missingSessionId = "0199dead-beef-7bad-babe-123456789abc";
+    const invalidSessionId = "not-a-valid-thread-id";
+
+    const missingApprovalPolicy = await request(`/sessions/${encodeURIComponent(missingSessionId)}/approval-policy`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ approvalPolicy: "on-failure" })
+    });
+    assert.equal(missingApprovalPolicy.status, 404);
+
+    const missingMessageSend = await request(`/sessions/${encodeURIComponent(missingSessionId)}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "orphan-write-missing-session", effort: "minimal" })
+    });
+    assert.equal(missingMessageSend.status, 404);
+    await assertNoStoredSessionControlEntries(missingSessionId, "missing-session write attempts");
+
+    const invalidControlsGet = await request(`/sessions/${encodeURIComponent(invalidSessionId)}/session-controls`);
+    assert.equal(invalidControlsGet.status, 404);
+
+    const invalidControlsPost = await request(`/sessions/${encodeURIComponent(invalidSessionId)}/session-controls`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        scope: "session",
+        controls: {
+          model: null,
+          approvalPolicy: "on-failure",
+          networkAccess: "restricted",
+          filesystemSandbox: "read-only"
+        },
+        actor: "api-contract",
+        source: "api-contract"
+      })
+    });
+    assert.equal(invalidControlsPost.status, 404);
+
+    const invalidApprovalPolicy = await request(`/sessions/${encodeURIComponent(invalidSessionId)}/approval-policy`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ approvalPolicy: "on-failure" })
+    });
+    assert.equal(invalidApprovalPolicy.status, 404);
+
+    const invalidMessageSend = await request(`/sessions/${encodeURIComponent(invalidSessionId)}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "orphan-write-invalid-session", effort: "minimal" })
+    });
+    assert.equal(invalidMessageSend.status, 404);
+    await assertNoStoredSessionControlEntries(invalidSessionId, "invalid-session write attempts");
 
     const setLegacyOnFailure = await request(`/sessions/${encodeURIComponent(sessionId)}/approval-policy`, {
       method: "POST",
@@ -341,6 +440,35 @@ async function main() {
       }
     ]);
 
+    const deletedSession = await request("/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    });
+    assert.equal(deletedSession.status, 200);
+    const deletedSessionId = deletedSession.body?.session?.sessionId;
+    assert.equal(typeof deletedSessionId, "string");
+
+    const deletedSessionDelete = await request(`/sessions/${encodeURIComponent(deletedSessionId)}`, {
+      method: "DELETE"
+    });
+    assert.equal(deletedSessionDelete.status, 200);
+
+    const deletedPolicyBeforeRestart = await request(`/sessions/${encodeURIComponent(deletedSessionId)}/approval-policy`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ approvalPolicy: "on-failure" })
+    });
+    assert.equal(deletedPolicyBeforeRestart.status, 410);
+
+    const deletedMessageBeforeRestart = await request(`/sessions/${encodeURIComponent(deletedSessionId)}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "deleted-before-restart", effort: "minimal" })
+    });
+    assert.equal(deletedMessageBeforeRestart.status, 410);
+    await assertNoStoredSessionControlEntries(deletedSessionId, "deleted-session before restart");
+
     await stopApiProcess(apiProcess);
     apiProcess = startApiProcess();
     await waitForHealth();
@@ -358,6 +486,48 @@ async function main() {
       true,
       "distinct synthetic entry should remain in transcript"
     );
+
+    const deletedPolicyAfterRestart = await request(`/sessions/${encodeURIComponent(deletedSessionId)}/approval-policy`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ approvalPolicy: "on-failure" })
+    });
+    assert.equal(deletedPolicyAfterRestart.status, 404);
+
+    const deletedMessageAfterRestart = await request(`/sessions/${encodeURIComponent(deletedSessionId)}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "deleted-after-restart", effort: "minimal" })
+    });
+    assert.equal(deletedMessageAfterRestart.status, 404);
+    await assertNoStoredSessionControlEntries(deletedSessionId, "deleted-session after restart");
+
+    const staleMetadataSessionId = "0199dead-beef-7bad-babe-feedfeedfeed";
+    await injectSessionControlMetadata(
+      staleMetadataSessionId,
+      {
+        model: null,
+        approvalPolicy: "on-failure",
+        networkAccess: "restricted",
+        filesystemSandbox: "read-only"
+      },
+      "on-failure"
+    );
+    const metadataAfterInjection = await readSessionMetadata();
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(metadataAfterInjection?.sessionControlsById ?? {}, staleMetadataSessionId),
+      true
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(metadataAfterInjection?.sessionApprovalPolicyById ?? {}, staleMetadataSessionId),
+      true
+    );
+
+    await stopApiProcess(apiProcess);
+    apiProcess = startApiProcess();
+    await waitForHealth();
+
+    await assertNoStoredSessionControlEntries(staleMetadataSessionId, "startup stale metadata prune");
 
     const suggestedReplyInvalidEffort = await request(`/sessions/${encodeURIComponent(sessionId)}/suggested-reply`, {
       method: "POST",
