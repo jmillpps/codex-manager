@@ -853,6 +853,68 @@ describe("settings endpoint wiring", () => {
     expect(effortValues).not.toContain("high");
   });
 
+  it("shows resolved model id when session model control is inherited default", async () => {
+    const session = {
+      sessionId: "session-default-model",
+      title: "Default Model Session",
+      materialized: true,
+      modelProvider: "openai",
+      approvalPolicy: "untrusted",
+      createdAt: 1,
+      updatedAt: 2,
+      cwd: "/tmp",
+      source: "persisted",
+      projectId: null
+    };
+
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes("/api/sessions?")) {
+        return Promise.resolve(json(200, { data: [session], nextCursor: null, archived: false }));
+      }
+
+      if (url.includes("/api/models?")) {
+        return Promise.resolve(
+          json(200, {
+            data: [
+              {
+                id: "gpt-5.1",
+                name: "GPT 5.1",
+                provider: "openai",
+                isDefault: true,
+                supportedReasoningEfforts: ["low", "medium", "high"]
+              }
+            ]
+          })
+        );
+      }
+
+      if (url.endsWith("/api/sessions/session-default-model")) {
+        return Promise.resolve(json(200, { session, transcript: [] }));
+      }
+
+      if (url.endsWith("/api/sessions/session-default-model/approvals")) {
+        return Promise.resolve(json(200, { data: [] }));
+      }
+
+      if (url.endsWith("/api/sessions/session-default-model/tool-input")) {
+        return Promise.resolve(json(200, { data: [] }));
+      }
+
+      if (url.endsWith("/api/sessions/session-default-model/session-controls")) {
+        return Promise.resolve(json(200, defaultSessionControlsPayload("session-default-model")));
+      }
+
+      return Promise.resolve(routeResponse(url));
+    });
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "Default Model Session" });
+    await screen.findByText(/default \(gpt-5.1\) \| [^|]+ \| untrusted \| restricted \| read-only/i);
+  });
+
   it("applies per-chat approval policy via session controls and sends on-failure for that chat", async () => {
     const session = {
       sessionId: "session-approval",
@@ -939,7 +1001,7 @@ describe("settings endpoint wiring", () => {
     expect(policySelect.value).toBe("untrusted");
     fireEvent.change(policySelect, { target: { value: "on-failure" } });
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-    await screen.findByText(/Applied: gpt-5.1 \| on-failure \| restricted \| read-only/i);
+    await screen.findByText(/Applied: gpt-5.1 \| [^|]+ \| on-failure \| restricted \| read-only/i);
     await waitFor(() => expect(hasFetchCall(fetchMock, "/api/sessions/session-approval/session-controls")).toBe(true));
     expect(screen.queryByLabelText("Approval Policy selector")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Session Controls/i })).toBeInTheDocument();
@@ -1046,6 +1108,6 @@ describe("settings endpoint wiring", () => {
     expect(networkSelect.disabled).toBe(true);
     expect(sandboxSelect.disabled).toBe(true);
     expect(screen.getAllByLabelText("Managed by harness configuration").length).toBeGreaterThan(0);
-    await screen.findByText(/gpt-5.1 \| on-request \| enabled \| workspace-write/i);
+    await screen.findByText(/gpt-5.1 \| [^|]+ \| on-request \| enabled \| workspace-write/i);
   });
 });

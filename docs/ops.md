@@ -10,6 +10,8 @@ The operations manual was split into focused documents to keep setup, validation
 
 - `docs/operations/setup-and-run.md`
   - Prerequisites, environment setup, running API/web, Codex supervision behavior, and MCP runtime operations.
+- `docs/operations/api-service-supervision.md`
+  - Always-on API supervision with user-level systemd (`Restart=always`), install/enable commands, and recovery steps.
 - `docs/operations/generation-and-validation.md`
   - OpenAPI/client generation, protocol schema generation, typecheck/build/test commands, and pre-PR gates.
 - `docs/operations/troubleshooting.md`
@@ -23,6 +25,7 @@ The operations manual was split into focused documents to keep setup, validation
 
 - Install deps: `pnpm install`
 - Start dev stack (API + web): `pnpm dev`
+- Install always-on API service: `./scripts/install-api-user-service.sh`
 - Regenerate API contracts: `pnpm gen`
 - Run workspace tests: `pnpm test`
 - Typecheck all workspaces: `pnpm typecheck`

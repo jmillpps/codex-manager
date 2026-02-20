@@ -635,8 +635,18 @@ function normalizeSessionControlsTuple(input: unknown): SessionControlsTuple | n
   };
 }
 
-function sessionControlsSummary(tuple: SessionControlsTuple): string {
-  return `${tuple.model ?? "default"} | ${tuple.approvalPolicy} | ${tuple.networkAccess} | ${tuple.filesystemSandbox}`;
+function sessionControlsSummary(
+  tuple: SessionControlsTuple,
+  thinkingLevel?: ReasoningEffortSelection,
+  resolvedDefaultModel?: string | null
+): string {
+  const defaultModelLabel =
+    typeof resolvedDefaultModel === "string" && resolvedDefaultModel.trim().length > 0 ? resolvedDefaultModel.trim() : "default";
+  const effectiveThinkingLevel =
+    thinkingLevel && isReasoningEffort(thinkingLevel) ? thinkingLevel : thinkingLevel ? thinkingLevel : "default";
+  const modelSummaryValue = tuple.model ?? `default (${defaultModelLabel})`;
+  const thinkingSummaryValue = effectiveThinkingLevel === "default" ? "default (default)" : effectiveThinkingLevel;
+  return `${modelSummaryValue} | ${thinkingSummaryValue} | ${tuple.approvalPolicy} | ${tuple.networkAccess} | ${tuple.filesystemSandbox}`;
 }
 
 function sessionControlsEqual(left: SessionControlsTuple, right: SessionControlsTuple): boolean {
@@ -2114,7 +2124,7 @@ export function App() {
     sessionControlsApplying ||
     sessionControlsScope === "default" ||
     Boolean(sessionControlsError);
-  const sessionControlsSummaryText = sessionControlsSummary(controlsTargetForScope);
+  const sessionControlsSummaryText = sessionControlsSummary(controlsTargetForScope, selectedThinkingLevel, defaultModelId || null);
   const escalationDisabledForChat = effectiveSessionControlsForChat.approvalPolicy === "never";
   const pendingApprovalsById = useMemo(() => {
     return new Map(pendingApprovals.map((approval) => [approval.approvalId, approval]));
@@ -4316,7 +4326,7 @@ export function App() {
         )
       );
       const appliedTuple = normalizeSessionControlsTuple(payload.applied) ?? controlsToApply;
-      setSessionControlsToast(`Applied: ${sessionControlsSummary(appliedTuple)}`);
+      setSessionControlsToast(`Applied: ${sessionControlsSummary(appliedTuple, selectedThinkingLevel, defaultModelId || null)}`);
       setSessionControlsCollapsed(true);
     } catch (err) {
       const message = err instanceof Error ? err.message : "failed to apply session controls";

@@ -205,6 +205,18 @@ pnpm --filter @repo/web dev
 pnpm --filter @repo/api dev
 ```
 
+### Keep API always running (recommended for daily local use)
+
+For persistent host-level supervision (auto-restart on crash, restart after reboot/resume), use the dedicated runbook:
+
+- `docs/operations/api-service-supervision.md`
+
+Fast path:
+
+```bash
+./scripts/install-api-user-service.sh
+```
+
 ### Verify health
 
 Open in browser:

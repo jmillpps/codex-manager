@@ -142,7 +142,7 @@ Use this with:
   - after a successful `Apply`, and when switching chats, the panel auto-collapses into the summary chip so controls stay out of the way until reopened.
   - when no session-control tuple edits are pending, the primary action becomes `Close` so users can collapse the expanded panel without sending a no-op apply request.
   - scope toggle supports `This chat` vs `New chats default`; when defaults are harness-locked, `New chats default` remains viewable in read-only mode (lock icons + `Set by harness at session start`) while per-chat controls remain editable.
-  - panel summary line is rendered in monospace as `<model> | <approval> | <network> | <sandbox>`, announced for assistive tech as `Current session controls: ...`, and apply success surfaces a toast with the full applied tuple.
+  - panel summary line is rendered in monospace as `<model> | <thinking> | <approval> | <network> | <sandbox>`; when the session model control is inherited, the model segment renders as `default (<resolved default model id>)` (or `default (default)` only when no default model id is available), announced for assistive tech as `Current session controls: ...`, and apply success surfaces a toast with the full applied tuple.
   - when approval policy is `never`, panel displays `Escalation requests disabled for this chat.` and runtime state avoids approval-focused copy.
   - model list hydration is normalized to one entry per model id, and same-session synchronization now preserves a valid local model/effort selection instead of reapplying fallback/session defaults during unrelated state updates.
   - suggest-reply requests are race-guarded so late responses do not overwrite the draft after session switches or user edits.

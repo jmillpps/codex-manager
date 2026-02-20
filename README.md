@@ -193,6 +193,15 @@ pnpm test:e2e:list   # list browser suites
 pnpm test:e2e        # run browser smoke (requires runtime auth + browser deps)
 ```
 
+Optional: install an always-on user service for the API (auto-restart + boot persistence on systemd hosts):
+
+```bash
+./scripts/install-api-user-service.sh
+systemctl --user status codex-manager-api.service
+```
+
+Runbook: [`docs/operations/api-service-supervision.md`](docs/operations/api-service-supervision.md)
+
 ### 4) Data and artifact locations
 
 This repository keeps default runs clean by writing runtime artifacts to ignored paths:
@@ -235,6 +244,7 @@ docs/         Product, architecture, protocol, and operations knowledge tree
 - Protocol deep dives: [`docs/protocol/`](docs/protocol/)
 - Operations index: [`docs/ops.md`](docs/ops.md)
 - Setup/validation/troubleshooting/maintenance runbooks: [`docs/operations/`](docs/operations/)
+- Always-on API supervision runbook: [`docs/operations/api-service-supervision.md`](docs/operations/api-service-supervision.md)
 - Current implementation and verification status: [`docs/implementation-status.md`](docs/implementation-status.md)
 
 ---

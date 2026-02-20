@@ -26,6 +26,7 @@ This repository contains both planning documents and active implementation code:
 - `apps/api`: Fastify backend supervising `codex app-server` over STDIO with session/project lifecycle APIs, thread/turn control endpoints, approvals/tool-input workflows, suggested-reply orchestration behavior, metadata persistence (including supplemental transcript ledger), websocket fan-out, and structured error mapping. Session-mutating control routes are existence-gated to avoid orphan per-session control metadata writes. Detailed runtime semantics and endpoint behavior contracts are documented in `docs/implementation-status.md`.
 - `packages/api-client`: generated TypeScript API client for health, session/project lifecycle, bulk project operations, approvals/tool-input decisions, thread actions, and settings/account/integration surfaces
 - root dev tooling includes Playwright browser smoke/e2e commands (`pnpm test:e2e*`) routed through `scripts/run-playwright.mjs` (Linux shared-library bootstrap into `.data/playwright-libs` when needed, and test output under `.data/playwright-test-results`) plus a runtime integration smoke harness (`pnpm smoke:runtime`) for API + websocket lifecycle validation
+- host-level API supervision helper script `scripts/install-api-user-service.sh` installs a user-level `systemd` unit (`codex-manager-api.service`) with restart-on-failure semantics for always-on local API availability
 - `docs/*`: product, architecture, protocol, operations, and implementation-status documentation organized as focused knowledge-tree modules
 
 ## Document guide
@@ -34,6 +35,7 @@ This repository contains both planning documents and active implementation code:
 - `docs/architecture.md`: System architecture and invariants. Describes component responsibilities, lifecycle flows, transport model, persistence boundaries, and security posture.
 - `docs/ops.md`: Operations index linking focused runbooks.
 - `docs/operations/setup-and-run.md`: Prerequisites, environment setup, local execution, Codex supervision behavior, and MCP runtime operations.
+- `docs/operations/api-service-supervision.md`: User-level systemd runbook for always-on API supervision (install/enable/status/logs/recovery).
 - `docs/operations/generation-and-validation.md`: Contract generation, protocol schema generation, and validation commands.
 - `docs/operations/troubleshooting.md`: Debugging steps and failure-mode runbooks.
 - `docs/operations/maintenance.md`: Reset procedures, git workflow rules, CI expectations, and operational invariants.
