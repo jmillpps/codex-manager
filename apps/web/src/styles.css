@@ -807,6 +807,21 @@ body {
   white-space: nowrap;
 }
 
+.session-controls-summary-code {
+  display: inline;
+  white-space: nowrap;
+}
+
+.session-controls-summary-value {
+  cursor: help;
+  text-decoration: underline dotted rgba(100, 116, 139, 0.72);
+  text-underline-offset: 2px;
+}
+
+.session-controls-summary-separator {
+  color: #94a3b8;
+}
+
 .session-controls-chip:focus-visible {
   outline: 2px solid #93c5fd;
   outline-offset: -2px;

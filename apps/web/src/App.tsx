@@ -213,6 +213,17 @@ type SessionControlsTuple = {
   networkAccess: NetworkAccess;
   filesystemSandbox: FilesystemSandbox;
 };
+type SessionControlsSummaryPart = {
+  value: string;
+  tooltip: string;
+};
+type SessionControlsSummaryParts = {
+  model: SessionControlsSummaryPart;
+  thinking: SessionControlsSummaryPart;
+  approval: SessionControlsSummaryPart;
+  network: SessionControlsSummaryPart;
+  filesystem: SessionControlsSummaryPart;
+};
 type SessionControlsSnapshotResponse = {
   status: string;
   sessionId: string;
@@ -274,6 +285,14 @@ const sessionControlApprovalPolicyHelperText: Record<SessionControlApprovalPolic
   "on-failure": "Runs in sandbox first, then requests escalation only when sandbox execution fails.",
   "on-request": "Only asks when the model explicitly requests escalation.",
   never: "No escalation requests will be issued."
+};
+const reasoningEffortHelperText: Record<ReasoningEffort, string> = {
+  none: "No deliberate reasoning; fastest responses with least planning depth.",
+  minimal: "Very light reasoning for simple tasks with low latency.",
+  low: "Light reasoning for straightforward requests.",
+  medium: "Balanced reasoning depth and latency for most work.",
+  high: "Deeper reasoning for complex or multi-step tasks.",
+  xhigh: "Maximum reasoning depth; slowest but most thorough planning."
 };
 const networkAccessHelperText: Record<NetworkAccess, string> = {
   restricted: "No outbound network access.",
@@ -635,18 +654,110 @@ function normalizeSessionControlsTuple(input: unknown): SessionControlsTuple | n
   };
 }
 
-function sessionControlsSummary(
+function resolveDefaultModelLabel(resolvedDefaultModel?: string | null): string {
+  const defaultModelLabel =
+    typeof resolvedDefaultModel === "string" && resolvedDefaultModel.trim().length > 0 ? resolvedDefaultModel.trim() : "default";
+  return defaultModelLabel;
+}
+
+function modelSummaryPart(model: string | null, resolvedDefaultModel?: string | null): SessionControlsSummaryPart {
+  if (model && model.trim().length > 0) {
+    const resolvedModel = model.trim();
+    return {
+      value: resolvedModel,
+      tooltip: `Explicit model override. New turns use ${resolvedModel}.`
+    };
+  }
+
+  const defaultModelLabel = resolveDefaultModelLabel(resolvedDefaultModel);
+  if (defaultModelLabel !== "default") {
+    return {
+      value: `default (${defaultModelLabel})`,
+      tooltip: `Inherited default model. New turns currently resolve to ${defaultModelLabel}.`
+    };
+  }
+
+  return {
+    value: "default (default)",
+    tooltip: "Inherited default model. No workspace default model is currently available."
+  };
+}
+
+function thinkingSummaryPart(thinkingLevel?: ReasoningEffortSelection): SessionControlsSummaryPart {
+  const effectiveThinkingLevel =
+    thinkingLevel && isReasoningEffort(thinkingLevel) ? thinkingLevel : thinkingLevel ? thinkingLevel : "default";
+  if (effectiveThinkingLevel === "default") {
+    return {
+      value: "default (default)",
+      tooltip: "Inherited thinking-level default. Current model fallback determines effort."
+    };
+  }
+
+  return {
+    value: effectiveThinkingLevel,
+    tooltip: reasoningEffortHelperText[effectiveThinkingLevel]
+  };
+}
+
+function sessionControlsSummaryParts(
   tuple: SessionControlsTuple,
   thinkingLevel?: ReasoningEffortSelection,
   resolvedDefaultModel?: string | null
-): string {
-  const defaultModelLabel =
-    typeof resolvedDefaultModel === "string" && resolvedDefaultModel.trim().length > 0 ? resolvedDefaultModel.trim() : "default";
-  const effectiveThinkingLevel =
-    thinkingLevel && isReasoningEffort(thinkingLevel) ? thinkingLevel : thinkingLevel ? thinkingLevel : "default";
-  const modelSummaryValue = tuple.model ?? `default (${defaultModelLabel})`;
-  const thinkingSummaryValue = effectiveThinkingLevel === "default" ? "default (default)" : effectiveThinkingLevel;
-  return `${modelSummaryValue} | ${thinkingSummaryValue} | ${tuple.approvalPolicy} | ${tuple.networkAccess} | ${tuple.filesystemSandbox}`;
+): SessionControlsSummaryParts {
+  return {
+    model: modelSummaryPart(tuple.model, resolvedDefaultModel),
+    thinking: thinkingSummaryPart(thinkingLevel),
+    approval: {
+      value: tuple.approvalPolicy,
+      tooltip: sessionControlApprovalPolicyHelperText[tuple.approvalPolicy]
+    },
+    network: {
+      value: tuple.networkAccess,
+      tooltip: networkAccessHelperText[tuple.networkAccess]
+    },
+    filesystem: {
+      value: tuple.filesystemSandbox,
+      tooltip: filesystemSandboxHelperText[tuple.filesystemSandbox]
+    }
+  };
+}
+
+function sessionControlsSummary(parts: SessionControlsSummaryParts): string {
+  return `${parts.model.value} | ${parts.thinking.value} | ${parts.approval.value} | ${parts.network.value} | ${parts.filesystem.value}`;
+}
+
+function SessionControlsSummaryCode({ parts }: { parts: SessionControlsSummaryParts }): ReactNode {
+  return (
+    <code className="session-controls-summary-code">
+      <span className="session-controls-summary-value" title={parts.model.tooltip}>
+        {parts.model.value}
+      </span>
+      <span className="session-controls-summary-separator" aria-hidden="true">
+        {" | "}
+      </span>
+      <span className="session-controls-summary-value" title={parts.thinking.tooltip}>
+        {parts.thinking.value}
+      </span>
+      <span className="session-controls-summary-separator" aria-hidden="true">
+        {" | "}
+      </span>
+      <span className="session-controls-summary-value" title={parts.approval.tooltip}>
+        {parts.approval.value}
+      </span>
+      <span className="session-controls-summary-separator" aria-hidden="true">
+        {" | "}
+      </span>
+      <span className="session-controls-summary-value" title={parts.network.tooltip}>
+        {parts.network.value}
+      </span>
+      <span className="session-controls-summary-separator" aria-hidden="true">
+        {" | "}
+      </span>
+      <span className="session-controls-summary-value" title={parts.filesystem.tooltip}>
+        {parts.filesystem.value}
+      </span>
+    </code>
+  );
 }
 
 function sessionControlsEqual(left: SessionControlsTuple, right: SessionControlsTuple): boolean {
@@ -2124,8 +2235,17 @@ export function App() {
     sessionControlsApplying ||
     sessionControlsScope === "default" ||
     Boolean(sessionControlsError);
-  const sessionControlsSummaryText = sessionControlsSummary(controlsTargetForScope, selectedThinkingLevel, defaultModelId || null);
+  const sessionControlsSummaryPartsValue = useMemo(
+    () => sessionControlsSummaryParts(controlsTargetForScope, selectedThinkingLevel, defaultModelId || null),
+    [controlsTargetForScope, selectedThinkingLevel, defaultModelId]
+  );
+  const sessionControlsSummaryText = sessionControlsSummary(sessionControlsSummaryPartsValue);
   const escalationDisabledForChat = effectiveSessionControlsForChat.approvalPolicy === "never";
+  const modelSelectTooltip = modelSummaryPart(controlsDraftForScope.model, defaultModelId || null).tooltip;
+  const thinkingSelectTooltip = thinkingSummaryPart(selectedThinkingLevel).tooltip;
+  const approvalPolicyTooltip = sessionControlApprovalPolicyHelperText[controlsDraftForScope.approvalPolicy];
+  const networkAccessTooltip = networkAccessHelperText[controlsDraftForScope.networkAccess];
+  const filesystemSandboxTooltip = filesystemSandboxHelperText[controlsDraftForScope.filesystemSandbox];
   const pendingApprovalsById = useMemo(() => {
     return new Map(pendingApprovals.map((approval) => [approval.approvalId, approval]));
   }, [pendingApprovals]);
@@ -4326,7 +4446,8 @@ export function App() {
         )
       );
       const appliedTuple = normalizeSessionControlsTuple(payload.applied) ?? controlsToApply;
-      setSessionControlsToast(`Applied: ${sessionControlsSummary(appliedTuple, selectedThinkingLevel, defaultModelId || null)}`);
+      const appliedSummaryParts = sessionControlsSummaryParts(appliedTuple, selectedThinkingLevel, defaultModelId || null);
+      setSessionControlsToast(`Applied: ${sessionControlsSummary(appliedSummaryParts)}`);
       setSessionControlsCollapsed(true);
     } catch (err) {
       const message = err instanceof Error ? err.message : "failed to apply session controls";
@@ -7429,7 +7550,7 @@ export function App() {
             aria-controls="session-controls-panel"
           >
             <span>Session Controls</span>
-            <code>{sessionControlsSummaryText}</code>
+            <SessionControlsSummaryCode parts={sessionControlsSummaryPartsValue} />
           </button>
         ) : null}
         {sessionControlsCollapsed ? null : (
@@ -7442,7 +7563,7 @@ export function App() {
                   aria-live="polite"
                   aria-label={`Current session controls: ${sessionControlsSummaryText}`}
                 >
-                  <code>{sessionControlsSummaryText}</code>
+                  <SessionControlsSummaryCode parts={sessionControlsSummaryPartsValue} />
                 </p>
               </div>
               <div className="session-controls-scope">
@@ -7511,6 +7632,7 @@ export function App() {
                 </span>
                 <select
                   aria-label="Model selector"
+                  title={modelSelectTooltip}
                   value={controlsDraftForScope.model ?? "__default__"}
                   onChange={(event) =>
                     updateSessionControlsDraft("model", event.target.value === "__default__" ? null : event.target.value)
@@ -7524,9 +7646,11 @@ export function App() {
                     Boolean(sessionControlsError)
                   }
                 >
-                  <option value="__default__">default</option>
+                  <option value="__default__" title={modelSummaryPart(null, defaultModelId || null).tooltip}>
+                    default
+                  </option>
                   {models.map((model) => (
-                    <option key={model.id} value={model.id}>
+                    <option key={model.id} value={model.id} title={modelSummaryPart(model.id, defaultModelId || null).tooltip}>
                       {model.id}
                     </option>
                   ))}
@@ -7537,6 +7661,7 @@ export function App() {
                 <span className="session-control-label">Thinking Level</span>
                 <select
                   aria-label="Thinking Level selector"
+                  title={thinkingSelectTooltip}
                   value={selectedThinkingLevel}
                   onChange={(event) => {
                     const next = event.target.value;
@@ -7547,7 +7672,7 @@ export function App() {
                   disabled={thinkingLevelDisabled}
                 >
                   {availableReasoningEfforts.map((effort) => (
-                    <option key={effort} value={effort}>
+                    <option key={effort} value={effort} title={reasoningEffortHelperText[effort]}>
                       {effort}
                     </option>
                   ))}
@@ -7569,6 +7694,7 @@ export function App() {
                 </span>
                 <select
                   aria-label="Approval Policy selector"
+                  title={approvalPolicyTooltip}
                   value={controlsDraftForScope.approvalPolicy}
                   onChange={(event) =>
                     updateSessionControlsDraft(
@@ -7587,7 +7713,7 @@ export function App() {
                   }
                 >
                   {sessionControlApprovalPolicies.map((policy) => (
-                    <option key={policy} value={policy}>
+                    <option key={policy} value={policy} title={sessionControlApprovalPolicyHelperText[policy]}>
                       {sessionControlApprovalPolicyLabel[policy]}
                     </option>
                   ))}
@@ -7605,6 +7731,7 @@ export function App() {
                 </span>
                 <select
                   aria-label="Network Access selector"
+                  title={networkAccessTooltip}
                   value={controlsDraftForScope.networkAccess}
                   onChange={(event) =>
                     updateSessionControlsDraft(
@@ -7621,7 +7748,7 @@ export function App() {
                   }
                 >
                   {networkAccessModes.map((mode) => (
-                    <option key={mode} value={mode}>
+                    <option key={mode} value={mode} title={networkAccessHelperText[mode]}>
                       {mode}
                     </option>
                   ))}
@@ -7639,6 +7766,7 @@ export function App() {
                 </span>
                 <select
                   aria-label="Filesystem Sandbox selector"
+                  title={filesystemSandboxTooltip}
                   value={controlsDraftForScope.filesystemSandbox}
                   onChange={(event) =>
                     updateSessionControlsDraft(
@@ -7657,7 +7785,7 @@ export function App() {
                   }
                 >
                   {filesystemSandboxModes.map((mode) => (
-                    <option key={mode} value={mode}>
+                    <option key={mode} value={mode} title={filesystemSandboxHelperText[mode]}>
                       {mode}
                     </option>
                   ))}

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App";
 
@@ -912,7 +912,8 @@ describe("settings endpoint wiring", () => {
     render(<App />);
 
     await screen.findByRole("button", { name: "Default Model Session" });
-    await screen.findByText(/default \(gpt-5.1\) \| [^|]+ \| untrusted \| restricted \| read-only/i);
+    const sessionControlsChip = await screen.findByRole("button", { name: /Session Controls/i });
+    expect(sessionControlsChip).toHaveTextContent(/default \(gpt-5.1\) \| [^|]+ \| untrusted \| restricted \| read-only/i);
   });
 
   it("applies per-chat approval policy via session controls and sends on-failure for that chat", async () => {
@@ -1108,6 +1109,31 @@ describe("settings endpoint wiring", () => {
     expect(networkSelect.disabled).toBe(true);
     expect(sandboxSelect.disabled).toBe(true);
     expect(screen.getAllByLabelText("Managed by harness configuration").length).toBeGreaterThan(0);
-    await screen.findByText(/gpt-5.1 \| [^|]+ \| on-request \| enabled \| workspace-write/i);
+    await screen.findByLabelText(/Current session controls: gpt-5.1 \| [^|]+ \| on-request \| enabled \| workspace-write/i);
+    const summary = screen.getByLabelText(/Current session controls:/i);
+    expect(within(summary).getByText("gpt-5.1")).toHaveAttribute(
+      "title",
+      "Explicit model override. New turns use gpt-5.1."
+    );
+    expect(within(summary).getByText("high")).toHaveAttribute(
+      "title",
+      "Deeper reasoning for complex or multi-step tasks."
+    );
+    expect(within(summary).getByText("on-request")).toHaveAttribute(
+      "title",
+      "Only asks when the model explicitly requests escalation."
+    );
+    expect(within(summary).getByText("enabled")).toHaveAttribute(
+      "title",
+      "Allow outbound network access for tool execution."
+    );
+    expect(within(summary).getByText("workspace-write")).toHaveAttribute("title", "Allow writes in workspace paths.");
+    expect(modelSelect.title).toBe("Explicit model override. New turns use gpt-5.1.");
+    expect((screen.getByLabelText("Thinking Level selector") as HTMLSelectElement).title).toBe(
+      "Deeper reasoning for complex or multi-step tasks."
+    );
+    expect(policySelect.title).toBe("Only asks when the model explicitly requests escalation.");
+    expect(networkSelect.title).toBe("Allow outbound network access for tool execution.");
+    expect(sandboxSelect.title).toBe("Allow writes in workspace paths.");
   });
 });
