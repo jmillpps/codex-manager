@@ -157,7 +157,6 @@ DATA_DIR=.data
 
 # Approval policy passed to thread/start, thread/resume, and turn/start.
 # Valid values: untrusted, on-failure, on-request, never.
-# Note: "unless-trusted" is not a protocol literal; use "untrusted".
 # Recommended default for guarded local development:
 DEFAULT_APPROVAL_POLICY=untrusted
 

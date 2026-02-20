@@ -106,7 +106,8 @@ function startApiProcess() {
       PORT: String(port),
       DATA_DIR: dataDir,
       CODEX_HOME: codexHome,
-      LOG_LEVEL: "warn"
+      LOG_LEVEL: "warn",
+      DEFAULT_APPROVAL_POLICY: "on-failure"
     },
     stdio: "inherit"
   });
@@ -213,21 +214,68 @@ async function main() {
     assert.equal(createSession.status, 200);
     const sessionId = createSession.body?.session?.sessionId;
     assert.equal(typeof sessionId, "string");
+    assert.equal(createSession.body?.session?.approvalPolicy, "on-failure");
+    assert.equal(createSession.body?.session?.sessionControls?.approvalPolicy, "on-failure");
+
+    const controlsAfterCreate = await request(`/sessions/${encodeURIComponent(sessionId)}/session-controls`);
+    assert.equal(controlsAfterCreate.status, 200);
+    assert.equal(controlsAfterCreate.body?.controls?.approvalPolicy, "on-failure");
+    assert.equal(controlsAfterCreate.body?.defaults?.approvalPolicy, "on-failure");
+
+    const setLegacyOnFailure = await request(`/sessions/${encodeURIComponent(sessionId)}/approval-policy`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ approvalPolicy: "on-failure" })
+    });
+    assert.equal(setLegacyOnFailure.status, 200);
+    assert.equal(setLegacyOnFailure.body?.approvalPolicy, "on-failure");
+
+    const applySessionControlsOnFailure = await request(`/sessions/${encodeURIComponent(sessionId)}/session-controls`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        scope: "session",
+        controls: {
+          model: null,
+          approvalPolicy: "on-failure",
+          networkAccess: "restricted",
+          filesystemSandbox: "read-only"
+        },
+        actor: "api-contract",
+        source: "api-contract"
+      })
+    });
+    assert.equal(applySessionControlsOnFailure.status, 200);
+    assert.equal(applySessionControlsOnFailure.body?.controls?.approvalPolicy, "on-failure");
+    assert.equal(applySessionControlsOnFailure.body?.applied?.approvalPolicy, "on-failure");
 
     const sessionsAfterCreate = await request("/sessions?archived=false&limit=200");
     assert.equal(sessionsAfterCreate.status, 200);
     const activeCountAfterCreate = Array.isArray(sessionsAfterCreate.body?.data) ? sessionsAfterCreate.body.data.length : -1;
     assert.ok(activeCountAfterCreate >= 1, "expected at least one active session after create");
 
+    const setLegacyBackOnFailure = await request(`/sessions/${encodeURIComponent(sessionId)}/approval-policy`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ approvalPolicy: "on-failure" })
+    });
+    assert.equal(setLegacyBackOnFailure.status, 200);
+    assert.equal(setLegacyBackOnFailure.body?.approvalPolicy, "on-failure");
+
     const sendSeedMessage = await request(`/sessions/${encodeURIComponent(sessionId)}/messages`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         text: "Seed context for suggested reply effort contract coverage.",
-        effort: "minimal"
+        effort: "minimal",
+        approvalPolicy: "on-failure"
       })
     });
     assert.equal(sendSeedMessage.status, 202);
+
+    const controlsAfterSend = await request(`/sessions/${encodeURIComponent(sessionId)}/session-controls`);
+    assert.equal(controlsAfterSend.status, 200);
+    assert.equal(controlsAfterSend.body?.controls?.approvalPolicy, "on-failure");
 
     const hasSuggestionContext = await waitForSessionContext(sessionId);
 

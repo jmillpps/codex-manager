@@ -203,7 +203,7 @@ type MoveProjectChatsDestination = "unassigned" | "archive";
 type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 type ReasoningEffortSelection = "" | ReasoningEffort;
 type ApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
-type SessionControlApprovalPolicy = "never" | "unless-trusted" | "on-request";
+type SessionControlApprovalPolicy = ApprovalPolicy;
 type NetworkAccess = "restricted" | "enabled";
 type FilesystemSandbox = "read-only" | "workspace-write" | "danger-full-access";
 type SessionControlScope = "session" | "default";
@@ -254,19 +254,26 @@ const preferredReasoningEffortOrder: Array<ReasoningEffort> = ["xhigh", "high", 
 const approvalSnapBackStartDelayMs = 60;
 const mobileViewportMaxWidthPx = 880;
 const mobileViewportMediaQuery = `(max-width: ${mobileViewportMaxWidthPx}px)`;
-const sessionControlApprovalPolicies: Array<SessionControlApprovalPolicy> = ["never", "unless-trusted", "on-request"];
+const sessionControlApprovalPolicies: Array<SessionControlApprovalPolicy> = ["untrusted", "on-failure", "on-request", "never"];
 const networkAccessModes: Array<NetworkAccess> = ["restricted", "enabled"];
 const filesystemSandboxModes: Array<FilesystemSandbox> = ["read-only", "workspace-write", "danger-full-access"];
 const defaultSessionControlsTuple: SessionControlsTuple = {
   model: null,
-  approvalPolicy: "unless-trusted",
+  approvalPolicy: "untrusted",
   networkAccess: "restricted",
   filesystemSandbox: "read-only"
 };
+const sessionControlApprovalPolicyLabel: Record<SessionControlApprovalPolicy, string> = {
+  untrusted: "Unless Trusted",
+  "on-failure": "On Failure",
+  "on-request": "On Request",
+  never: "Never"
+};
 const sessionControlApprovalPolicyHelperText: Record<SessionControlApprovalPolicy, string> = {
-  never: "No escalation requests will be issued.",
-  "unless-trusted": "Prompts for escalation when trust is required.",
-  "on-request": "Only asks when the model explicitly requests escalation."
+  untrusted: "Prompts for commands that are not clearly safe read-only actions.",
+  "on-failure": "Runs in sandbox first, then requests escalation only when sandbox execution fails.",
+  "on-request": "Only asks when the model explicitly requests escalation.",
+  never: "No escalation requests will be issued."
 };
 const networkAccessHelperText: Record<NetworkAccess, string> = {
   restricted: "No outbound network access.",
@@ -587,7 +594,7 @@ function isApprovalPolicy(value: unknown): value is ApprovalPolicy {
 }
 
 function isSessionControlApprovalPolicy(value: unknown): value is SessionControlApprovalPolicy {
-  return value === "never" || value === "unless-trusted" || value === "on-request";
+  return value === "untrusted" || value === "on-failure" || value === "on-request" || value === "never";
 }
 
 function isNetworkAccess(value: unknown): value is NetworkAccess {
@@ -599,23 +606,11 @@ function isFilesystemSandbox(value: unknown): value is FilesystemSandbox {
 }
 
 function sessionControlApprovalPolicyFromProtocol(policy: ApprovalPolicy): SessionControlApprovalPolicy {
-  if (policy === "never") {
-    return "never";
-  }
-  if (policy === "on-request") {
-    return "on-request";
-  }
-  return "unless-trusted";
+  return policy;
 }
 
 function protocolApprovalPolicyFromSessionControl(policy: SessionControlApprovalPolicy): ApprovalPolicy {
-  if (policy === "never") {
-    return "never";
-  }
-  if (policy === "on-request") {
-    return "on-request";
-  }
-  return "untrusted";
+  return policy;
 }
 
 function normalizeSessionControlsTuple(input: unknown): SessionControlsTuple | null {
@@ -624,11 +619,7 @@ function normalizeSessionControlsTuple(input: unknown): SessionControlsTuple | n
     return null;
   }
 
-  const approvalPolicy = isSessionControlApprovalPolicy(value.approvalPolicy)
-    ? value.approvalPolicy
-    : isApprovalPolicy(value.approvalPolicy)
-      ? sessionControlApprovalPolicyFromProtocol(value.approvalPolicy)
-      : null;
+  const approvalPolicy = isSessionControlApprovalPolicy(value.approvalPolicy) ? value.approvalPolicy : null;
   const networkAccess = isNetworkAccess(value.networkAccess) ? value.networkAccess : null;
   const filesystemSandbox = isFilesystemSandbox(value.filesystemSandbox) ? value.filesystemSandbox : null;
   if (!approvalPolicy || !networkAccess || !filesystemSandbox) {
@@ -7587,7 +7578,7 @@ export function App() {
                 >
                   {sessionControlApprovalPolicies.map((policy) => (
                     <option key={policy} value={policy}>
-                      {policy}
+                      {sessionControlApprovalPolicyLabel[policy]}
                     </option>
                   ))}
                 </select>

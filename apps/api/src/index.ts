@@ -177,7 +177,7 @@ type ApprovalDecisionInput = "accept" | "decline" | "cancel";
 type DefaultSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 type ApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
-type SessionControlApprovalPolicy = "never" | "unless-trusted" | "on-request";
+type SessionControlApprovalPolicy = ApprovalPolicy;
 type NetworkAccess = "restricted" | "enabled";
 type SessionControlsTuple = {
   model: string | null;
@@ -247,7 +247,7 @@ const createSessionBodySchema = z
 
 const reasoningEffortSchema = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const approvalPolicySchema = z.enum(["untrusted", "on-failure", "on-request", "never"]);
-const sessionControlApprovalPolicySchema = z.enum(["never", "unless-trusted", "on-request"]);
+const sessionControlApprovalPolicySchema = z.enum(["untrusted", "on-failure", "on-request", "never"]);
 const networkAccessSchema = z.enum(["restricted", "enabled"]);
 const filesystemSandboxSchema = z.enum(["read-only", "workspace-write", "danger-full-access"]);
 const sessionControlsTupleSchema = z.object({
@@ -1303,7 +1303,7 @@ function isApprovalPolicy(value: unknown): value is ApprovalPolicy {
 }
 
 function isSessionControlApprovalPolicy(value: unknown): value is SessionControlApprovalPolicy {
-  return value === "never" || value === "unless-trusted" || value === "on-request";
+  return value === "untrusted" || value === "on-failure" || value === "on-request" || value === "never";
 }
 
 function isNetworkAccess(value: unknown): value is NetworkAccess {
@@ -1315,29 +1315,17 @@ function isDefaultSandboxMode(value: unknown): value is DefaultSandboxMode {
 }
 
 function sessionControlApprovalPolicyFromProtocol(policy: ApprovalPolicy): SessionControlApprovalPolicy {
-  if (policy === "never") {
-    return "never";
-  }
-  if (policy === "on-request") {
-    return "on-request";
-  }
-  return "unless-trusted";
+  return policy;
 }
 
 function protocolApprovalPolicyFromSessionControl(policy: SessionControlApprovalPolicy): ApprovalPolicy {
-  if (policy === "never") {
-    return "never";
-  }
-  if (policy === "on-request") {
-    return "on-request";
-  }
-  return "untrusted";
+  return policy;
 }
 
 function defaultSessionControlsFromEnv(): SessionControlsTuple {
   return {
     model: null,
-    approvalPolicy: sessionControlApprovalPolicyFromProtocol(env.DEFAULT_APPROVAL_POLICY),
+    approvalPolicy: env.DEFAULT_APPROVAL_POLICY,
     networkAccess: env.DEFAULT_NETWORK_ACCESS,
     filesystemSandbox: env.DEFAULT_SANDBOX_MODE
   };
@@ -1348,11 +1336,7 @@ function parseSessionControlsTuple(value: unknown): SessionControlsTuple | null 
     return null;
   }
 
-  const approvalPolicy = isSessionControlApprovalPolicy(value.approvalPolicy)
-    ? value.approvalPolicy
-    : isApprovalPolicy(value.approvalPolicy)
-      ? sessionControlApprovalPolicyFromProtocol(value.approvalPolicy)
-      : null;
+  const approvalPolicy = isSessionControlApprovalPolicy(value.approvalPolicy) ? value.approvalPolicy : null;
   const networkAccess = isNetworkAccess(value.networkAccess) ? value.networkAccess : null;
   const filesystemSandbox = isDefaultSandboxMode(value.filesystemSandbox)
     ? value.filesystemSandbox
@@ -1670,7 +1654,7 @@ function resolveSessionControls(sessionId: string): SessionControlsTuple {
   if (isApprovalPolicy(legacyApproval)) {
     return {
       ...defaultControls,
-      approvalPolicy: sessionControlApprovalPolicyFromProtocol(legacyApproval)
+      approvalPolicy: legacyApproval
     };
   }
 
@@ -1717,7 +1701,7 @@ function setSessionControls(sessionId: string, nextControls: SessionControlsTupl
     sessionMetadata.sessionControlsById[sessionId] = normalizedNext;
   }
 
-  const runtimeApprovalPolicy = protocolApprovalPolicyFromSessionControl(normalizedNext.approvalPolicy);
+  const runtimeApprovalPolicy = normalizedNext.approvalPolicy;
   const approvalPolicyChanged = sessionMetadata.sessionApprovalPolicyById[sessionId] !== runtimeApprovalPolicy;
   if (approvalPolicyChanged) {
     sessionMetadata.sessionApprovalPolicyById[sessionId] = runtimeApprovalPolicy;
@@ -1727,7 +1711,7 @@ function setSessionControls(sessionId: string, nextControls: SessionControlsTupl
 }
 
 function resolveSessionApprovalPolicy(sessionId: string): ApprovalPolicy {
-  return protocolApprovalPolicyFromSessionControl(resolveSessionControls(sessionId).approvalPolicy);
+  return resolveSessionControls(sessionId).approvalPolicy;
 }
 
 function setSessionApprovalPolicy(sessionId: string, approvalPolicy: ApprovalPolicy | null): boolean {
@@ -1737,7 +1721,7 @@ function setSessionApprovalPolicy(sessionId: string, approvalPolicy: ApprovalPol
 
   const nextControls = {
     ...resolveSessionControls(sessionId),
-    approvalPolicy: sessionControlApprovalPolicyFromProtocol(approvalPolicy)
+    approvalPolicy
   };
   return setSessionControls(sessionId, nextControls);
 }
@@ -5315,6 +5299,16 @@ app.post("/api/sessions/:sessionId/session-controls", async (request, reply) => 
   const body = applySessionControlsBodySchema.parse(request.body);
   const actor = body.actor ?? "user";
   const source = body.source ?? "ui";
+  const requestedControls = parseSessionControlsTuple(body.controls);
+
+  if (!requestedControls) {
+    reply.code(400);
+    return {
+      status: "error",
+      code: "invalid_request",
+      message: "session controls payload is invalid"
+    };
+  }
 
   if (body.scope === "default" && env.SESSION_DEFAULTS_LOCKED) {
     reply.code(423);
@@ -5332,8 +5326,8 @@ app.post("/api/sessions/:sessionId/session-controls", async (request, reply) => 
 
   const changed =
     body.scope === "default"
-      ? setDefaultSessionControls(body.controls)
-      : setSessionControls(params.sessionId, body.controls);
+      ? setDefaultSessionControls(requestedControls)
+      : setSessionControls(params.sessionId, requestedControls);
 
   const nextSessionControls = resolveSessionControls(params.sessionId);
   const nextDefaultControls = resolveDefaultSessionControls();

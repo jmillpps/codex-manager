@@ -50,13 +50,13 @@ function json(status: number, body: unknown): Response {
 function defaultSessionControlsPayload(sessionId: string, overrides?: {
   controls?: Partial<{
     model: string | null;
-    approvalPolicy: "never" | "unless-trusted" | "on-request";
+    approvalPolicy: "untrusted" | "on-failure" | "on-request" | "never";
     networkAccess: "restricted" | "enabled";
     filesystemSandbox: "read-only" | "workspace-write" | "danger-full-access";
   }>;
   defaults?: Partial<{
     model: string | null;
-    approvalPolicy: "never" | "unless-trusted" | "on-request";
+    approvalPolicy: "untrusted" | "on-failure" | "on-request" | "never";
     networkAccess: "restricted" | "enabled";
     filesystemSandbox: "read-only" | "workspace-write" | "danger-full-access";
   }>;
@@ -66,13 +66,13 @@ function defaultSessionControlsPayload(sessionId: string, overrides?: {
   sessionId: string;
   controls: {
     model: string | null;
-    approvalPolicy: "never" | "unless-trusted" | "on-request";
+    approvalPolicy: "untrusted" | "on-failure" | "on-request" | "never";
     networkAccess: "restricted" | "enabled";
     filesystemSandbox: "read-only" | "workspace-write" | "danger-full-access";
   };
   defaults: {
     model: string | null;
-    approvalPolicy: "never" | "unless-trusted" | "on-request";
+    approvalPolicy: "untrusted" | "on-failure" | "on-request" | "never";
     networkAccess: "restricted" | "enabled";
     filesystemSandbox: "read-only" | "workspace-write" | "danger-full-access";
   };
@@ -81,14 +81,14 @@ function defaultSessionControlsPayload(sessionId: string, overrides?: {
 } {
   const controls = {
     model: null,
-    approvalPolicy: "unless-trusted" as const,
+    approvalPolicy: "untrusted" as const,
     networkAccess: "restricted" as const,
     filesystemSandbox: "read-only" as const,
     ...(overrides?.controls ?? {})
   };
   const defaults = {
     model: null,
-    approvalPolicy: "unless-trusted" as const,
+    approvalPolicy: "untrusted" as const,
     networkAccess: "restricted" as const,
     filesystemSandbox: "read-only" as const,
     ...(overrides?.defaults ?? {})
@@ -853,7 +853,7 @@ describe("settings endpoint wiring", () => {
     expect(effortValues).not.toContain("high");
   });
 
-  it("applies per-chat approval policy via session controls and sends never for that chat", async () => {
+  it("applies per-chat approval policy via session controls and sends on-failure for that chat", async () => {
     const session = {
       sessionId: "session-approval",
       title: "Session Approval",
@@ -904,12 +904,12 @@ describe("settings endpoint wiring", () => {
               ...defaultSessionControlsPayload("session-approval", {
                 controls: {
                   model: "gpt-5.1",
-                  approvalPolicy: "never"
+                  approvalPolicy: "on-failure"
                 }
               }),
               applied: {
                 model: "gpt-5.1",
-                approvalPolicy: "never",
+                approvalPolicy: "on-failure",
                 networkAccess: "restricted",
                 filesystemSandbox: "read-only"
               }
@@ -936,10 +936,10 @@ describe("settings endpoint wiring", () => {
     await screen.findByRole("button", { name: "Session Approval" });
     await openSessionControlsPanel();
     const policySelect = (await screen.findByLabelText("Approval Policy selector")) as HTMLSelectElement;
-    expect(policySelect.value).toBe("unless-trusted");
-    fireEvent.change(policySelect, { target: { value: "never" } });
+    expect(policySelect.value).toBe("untrusted");
+    fireEvent.change(policySelect, { target: { value: "on-failure" } });
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-    await screen.findByText(/Applied: gpt-5.1 \| never \| restricted \| read-only/i);
+    await screen.findByText(/Applied: gpt-5.1 \| on-failure \| restricted \| read-only/i);
     await waitFor(() => expect(hasFetchCall(fetchMock, "/api/sessions/session-approval/session-controls")).toBe(true));
     expect(screen.queryByLabelText("Approval Policy selector")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Session Controls/i })).toBeInTheDocument();
@@ -954,7 +954,7 @@ describe("settings endpoint wiring", () => {
     const requestBody = JSON.parse(String((messagesCall?.[1] as RequestInit | undefined)?.body ?? "{}")) as {
       approvalPolicy?: string;
     };
-    expect(requestBody.approvalPolicy).toBe("never");
+    expect(requestBody.approvalPolicy).toBe("on-failure");
   });
 
   it("renders default scope controls as read-only when defaults are harness-managed", async () => {
