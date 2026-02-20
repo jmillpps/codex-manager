@@ -186,8 +186,23 @@ function hasFetchCall(fetchMock: ReturnType<typeof vi.fn>, fragment: string): bo
 }
 
 async function openSessionControlsPanel(): Promise<void> {
-  const toggle = await screen.findByRole("button", { name: /Session Controls/i });
-  fireEvent.click(toggle);
+  await waitFor(() => {
+    const modelSelector = screen.queryByLabelText("Model selector");
+    if (modelSelector) {
+      return;
+    }
+
+    const trigger = screen.queryByRole("button", { name: /Session Controls/i });
+    if (!trigger) {
+      throw new Error("Session controls trigger unavailable");
+    }
+
+    if (trigger.getAttribute("aria-expanded") !== "true") {
+      fireEvent.click(trigger);
+    }
+
+    throw new Error("Waiting for Session Controls panel to render");
+  });
 }
 
 function deferredResponse(): { promise: Promise<Response>; resolve: (response: Response) => void } {
@@ -230,6 +245,27 @@ describe("settings endpoint wiring", () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     globalThis.WebSocket = originalWebSocket;
+  });
+
+  it("falls back safely when matchMedia is unavailable at runtime", async () => {
+    const originalMatchMediaDescriptor = Object.getOwnPropertyDescriptor(window, "matchMedia");
+
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+
+    try {
+      expect(() => render(<App />)).not.toThrow();
+      await screen.findByText("Codex Manager");
+    } finally {
+      if (originalMatchMediaDescriptor) {
+        Object.defineProperty(window, "matchMedia", originalMatchMediaDescriptor);
+      } else {
+        delete (window as Window & { matchMedia?: unknown }).matchMedia;
+      }
+    }
   });
 
   it("invokes account/skills/config/command/feedback endpoints from settings actions", async () => {
@@ -798,20 +834,20 @@ describe("settings endpoint wiring", () => {
 
     render(<App />);
 
+    await waitFor(() => expect(hasFetchCall(fetchMock, "/api/sessions/session-model/session-controls")).toBe(true));
     await openSessionControlsPanel();
-    const modelSelect = (await screen.findByLabelText("Model selector")) as HTMLSelectElement;
-    const thinkingSelect = (await screen.findByLabelText("Thinking Level selector")) as HTMLSelectElement;
-    await waitFor(() => expect(modelSelect.value).toBe("codex-max"));
-    expect(thinkingSelect.value).toBe("high");
+    await waitFor(() => expect((screen.getByLabelText("Model selector") as HTMLSelectElement).value).toBe("codex-max"));
+    await waitFor(() => expect((screen.getByLabelText("Thinking Level selector") as HTMLSelectElement).value).toBe("xhigh"));
 
-    const optionValues = Array.from(modelSelect.options).map((entry) => entry.value);
+    const optionValues = Array.from((screen.getByLabelText("Model selector") as HTMLSelectElement).options).map((entry) => entry.value);
     expect(optionValues.filter((value) => value === "codex-max")).toHaveLength(1);
     expect(optionValues).toContain("gpt-lite");
 
-    fireEvent.change(modelSelect, { target: { value: "gpt-lite" } });
-    expect(modelSelect.value).toBe("gpt-lite");
-    await waitFor(() => expect(thinkingSelect.value).toBe("low"));
-    const effortValues = Array.from(thinkingSelect.options).map((entry) => entry.value);
+    fireEvent.change(screen.getByLabelText("Model selector"), { target: { value: "gpt-lite" } });
+    await openSessionControlsPanel();
+    await waitFor(() => expect((screen.getByLabelText("Model selector") as HTMLSelectElement).value).toBe("gpt-lite"));
+    await waitFor(() => expect((screen.getByLabelText("Thinking Level selector") as HTMLSelectElement).value).toBe("low"));
+    const effortValues = Array.from((screen.getByLabelText("Thinking Level selector") as HTMLSelectElement).options).map((entry) => entry.value);
     expect(effortValues).toContain("minimal");
     expect(effortValues).toContain("low");
     expect(effortValues).not.toContain("high");

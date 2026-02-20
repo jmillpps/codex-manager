@@ -252,6 +252,8 @@ function MarkdownText({ content, className }: { content: string; className?: str
 const allReasoningEfforts: Array<ReasoningEffort> = ["none", "minimal", "low", "medium", "high", "xhigh"];
 const preferredReasoningEffortOrder: Array<ReasoningEffort> = ["xhigh", "high", "medium", "low", "minimal", "none"];
 const approvalSnapBackStartDelayMs = 60;
+const mobileViewportMaxWidthPx = 880;
+const mobileViewportMediaQuery = `(max-width: ${mobileViewportMaxWidthPx}px)`;
 const sessionControlApprovalPolicies: Array<SessionControlApprovalPolicy> = ["never", "unless-trusted", "on-request"];
 const networkAccessModes: Array<NetworkAccess> = ["restricted", "enabled"];
 const filesystemSandboxModes: Array<FilesystemSandbox> = ["read-only", "workspace-write", "danger-full-access"];
@@ -653,6 +655,74 @@ function sessionControlsEqual(left: SessionControlsTuple, right: SessionControls
     left.networkAccess === right.networkAccess &&
     left.filesystemSandbox === right.filesystemSandbox
   );
+}
+
+function resolveWindowMatchMedia():
+  | ((query: string) => MediaQueryList)
+  | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const candidate = (window as Window & { matchMedia?: unknown }).matchMedia;
+  if (typeof candidate !== "function") {
+    return null;
+  }
+
+  return candidate.bind(window);
+}
+
+function readIsMobileViewport(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const matchMedia = resolveWindowMatchMedia();
+  if (matchMedia) {
+    return matchMedia(mobileViewportMediaQuery).matches;
+  }
+
+  return window.innerWidth <= mobileViewportMaxWidthPx;
+}
+
+function subscribeMobileViewport(onChange: (matches: boolean) => void): () => void {
+  if (typeof window === "undefined") {
+    return () => {};
+  }
+
+  const matchMedia = resolveWindowMatchMedia();
+  if (matchMedia) {
+    const media = matchMedia(mobileViewportMediaQuery);
+    const handleMediaChange = (event: MediaQueryListEvent): void => {
+      onChange(event.matches);
+    };
+    onChange(media.matches);
+
+    if (typeof media.addEventListener === "function" && typeof media.removeEventListener === "function") {
+      media.addEventListener("change", handleMediaChange);
+      return () => {
+        media.removeEventListener("change", handleMediaChange);
+      };
+    }
+
+    if (typeof media.addListener === "function" && typeof media.removeListener === "function") {
+      media.addListener(handleMediaChange);
+      return () => {
+        media.removeListener(handleMediaChange);
+      };
+    }
+
+    return () => {};
+  }
+
+  const handleResize = (): void => {
+    onChange(window.innerWidth <= mobileViewportMaxWidthPx);
+  };
+  onChange(window.innerWidth <= mobileViewportMaxWidthPx);
+  window.addEventListener("resize", handleResize);
+  return () => {
+    window.removeEventListener("resize", handleResize);
+  };
 }
 
 function extractReasoningEffort(input: unknown): ReasoningEffort | null {
@@ -1831,9 +1901,7 @@ export function App() {
   const [sessionControlsToast, setSessionControlsToast] = useState<string | null>(null);
   const [lastKnownSessionControlsBySessionId, setLastKnownSessionControlsBySessionId] = useState<Record<string, SessionControlsTuple>>({});
   const [sessionControlsCollapsed, setSessionControlsCollapsed] = useState(true);
-  const [mobileViewport, setMobileViewport] = useState(
-    () => (typeof window !== "undefined" && "matchMedia" in window ? window.matchMedia("(max-width: 880px)").matches : false)
-  );
+  const [mobileViewport, setMobileViewport] = useState(readIsMobileViewport);
   const [capabilities, setCapabilities] = useState<CapabilitiesResponse | null>(null);
   const [loadingCapabilities, setLoadingCapabilities] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -5067,18 +5135,7 @@ export function App() {
   }, [showProjectsSection]);
 
   useEffect(() => {
-    if (typeof window === "undefined" || !("matchMedia" in window)) {
-      return;
-    }
-    const media = window.matchMedia("(max-width: 880px)");
-    const handleChange = (event: MediaQueryListEvent): void => {
-      setMobileViewport(event.matches);
-    };
-    setMobileViewport(media.matches);
-    media.addEventListener("change", handleChange);
-    return () => {
-      media.removeEventListener("change", handleChange);
-    };
+    return subscribeMobileViewport(setMobileViewport);
   }, []);
 
   useEffect(() => {
