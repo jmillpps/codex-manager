@@ -89,7 +89,7 @@ All items emit:
 - `commandExecution` — `{ id, command, cwd, status, commandActions, aggregatedOutput?, exitCode?, durationMs? }`
 - `fileChange` — `{ id, changes, status }`, `changes` entries `{ path, kind, diff }`
 - `mcpToolCall` — `{ id, server, tool, status, arguments, result?, error? }`
-- `collabToolCall` — `{ id, tool, status, senderThreadId, receiverThreadId?, newThreadId?, prompt?, agentStatus? }`
+- `collabAgentToolCall` — `{ id, tool, status, senderThreadId, receiverThreadIds, prompt?, agentsStates }` where `tool` is one of `spawnAgent`/`sendInput`/`resumeAgent`/`wait`/`closeAgent` and `status` is `inProgress`/`completed`/`failed`
 - `webSearch` — `{ id, query, action? }`
 - `imageView` — `{ id, path }`
 - `enteredReviewMode` — `{ id, review }`
