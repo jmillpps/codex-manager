@@ -32,6 +32,14 @@ These decisions are now requirements.
 - Users must not see or interact with orchestrator sessions as regular chats.
 - Users must not be able to send/interrupt/rollback/archive/delete those sessions directly through normal chat UI/API paths.
 
+4. Queued work must never be silently lost during deploy/schema changes.
+- Recovery cannot drop jobs because of unknown type/version/schema drift.
+- Any unrecoverable replay mismatch must be represented as explicit terminal job state with failure reason.
+
+5. Every queue job must end in an explicit terminal state.
+- Jobs must always resolve to one of: `completed`, `failed`, `canceled`.
+- This is mandatory for observability, client reconciliation, and deterministic restart semantics.
+
 ---
 
 ## Scope
@@ -727,3 +735,600 @@ Resolution:
 Resulting contract:
 
 - Suggest-reply pending state is self-healing when websocket delivery misses terminal job events.
+
+---
+
+## Deep Review Remediation (Completed)
+
+This section tracks the second deep audit pass across all phases. All findings below are resolved in code.
+
+### 1) Invalid payload jobs could be re-picked forever
+
+Issue:
+
+- Queue execution parsed payload before guarded state transitions.
+- Parse failures could leave jobs queued and repeatedly re-selected.
+
+Resolution:
+
+1. Added explicit invalid-payload handling in run path.
+2. Invalid payload now transitions job to `failed` terminal state with explicit reason.
+3. Added unit coverage asserting invalid queued payloads fail terminal instead of spinning.
+
+Resulting contract:
+
+- Invalid payloads cannot wedge queue lanes via endless re-pick loops.
+
+### 2) Recovery could silently drop unknown job types or schema-invalid payloads
+
+Issue:
+
+- Snapshot recovery previously skipped unknown type jobs and parse-invalid jobs.
+- This violated non-loss semantics and removed observability/reconciliation traceability.
+
+Resolution:
+
+1. Recovery now preserves unknown-type jobs as terminal `failed` rows with `recovery_unknown_job_type:*` errors.
+2. Recovery now preserves schema-invalid payload jobs as terminal `failed` rows with `recovery_invalid_payload:*` errors.
+3. Added unit tests for both recovery paths.
+
+Resulting contract:
+
+- Deploy/schema drift cannot silently discard queued work.
+
+### 3) Transcript loader could remain stuck in loading state after deletion race
+
+Issue:
+
+- `loadSessionTranscript` could early-return on deleted-session handling while final loading reset depended on selected-session identity match.
+
+Resolution:
+
+1. Transcript loader now clears `loadingTranscript` based on request id ownership rather than active-session match.
+2. Deleted-session transcript branch now also clears message timing state.
+
+Resulting contract:
+
+- Deleted-session races cannot leave transcript loading spinner stuck indefinitely.
+
+### 4) System-owned suggest endpoints lacked explicit contract coverage
+
+Issue:
+
+- Existing API guards were implemented but not asserted for both suggest endpoints in contract tests.
+
+Resolution:
+
+1. Added contract assertions that system-owned sessions receive `403 system_session` for:
+- `POST /api/sessions/:sessionId/suggested-reply/jobs`
+- `POST /api/sessions/:sessionId/suggested-reply`
+
+Resulting contract:
+
+- Suggest queue APIs retain system-session isolation guarantees with regression protection.
+
+### 5) Explainability workflow lacked deterministic contract coverage
+
+Issue:
+
+- File-change explainability lifecycle and anchored transcript synthesis were not covered by the contract suite.
+
+Resolution:
+
+1. Added contract harness helpers to inject queued orchestrator jobs via persisted queue snapshot.
+2. Added end-to-end contract flow that replays a queued `file_change_explain` job, waits for terminal job state, and verifies:
+- synthetic explainability transcript entry exists
+- `type === fileChange.explainability`
+- `details` preserves `anchorItemId`
+3. Added cleanup/unassignment checks to keep project lifecycle assertions deterministic.
+
+Resulting contract:
+
+- Explainability job processing and transcript sink behavior are now regression-tested end-to-end.
+
+### 6) Retry/backoff behavior was untested
+
+Issue:
+
+- Retryable classification and delayed re-attempt semantics were implemented without direct tests.
+
+Resolution:
+
+1. Added queue unit test that forces retryable first failure then success.
+2. Test asserts delayed second attempt (backoff honored), attempt count increment, and final terminal completion.
+
+Resulting contract:
+
+- Retry scheduling/backoff behavior has direct regression coverage.
+
+### 7) Explainability surfaced raw orchestrator transport failures to end users
+
+Issue:
+
+- `file_change_explain` jobs could fail with raw RPC errors (for example stale orchestrator session `thread not found`) and write those low-level failures directly into chat transcript explainability rows.
+
+Resolution:
+
+1. Explainability worker now attempts orchestration-session recovery when session mapping is missing/stale.
+2. If recovery still fails (and job is not canceled), worker returns synthesized fallback explainability instead of failing terminal.
+3. Contract tests now assert explainability transcript content is usable text and not raw `Explainability failed:` transport errors.
+
+Resulting contract:
+
+- Diff explainability remains best-effort and user-readable even when orchestration infrastructure is transiently stale.
+
+### 8) Pending approval cards lacked inline explainability context
+
+Issue:
+
+- Explainability jobs were only enqueued on `item/completed` for `fileChange`.
+- Users reviewing pending file-change approvals saw raw diffs but no explainability inside the approval card.
+
+Resolution:
+
+1. Enqueue `file_change_explain` when `item/fileChange/requestApproval` arrives (same dedupe key shape as completion path).
+2. Keep completion-path enqueue so already-approved/completed-only paths still get explainability.
+3. Reconcile existing pending approvals by enqueueing on approvals fetch (`GET /sessions/:sessionId/approvals`) so already-open approval cards receive explainability without waiting for a new approval event.
+4. Render anchored `fileChange.explainability` content inline inside pending file-change approval cards and suppress duplicate standalone row while approval is active.
+5. Handle sparse approval payloads by deriving/falling back missing `turnId`/`itemId`, hydrating missing `changes` from matching supplemental `fileChange` transcript details, and include `approvalId` metadata in explainability transcript details for reliable approval-card linkage.
+6. Approval-card fallback copy must not claim queued state unless queue lifecycle evidence exists; default to neutral pending wording when no explainability lifecycle row is linked yet.
+
+Resulting contract:
+
+- Approval-time file-change review surfaces explainability directly where approve/deny decisions are made.
+
+### 9) Explainability depth exceeded desired UX scope
+
+Issue:
+
+- Explainability output included deeper sections (why/risk/follow-up) when users only wanted concise change descriptions.
+
+Resolution:
+
+1. Narrowed explainability prompt contract to `What changed` only.
+2. Explicitly disallowed rationale/risk/recommendation content in generated explainability.
+3. Updated fallback explainability renderer to emit change-focused bullets only.
+
+Resulting contract:
+
+- Diff explainability is now strictly a concise description of what changed.
+
+---
+
+## Supervisor Pipeline Contract (Build-Ready)
+
+Purpose:
+
+- Define an implementation contract for continuous supervisor analysis across diff-time and turn-finalization time with three concrete UI components:
+- `fileChange.supervisorInsight`
+- `riskRecheck.batch`
+- `turn.supervisorReview`
+
+### 1) Job Types (Exact)
+
+#### 1.1 `file_change_supervisor_insight` (new)
+
+Intent:
+
+- Analyze one file-change event and return exactly 4 concise fields (`change`, `impact`, `risk`, `check`).
+
+Queue config:
+
+- `type`: `file_change_supervisor_insight`
+- `version`: `1`
+- `priority`: `interactive` for approval-time events; `background` for completed-only events (implement via two definitions or payload-routed priority helper).
+- `dedupe.mode`: `drop_duplicate`
+- `dedupe.key`: `${projectId}:${threadId}:${turnId}:${itemId}:supervisor_insight:v1`
+- `retry.classify`: timeout/transient = retryable; schema/prompt/output contract violations = fatal.
+- `timeoutMs`: `90_000`
+- `cancel.strategy`: `interrupt_turn`
+
+Payload schema:
+
+```json
+{
+  "threadId": "string",
+  "turnId": "string",
+  "itemId": "string",
+  "projectId": "string",
+  "sourceSessionId": "string",
+  "sourceEvent": "approval_request | approvals_reconcile | item_completed",
+  "fileChangeStatus": "pending_approval | completed",
+  "approvalId": "string (optional)",
+  "summary": "string",
+  "details": "string (serialized normalized diff payload)",
+  "anchorItemId": "string"
+}
+```
+
+Result schema:
+
+```json
+{
+  "messageId": "string",
+  "anchorItemId": "string",
+  "approvalId": "string (optional)",
+  "insight": {
+    "change": "string",
+    "impact": "string",
+    "risk": {
+      "level": "none | low | med | high",
+      "reason": "string"
+    },
+    "check": {
+      "instruction": "string",
+      "expected": "string"
+    },
+    "confidence": "low | med | high"
+  }
+}
+```
+
+Output contract:
+
+1. Exactly 4 semantic fields only: `change`, `impact`, `risk`, `check`.
+2. `check.instruction` is designed for verbatim execution later.
+3. No essay output; all strings short and concrete.
+4. `risk.level = none` means no recheck candidate is created.
+
+---
+
+#### 1.2 `risk_recheck_batch` (new)
+
+Intent:
+
+- At turn completion, execute all verbatim check instructions from applied diffs where `risk.level != none`.
+
+Queue config:
+
+- `type`: `risk_recheck_batch`
+- `version`: `1`
+- `priority`: `background`
+- `dedupe.mode`: `single_flight`
+- `dedupe.key`: `${projectId}:${threadId}:${turnId}:risk_recheck_batch:v1`
+- `retry.classify`: infrastructure timeout/transient = retryable; malformed candidate payload = fatal.
+- `timeoutMs`: `300_000`
+- `cancel.strategy`: `interrupt_turn`
+
+Payload schema:
+
+```json
+{
+  "threadId": "string",
+  "turnId": "string",
+  "projectId": "string",
+  "sourceSessionId": "string",
+  "checks": [
+    {
+      "itemId": "string",
+      "approvalId": "string (optional)",
+      "riskLevel": "low | med | high",
+      "riskReason": "string",
+      "instruction": "string",
+      "expected": "string"
+    }
+  ],
+  "execution": {
+    "maxConcurrency": "number (default 3)",
+    "perCheckTimeoutMs": "number (default 120000)"
+  }
+}
+```
+
+Result schema:
+
+```json
+{
+  "messageId": "string",
+  "turnId": "string",
+  "summary": {
+    "total": "number",
+    "passed": "number",
+    "failed": "number",
+    "error": "number",
+    "timeout": "number",
+    "skipped": "number"
+  },
+  "checks": [
+    {
+      "itemId": "string",
+      "riskLevel": "low | med | high",
+      "instruction": "string",
+      "expected": "string",
+      "status": "passed | failed | error | timeout | skipped",
+      "evidence": "string",
+      "durationMs": "number"
+    }
+  ]
+}
+```
+
+Execution safety contract:
+
+1. Execute `instruction` verbatim in read-only sandbox with restricted network.
+2. Reject execution as `skipped` if instruction violates command safety policy.
+3. Enforce per-check timeout and capture explicit status.
+4. Batch always ends terminal (`completed`, `failed`, or `canceled`), never stuck.
+
+---
+
+#### 1.3 `turn_supervisor_review` (new)
+
+Intent:
+
+- Produce one whole-turn supervisor review after diff insights (and risk rechecks when present) have settled.
+
+Queue config:
+
+- `type`: `turn_supervisor_review`
+- `version`: `1`
+- `priority`: `background`
+- `dedupe.mode`: `single_flight`
+- `dedupe.key`: `${projectId}:${threadId}:${turnId}:turn_supervisor_review:v1`
+- `retry.classify`: timeout/transient = retryable; invalid input snapshot = fatal.
+- `timeoutMs`: `120_000`
+- `cancel.strategy`: `interrupt_turn`
+
+Payload schema:
+
+```json
+{
+  "threadId": "string",
+  "turnId": "string",
+  "projectId": "string",
+  "sourceSessionId": "string",
+  "insights": [
+    {
+      "itemId": "string",
+      "change": "string",
+      "impact": "string",
+      "riskLevel": "none | low | med | high",
+      "riskReason": "string"
+    }
+  ],
+  "riskBatch": {
+    "summary": {
+      "total": "number",
+      "passed": "number",
+      "failed": "number",
+      "error": "number",
+      "timeout": "number",
+      "skipped": "number"
+    },
+    "checks": [
+      {
+        "itemId": "string",
+        "status": "passed | failed | error | timeout | skipped",
+        "evidence": "string"
+      }
+    ]
+  },
+  "turnTranscriptSnapshot": "string"
+}
+```
+
+Result schema:
+
+```json
+{
+  "messageId": "string",
+  "turnId": "string",
+  "review": {
+    "overallChange": "string",
+    "topRisks": [
+      {
+        "itemId": "string",
+        "level": "low | med | high",
+        "why": "string",
+        "state": "open | validated | mitigated"
+      }
+    ],
+    "nextBestAction": "string",
+    "suggestReplyGuidance": "string"
+  }
+}
+```
+
+Output contract:
+
+1. Concise final turn-level synthesis.
+2. Must reference unresolved/highest-value risks surfaced earlier.
+3. Must include one forward-progress action (`nextBestAction`).
+4. `suggestReplyGuidance` is consumed by suggest-reply context builder.
+
+---
+
+### 2) Trigger + Ordering Contract
+
+Lifecycle ordering:
+
+1. On `item/fileChange/requestApproval`, enqueue `file_change_supervisor_insight` immediately.
+2. On eligible `item/completed` for file-change, enqueue `file_change_supervisor_insight` (dedupe prevents duplicate for same item).
+3. User approval/deny remains independent and non-blocking.
+4. On `turn/completed`, gather applied diff insights where `risk != none`, enqueue one `risk_recheck_batch`.
+5. After `risk_recheck_batch` reaches terminal (or immediately if zero checks), enqueue one `turn_supervisor_review`.
+6. Suggest-reply context builder consumes latest `turn_supervisor_review` and unresolved risk outcomes.
+
+Non-blocking invariant:
+
+- User turn completion and approval UX must never wait on batch/review jobs.
+
+---
+
+### 3) Persistence Contract (Supervisor Ledger)
+
+New persisted store:
+
+- `.data/supervisor-ledger.json`
+
+Store shape:
+
+```json
+{
+  "version": 1,
+  "byProjectId": {
+    "<projectId>": {
+      "byTurnId": {
+        "<turnId>": {
+          "insights": {
+            "<itemId>": {
+              "threadId": "string",
+              "approvalId": "string (optional)",
+              "applied": "boolean",
+              "change": "string",
+              "impact": "string",
+              "riskLevel": "none | low | med | high",
+              "riskReason": "string",
+              "checkInstruction": "string",
+              "checkExpected": "string",
+              "updatedAt": "string"
+            }
+          },
+          "riskBatchJobId": "string (optional)",
+          "reviewJobId": "string (optional)"
+        }
+      }
+    }
+  }
+}
+```
+
+Ledger rules:
+
+1. Upsert by `(projectId, turnId, itemId)`.
+2. Mark `applied = true` only after confirmed file-change completion for that item.
+3. Recheck candidates require `applied = true` and `riskLevel != none`.
+4. Replay-safe: store writes are idempotent.
+
+---
+
+### 4) Transcript Entry Contract (New Types)
+
+#### 4.1 `fileChange.supervisorInsight`
+
+- `messageId`: `file-change-supervisor-insight-${threadId}-${turnId}-${itemId}`
+- `role`: `system`
+- `type`: `fileChange.supervisorInsight`
+- `status`: `streaming | complete | error | canceled`
+- `details` includes structured insight JSON + `anchorItemId` + optional `approvalId`.
+- Render anchor: same bubble container as diff preview when available.
+
+#### 4.2 `riskRecheck.batch`
+
+- `messageId`: `risk-recheck-batch-${threadId}-${turnId}`
+- `role`: `system`
+- `type`: `riskRecheck.batch`
+- `status`: `streaming | complete | error | canceled`
+- `details` includes batch summary + per-check rows.
+- Render anchor: end of thought rows for that turn.
+
+#### 4.3 `turn.supervisorReview`
+
+- `messageId`: `turn-supervisor-review-${threadId}-${turnId}`
+- `role`: `system`
+- `type`: `turn.supervisorReview`
+- `status`: `streaming | complete | error | canceled`
+- `details` includes review payload.
+- Render anchor: after `riskRecheck.batch` row for that turn.
+
+---
+
+### 5) UI Components Contract (Exact)
+
+#### 5.1 `fileChange.supervisorInsight`
+
+Display:
+
+1. Inside the same diff bubble as file-change preview.
+2. Four labeled rows:
+- `Change`
+- `Impact`
+- `Risk` (badge `none|low|med|high`)
+- `Check` (verbatim instruction + expected signal)
+3. While running: show `Supervisor insight queued...` / `Supervisor analyzing...`.
+4. On error: show compact failure state, do not block approval actions.
+
+#### 5.2 `riskRecheck.batch`
+
+Display:
+
+1. One end-of-turn bubble:
+- `Risk Recheck Results`
+- summary line (`total/passed/failed/error/timeout/skipped`)
+2. Default collapsed body:
+- summary + non-passing checks only
+3. Optional expand:
+- show all checks with status badge, item reference, instruction, evidence snippet.
+
+#### 5.3 `turn.supervisorReview`
+
+Display:
+
+1. One end-of-turn bubble after batch results.
+2. Sections:
+- `Overall Change`
+- `Top Risks`
+- `Next Best Action`
+3. If no non-none risks, show explicit no-risk statement and still produce `Next Best Action`.
+
+---
+
+### 6) Suggest Reply Integration Contract
+
+Context input order for suggest-reply prompt builder:
+
+1. Latest `turn.supervisorReview.review`
+2. Latest `riskRecheck.batch` unresolved/non-passing checks
+3. Recent user intent from thread transcript
+
+Output behavior:
+
+1. One concise forward-progress reply, not iterative refinement chatter.
+2. Must incorporate unresolved risks when present.
+3. If risks are resolved, propose next concrete project step.
+
+---
+
+### 7) Prompt Contracts (Exact)
+
+`file_change_supervisor_insight` generation prompt output format:
+
+```json
+{
+  "change": "string",
+  "impact": "string",
+  "risk": { "level": "none|low|med|high", "reason": "string" },
+  "check": { "instruction": "string", "expected": "string" },
+  "confidence": "low|med|high"
+}
+```
+
+Required rules:
+
+1. JSON only, no markdown, no prose wrapper.
+2. Concrete statements only; unknowns must be explicit.
+3. Keep each top-level string concise.
+
+`turn_supervisor_review` generation prompt output format:
+
+```json
+{
+  "overallChange": "string",
+  "topRisks": [{ "itemId": "string", "level": "low|med|high", "why": "string", "state": "open|validated|mitigated" }],
+  "nextBestAction": "string",
+  "suggestReplyGuidance": "string"
+}
+```
+
+---
+
+### 8) Acceptance Criteria (Build Gate)
+
+1. For any file-change approval/completion event, a linked `fileChange.supervisorInsight` row appears or a terminal error row exists.
+2. Approval UX remains interactive even if supervisor jobs are queued/failed.
+3. On turn completion, exactly one `riskRecheck.batch` job runs per turn when candidates exist.
+4. `riskRecheck.batch` shows explicit per-check terminal statuses.
+5. Exactly one `turn.supervisorReview` row appears after batch terminal.
+6. Suggest-reply uses review/risk context and emits forward-progress guidance.
+7. No queued work is silently dropped on restart/recovery.
+8. All new jobs obey explicit terminal-state contract (`completed|failed|canceled`).

@@ -15,6 +15,7 @@ const dataDir = path.join(root, ".data", runtimeId);
 const codexHome = path.join(dataDir, "codex-home");
 const supplementalTranscriptPath = path.join(dataDir, "supplemental-transcript.json");
 const sessionMetadataPath = path.join(dataDir, "session-metadata.json");
+const orchestratorJobsPath = path.join(dataDir, "orchestrator-jobs.json");
 
 function makeJsonResponse(status, body) {
   return { status, ok: status >= 200 && status < 300, body };
@@ -215,6 +216,57 @@ async function assertNoStoredSessionControlEntries(sessionId, reason) {
   );
 }
 
+async function readOrchestratorJobsSnapshot() {
+  try {
+    const raw = await readFile(orchestratorJobsPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      parsed.version === 1 &&
+      Array.isArray(parsed.jobs)
+    ) {
+      return parsed;
+    }
+  } catch {
+    // fall through to default
+  }
+
+  return {
+    version: 1,
+    jobs: []
+  };
+}
+
+async function injectQueuedOrchestratorJob(job) {
+  const snapshot = await readOrchestratorJobsSnapshot();
+  const existingJobs = Array.isArray(snapshot.jobs) ? snapshot.jobs : [];
+  const next = {
+    version: 1,
+    jobs: [...existingJobs.filter((entry) => entry?.id !== job.id), job]
+  };
+  await writeFile(orchestratorJobsPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+}
+
+async function waitForOrchestratorJobTerminal(jobId, timeoutMs = 120_000) {
+  const started = Date.now();
+  const encodedJobId = encodeURIComponent(jobId);
+
+  while (Date.now() - started < timeoutMs) {
+    const detail = await request(`/orchestrator/jobs/${encodedJobId}`);
+    if (detail.status === 200) {
+      const state = detail.body?.job?.state;
+      if (state === "completed" || state === "failed" || state === "canceled") {
+        return detail.body.job;
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  throw new Error(`timed out waiting for orchestrator job terminal state: ${jobId}`);
+}
+
 async function main() {
   await mkdir(codexHome, { recursive: true });
   let apiProcess = startApiProcess();
@@ -395,10 +447,21 @@ async function main() {
     assert.equal(systemOwnedDelete.status, 403);
     assert.equal(systemOwnedDelete.body?.code, "system_session");
 
-    const projectDelete = await request(`/projects/${encodeURIComponent(projectId)}`, {
-      method: "DELETE"
+    const systemOwnedSuggestQueued = await request(`/sessions/${encodeURIComponent(orchestratorSessionId)}/suggested-reply/jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ draft: "must be denied" })
     });
-    assert.equal(projectDelete.status, 200);
+    assert.equal(systemOwnedSuggestQueued.status, 403);
+    assert.equal(systemOwnedSuggestQueued.body?.code, "system_session");
+
+    const systemOwnedSuggestLegacy = await request(`/sessions/${encodeURIComponent(orchestratorSessionId)}/suggested-reply`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ draft: "must be denied" })
+    });
+    assert.equal(systemOwnedSuggestLegacy.status, 403);
+    assert.equal(systemOwnedSuggestLegacy.body?.code, "system_session");
 
     const setLegacyBackOnFailure = await request(`/sessions/${encodeURIComponent(sessionId)}/approval-policy`, {
       method: "POST",
@@ -505,6 +568,111 @@ async function main() {
       assert.equal(suggestedReply.body?.status, "queued");
       assert.equal(typeof suggestedReply.body?.jobId, "string");
     }
+
+    const assignSessionToProject = await request(`/sessions/${encodeURIComponent(sessionId)}/project`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId })
+    });
+    assert.equal(assignSessionToProject.status, 200);
+    assert.equal(assignSessionToProject.body?.projectId, projectId);
+
+    const explainabilityTurnId = `turn-explainability-${Date.now()}`;
+    const explainabilityItemId = `item-explainability-${Date.now()}`;
+    const explainabilityJobId = `job-explainability-${Date.now()}`;
+    const explainabilityMessageId = `file-change-explain-${sessionId}-${explainabilityTurnId}-${explainabilityItemId}`;
+    const explainabilityPayload = {
+      threadId: sessionId,
+      turnId: explainabilityTurnId,
+      itemId: explainabilityItemId,
+      projectId,
+      sourceSessionId: sessionId,
+      summary: "File change completed: 1 change",
+      details: JSON.stringify(
+        {
+          status: "completed",
+          changes: [
+            {
+              path: ".data/api-contract-explainability.txt",
+              kind: "update",
+              diff: "@@ -0,0 +1 @@\n+api contract explainability"
+            }
+          ]
+        },
+        null,
+        2
+      ),
+      anchorItemId: explainabilityItemId
+    };
+
+    await stopApiProcess(apiProcess);
+    await injectQueuedOrchestratorJob({
+      id: explainabilityJobId,
+      type: "file_change_explain",
+      version: 1,
+      projectId,
+      sourceSessionId: sessionId,
+      priority: "background",
+      state: "queued",
+      dedupeKey: `${projectId}:${sessionId}:${explainabilityTurnId}:${explainabilityItemId}`,
+      payload: explainabilityPayload,
+      result: null,
+      error: null,
+      attempts: 0,
+      maxAttempts: 2,
+      createdAt: new Date().toISOString(),
+      startedAt: null,
+      completedAt: null,
+      cancelRequestedAt: null,
+      nextAttemptAt: null,
+      lastAttemptAt: null,
+      runningContext: {
+        threadId: null,
+        turnId: null
+      }
+    });
+    apiProcess = startApiProcess();
+    await waitForHealth();
+
+    const explainabilityTerminalJob = await waitForOrchestratorJobTerminal(explainabilityJobId, 120_000);
+    assert.equal(
+      explainabilityTerminalJob?.state,
+      "completed",
+      "file_change_explain should complete with synthesized fallback explainability when orchestration is unavailable"
+    );
+
+    const detailAfterExplainability = await request(`/sessions/${encodeURIComponent(sessionId)}`);
+    assert.equal(detailAfterExplainability.status, 200);
+    const transcriptAfterExplainability = Array.isArray(detailAfterExplainability.body?.transcript)
+      ? detailAfterExplainability.body.transcript
+      : [];
+    const explainabilityEntry = transcriptAfterExplainability.find((entry) => entry?.messageId === explainabilityMessageId);
+    assert.ok(explainabilityEntry, "expected explainability transcript entry for queued file_change_explain job");
+    assert.equal(explainabilityEntry?.type, "fileChange.explainability");
+    assert.ok(
+      typeof explainabilityEntry?.content === "string" &&
+        explainabilityEntry.content.trim().length > 0 &&
+        !explainabilityEntry.content.includes("Explainability failed:"),
+      "explainability transcript should provide usable explanation text instead of raw worker failure errors"
+    );
+    assert.ok(
+      typeof explainabilityEntry?.details === "string" &&
+        explainabilityEntry.details.includes(`"anchorItemId": "${explainabilityItemId}"`),
+      "explainability details should preserve anchorItemId"
+    );
+
+    const unassignSessionFromProject = await request(`/sessions/${encodeURIComponent(sessionId)}/project`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: null })
+    });
+    assert.equal(unassignSessionFromProject.status, 200);
+    assert.equal(unassignSessionFromProject.body?.projectId, null);
+
+    const projectDelete = await request(`/projects/${encodeURIComponent(projectId)}`, {
+      method: "DELETE"
+    });
+    assert.equal(projectDelete.status, 200);
 
     // Risk closure: synthetic transcript dedupe should drop synthetic entries that duplicate canonical
     // same-turn rows while preserving distinct synthetic supplemental entries.

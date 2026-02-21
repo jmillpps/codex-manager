@@ -80,6 +80,13 @@ function serializeError(error: unknown): string {
   return "unknown orchestrator error";
 }
 
+function toObjectRecord(value: unknown): Record<string, unknown> {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
+}
+
 function terminalRetentionGroupPriority(job: OrchestratorJob): number {
   if (job.state === "failed") {
     return 2;
@@ -594,8 +601,24 @@ export class OrchestratorQueue {
   }
 
   private async runJob(job: OrchestratorJob): Promise<void> {
-    const definition = this.resolveDefinition(job.type);
-    const payload = definition.payloadSchema.parse(job.payload);
+    let definition: JobDefinition<unknown, Record<string, unknown>>;
+    try {
+      definition = this.resolveDefinition(job.type);
+    } catch (error) {
+      await this.transitionToFailed(job, `unknown_job_type: ${serializeError(error)}`);
+      return;
+    }
+
+    let payload: unknown;
+    try {
+      payload = definition.payloadSchema.parse(job.payload);
+    } catch (error) {
+      const errorMessage = `invalid_payload: ${serializeError(error)}`;
+      await this.transitionToFailed(job, errorMessage);
+      await this.safeRunHook(job, () => definition.onFailed?.(this.noopContext(job), job.payload, errorMessage, job.id));
+      return;
+    }
+
     const controller = new AbortController();
     const runtime: RunningJobRuntime = {
       controller,
@@ -975,13 +998,49 @@ export class OrchestratorQueue {
     for (const rawJob of snapshot.jobs) {
       const definition = this.definitions[rawJob.type];
       if (!definition) {
+        recoveredJobs.push({
+          ...rawJob,
+          payload: toObjectRecord(rawJob.payload),
+          result: null,
+          priority: rawJob.priority === "background" ? "background" : "interactive",
+          version: Number.isInteger(rawJob.version) && rawJob.version > 0 ? rawJob.version : 1,
+          state: "failed",
+          error: `recovery_unknown_job_type:${rawJob.type}`,
+          maxAttempts: Math.max(1, rawJob.maxAttempts || this.defaultMaxAttempts),
+          startedAt: null,
+          completedAt: nowIso,
+          cancelRequestedAt: null,
+          nextAttemptAt: null,
+          runningContext: {
+            threadId: null,
+            turnId: null
+          }
+        });
         continue;
       }
 
       let payload: Record<string, unknown>;
       try {
         payload = definition.payloadSchema.parse(rawJob.payload) as Record<string, unknown>;
-      } catch {
+      } catch (error) {
+        recoveredJobs.push({
+          ...rawJob,
+          payload: toObjectRecord(rawJob.payload),
+          result: null,
+          priority: definition.priority,
+          version: definition.version,
+          state: "failed",
+          error: `recovery_invalid_payload:${serializeError(error)}`,
+          maxAttempts: Math.max(1, rawJob.maxAttempts || definition.retry.maxAttempts || this.defaultMaxAttempts),
+          startedAt: null,
+          completedAt: nowIso,
+          cancelRequestedAt: null,
+          nextAttemptAt: null,
+          runningContext: {
+            threadId: null,
+            turnId: null
+          }
+        });
         continue;
       }
 

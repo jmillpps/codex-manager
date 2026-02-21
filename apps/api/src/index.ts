@@ -14,10 +14,25 @@ import { createJobDefinitionsRegistry } from "./orchestrator-job-definitions.js"
 import {
   fileChangeExplainJobPayloadSchema,
   fileChangeExplainJobResultSchema,
+  fileChangeSupervisorInsightJobPayloadSchema,
+  fileChangeSupervisorInsightJobResultSchema,
+  riskRecheckBatchJobPayloadSchema,
+  riskRecheckBatchJobResultSchema,
+  supervisorCheckStatusSchema,
+  supervisorConfidenceSchema,
+  supervisorRiskLevelSchema,
+  turnSupervisorReviewJobPayloadSchema,
+  turnSupervisorReviewJobResultSchema,
   type FileChangeExplainJobPayload,
   type FileChangeExplainJobResult,
+  type FileChangeSupervisorInsightJobPayload,
+  type FileChangeSupervisorInsightJobResult,
+  type RiskRecheckBatchJobPayload,
+  type RiskRecheckBatchJobResult,
   suggestReplyJobPayloadSchema,
   suggestReplyJobResultSchema,
+  type TurnSupervisorReviewJobPayload,
+  type TurnSupervisorReviewJobResult,
   type SuggestReplyJobPayload,
   type SuggestReplyJobResult
 } from "./orchestrator-processors.js";
@@ -223,6 +238,39 @@ type SupplementalTranscriptStore = {
   version: 1;
   sequence: number;
   byThreadId: Record<string, Array<SupplementalTranscriptEntry>>;
+};
+
+type SupervisorRiskLevel = z.infer<typeof supervisorRiskLevelSchema>;
+type SupervisorConfidence = z.infer<typeof supervisorConfidenceSchema>;
+type SupervisorCheckStatus = z.infer<typeof supervisorCheckStatusSchema>;
+
+type SupervisorInsightRecord = {
+  threadId: string;
+  approvalId: string | null;
+  applied: boolean;
+  change: string;
+  impact: string;
+  riskLevel: SupervisorRiskLevel;
+  riskReason: string;
+  checkInstruction: string;
+  checkExpected: string;
+  confidence: SupervisorConfidence;
+  updatedAt: string;
+};
+
+type SupervisorTurnRecord = {
+  insights: Record<string, SupervisorInsightRecord>;
+  riskBatchJobId: string | null;
+  reviewJobId: string | null;
+};
+
+type SupervisorProjectLedger = {
+  byTurnId: Record<string, SupervisorTurnRecord>;
+};
+
+type SupervisorLedgerStore = {
+  version: 1;
+  byProjectId: Record<string, SupervisorProjectLedger>;
 };
 
 type DeletedSessionPayload = {
@@ -555,6 +603,7 @@ const socketThreadFilter = new Map<WebSocketLike, string | null>();
 const codexHomeAuthFilePath = env.CODEX_HOME ? path.join(env.CODEX_HOME, "auth.json") : null;
 const sessionMetadataPath = path.join(env.DATA_DIR, "session-metadata.json");
 const supplementalTranscriptPath = path.join(env.DATA_DIR, "supplemental-transcript.json");
+const supervisorLedgerPath = path.join(env.DATA_DIR, "supervisor-ledger.json");
 const orchestratorJobsPath = path.join(env.DATA_DIR, "orchestrator-jobs.json");
 const syntheticTranscriptMessageIdPattern = /^item-\d+$/i;
 const sessionMetadata = await loadSessionMetadata();
@@ -568,6 +617,11 @@ let experimentalRawEventsCapability: "unknown" | "supported" | "unsupported" = "
 let projectOrchestratorsEnsureInFlight: Promise<void> | null = null;
 let suggestionHelpersCleanupInFlight: Promise<void> | null = null;
 let orchestratorQueue: OrchestratorQueue | null = null;
+const supervisorLedgerByProject = new Map<string, Map<string, SupervisorTurnRecord>>();
+let supervisorLedgerPersistTimer: NodeJS.Timeout | null = null;
+let supervisorLedgerPersistQueued = false;
+let supervisorLedgerPersistInFlight: Promise<void> | null = null;
+await loadSupervisorLedgerStore();
 
 if (env.ORCHESTRATOR_QUEUE_ENABLED) {
   orchestratorQueue = new OrchestratorQueue({
@@ -640,6 +694,24 @@ function sourceLabel(source: unknown): string {
   }
 
   return "unknown";
+}
+
+function safePrettyJson(value: unknown): string | null {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return null;
+  }
+}
+
+function serializeError(error: unknown): string {
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return error.message.trim();
+  }
+  if (typeof error === "string" && error.trim().length > 0) {
+    return error.trim();
+  }
+  return "unknown error";
 }
 
 function coerceEpochMs(value: unknown): number | null {
@@ -1369,6 +1441,328 @@ async function flushSupplementalTranscriptPersistence(): Promise<void> {
     await supplementalTranscriptPersistInFlight;
   } finally {
     supplementalTranscriptPersistInFlight = null;
+  }
+}
+
+function normalizeSupervisorRiskLevel(value: unknown): SupervisorRiskLevel {
+  return value === "none" || value === "low" || value === "med" || value === "high" ? value : "none";
+}
+
+function normalizeSupervisorConfidence(value: unknown): SupervisorConfidence {
+  return value === "low" || value === "med" || value === "high" ? value : "low";
+}
+
+function getOrCreateSupervisorProjectLedger(projectId: string): Map<string, SupervisorTurnRecord> {
+  const existing = supervisorLedgerByProject.get(projectId);
+  if (existing) {
+    return existing;
+  }
+
+  const next = new Map<string, SupervisorTurnRecord>();
+  supervisorLedgerByProject.set(projectId, next);
+  return next;
+}
+
+function getOrCreateSupervisorTurnRecord(projectId: string, turnId: string): SupervisorTurnRecord {
+  const projectLedger = getOrCreateSupervisorProjectLedger(projectId);
+  const existing = projectLedger.get(turnId);
+  if (existing) {
+    return existing;
+  }
+
+  const next: SupervisorTurnRecord = {
+    insights: {},
+    riskBatchJobId: null,
+    reviewJobId: null
+  };
+  projectLedger.set(turnId, next);
+  return next;
+}
+
+function getSupervisorTurnRecord(projectId: string, turnId: string): SupervisorTurnRecord | null {
+  const projectLedger = supervisorLedgerByProject.get(projectId);
+  if (!projectLedger) {
+    return null;
+  }
+  return projectLedger.get(turnId) ?? null;
+}
+
+function listSupervisorInsightsForTurn(projectId: string, turnId: string): Array<{ itemId: string; insight: SupervisorInsightRecord }> {
+  const turnRecord = getSupervisorTurnRecord(projectId, turnId);
+  if (!turnRecord) {
+    return [];
+  }
+
+  return Object.entries(turnRecord.insights)
+    .map(([itemId, insight]) => ({ itemId, insight }))
+    .sort((left, right) => left.itemId.localeCompare(right.itemId));
+}
+
+function upsertSupervisorInsightLedger(input: {
+  projectId: string;
+  turnId: string;
+  itemId: string;
+  threadId: string;
+  approvalId: string | null;
+  applied: boolean;
+  insight: {
+    change: string;
+    impact: string;
+    riskLevel: SupervisorRiskLevel;
+    riskReason: string;
+    checkInstruction: string;
+    checkExpected: string;
+    confidence: SupervisorConfidence;
+  };
+}): void {
+  const turnRecord = getOrCreateSupervisorTurnRecord(input.projectId, input.turnId);
+  const nowIso = new Date().toISOString();
+  const existing = turnRecord.insights[input.itemId];
+  turnRecord.insights[input.itemId] = {
+    threadId: input.threadId,
+    approvalId: input.approvalId,
+    applied: input.applied || existing?.applied === true,
+    change: input.insight.change,
+    impact: input.insight.impact,
+    riskLevel: input.insight.riskLevel,
+    riskReason: input.insight.riskReason,
+    checkInstruction: input.insight.checkInstruction,
+    checkExpected: input.insight.checkExpected,
+    confidence: input.insight.confidence,
+    updatedAt: nowIso
+  };
+  requestSupervisorLedgerPersistence();
+}
+
+function markSupervisorInsightApplied(input: {
+  projectId: string;
+  turnId: string;
+  itemId: string;
+  threadId: string;
+}): void {
+  const turnRecord = getOrCreateSupervisorTurnRecord(input.projectId, input.turnId);
+  const existing = turnRecord.insights[input.itemId];
+  if (!existing) {
+    turnRecord.insights[input.itemId] = {
+      threadId: input.threadId,
+      approvalId: null,
+      applied: true,
+      change: "File change applied.",
+      impact: "Applied in current turn.",
+      riskLevel: "none",
+      riskReason: "No supervisor insight recorded yet.",
+      checkInstruction: "No additional check required.",
+      checkExpected: "No risk flagged.",
+      confidence: "low",
+      updatedAt: new Date().toISOString()
+    };
+    requestSupervisorLedgerPersistence();
+    return;
+  }
+
+  if (!existing.applied) {
+    existing.applied = true;
+    existing.updatedAt = new Date().toISOString();
+    requestSupervisorLedgerPersistence();
+  }
+}
+
+function setSupervisorRiskBatchJobId(projectId: string, turnId: string, jobId: string | null): void {
+  const turnRecord = getOrCreateSupervisorTurnRecord(projectId, turnId);
+  if (turnRecord.riskBatchJobId === jobId) {
+    return;
+  }
+  turnRecord.riskBatchJobId = jobId;
+  requestSupervisorLedgerPersistence();
+}
+
+function setSupervisorReviewJobId(projectId: string, turnId: string, jobId: string | null): void {
+  const turnRecord = getOrCreateSupervisorTurnRecord(projectId, turnId);
+  if (turnRecord.reviewJobId === jobId) {
+    return;
+  }
+  turnRecord.reviewJobId = jobId;
+  requestSupervisorLedgerPersistence();
+}
+
+function buildRiskRecheckCandidates(projectId: string, turnId: string): Array<{
+  itemId: string;
+  approvalId?: string;
+  riskLevel: "low" | "med" | "high";
+  riskReason: string;
+  instruction: string;
+  expected: string;
+}> {
+  return listSupervisorInsightsForTurn(projectId, turnId)
+    .filter(
+      ({ insight }) =>
+        insight.applied &&
+        (insight.riskLevel === "low" || insight.riskLevel === "med" || insight.riskLevel === "high") &&
+        insight.checkInstruction.trim().length > 0 &&
+        insight.checkExpected.trim().length > 0
+    )
+    .map(({ itemId, insight }) => ({
+      itemId,
+      ...(insight.approvalId ? { approvalId: insight.approvalId } : {}),
+      riskLevel: insight.riskLevel as "low" | "med" | "high",
+      riskReason: insight.riskReason,
+      instruction: insight.checkInstruction,
+      expected: insight.checkExpected
+    }));
+}
+
+async function loadSupervisorLedgerStore(): Promise<void> {
+  try {
+    const raw = await readFile(supervisorLedgerPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!isObjectRecord(parsed) || !isObjectRecord(parsed.byProjectId)) {
+      return;
+    }
+
+    supervisorLedgerByProject.clear();
+    for (const [projectId, rawProjectLedger] of Object.entries(parsed.byProjectId)) {
+      if (!isObjectRecord(rawProjectLedger) || !isObjectRecord(rawProjectLedger.byTurnId)) {
+        continue;
+      }
+
+      const byTurn = new Map<string, SupervisorTurnRecord>();
+      for (const [turnId, rawTurnRecord] of Object.entries(rawProjectLedger.byTurnId)) {
+        if (!isObjectRecord(rawTurnRecord)) {
+          continue;
+        }
+
+        const insights: Record<string, SupervisorInsightRecord> = {};
+        if (isObjectRecord(rawTurnRecord.insights)) {
+          for (const [itemId, rawInsight] of Object.entries(rawTurnRecord.insights)) {
+            if (!isObjectRecord(rawInsight)) {
+              continue;
+            }
+            if (typeof rawInsight.threadId !== "string" || rawInsight.threadId.trim().length === 0) {
+              continue;
+            }
+
+            const updatedAt =
+              typeof rawInsight.updatedAt === "string" && rawInsight.updatedAt.trim().length > 0
+                ? rawInsight.updatedAt
+                : new Date().toISOString();
+            const change = typeof rawInsight.change === "string" && rawInsight.change.trim().length > 0 ? rawInsight.change : "n/a";
+            const impact = typeof rawInsight.impact === "string" && rawInsight.impact.trim().length > 0 ? rawInsight.impact : "n/a";
+            const riskReason =
+              typeof rawInsight.riskReason === "string" && rawInsight.riskReason.trim().length > 0
+                ? rawInsight.riskReason
+                : "n/a";
+            const checkInstruction =
+              typeof rawInsight.checkInstruction === "string" && rawInsight.checkInstruction.trim().length > 0
+                ? rawInsight.checkInstruction
+                : "No additional check required.";
+            const checkExpected =
+              typeof rawInsight.checkExpected === "string" && rawInsight.checkExpected.trim().length > 0
+                ? rawInsight.checkExpected
+                : "No risk flagged.";
+            insights[itemId] = {
+              threadId: rawInsight.threadId.trim(),
+              approvalId: typeof rawInsight.approvalId === "string" && rawInsight.approvalId.trim().length > 0 ? rawInsight.approvalId : null,
+              applied: rawInsight.applied === true,
+              change,
+              impact,
+              riskLevel: normalizeSupervisorRiskLevel(rawInsight.riskLevel),
+              riskReason,
+              checkInstruction,
+              checkExpected,
+              confidence: normalizeSupervisorConfidence(rawInsight.confidence),
+              updatedAt
+            };
+          }
+        }
+
+        byTurn.set(turnId, {
+          insights,
+          riskBatchJobId:
+            typeof rawTurnRecord.riskBatchJobId === "string" && rawTurnRecord.riskBatchJobId.trim().length > 0
+              ? rawTurnRecord.riskBatchJobId
+              : null,
+          reviewJobId:
+            typeof rawTurnRecord.reviewJobId === "string" && rawTurnRecord.reviewJobId.trim().length > 0
+              ? rawTurnRecord.reviewJobId
+              : null
+        });
+      }
+
+      if (byTurn.size > 0) {
+        supervisorLedgerByProject.set(projectId, byTurn);
+      }
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      app.log.warn({ error }, "failed to load supervisor ledger store");
+    }
+  }
+}
+
+function scheduleSupervisorLedgerPersistence(delayMs: number): void {
+  if (supervisorLedgerPersistTimer !== null) {
+    return;
+  }
+
+  supervisorLedgerPersistTimer = setTimeout(() => {
+    supervisorLedgerPersistTimer = null;
+    void flushSupervisorLedgerPersistence();
+  }, delayMs);
+}
+
+function requestSupervisorLedgerPersistence(): void {
+  supervisorLedgerPersistQueued = true;
+  void flushSupervisorLedgerPersistence();
+}
+
+async function persistSupervisorLedgerStore(): Promise<void> {
+  const byProjectId: Record<string, SupervisorProjectLedger> = {};
+  for (const [projectId, byTurnMap] of supervisorLedgerByProject.entries()) {
+    const byTurnId: Record<string, SupervisorTurnRecord> = {};
+    for (const [turnId, turnRecord] of byTurnMap.entries()) {
+      byTurnId[turnId] = {
+        insights: turnRecord.insights,
+        riskBatchJobId: turnRecord.riskBatchJobId,
+        reviewJobId: turnRecord.reviewJobId
+      };
+    }
+    byProjectId[projectId] = {
+      byTurnId
+    };
+  }
+
+  const payload: SupervisorLedgerStore = {
+    version: 1,
+    byProjectId
+  };
+  await writeFile(supervisorLedgerPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+async function flushSupervisorLedgerPersistence(): Promise<void> {
+  if (supervisorLedgerPersistInFlight) {
+    await supervisorLedgerPersistInFlight;
+    return;
+  }
+
+  supervisorLedgerPersistInFlight = (async () => {
+    while (supervisorLedgerPersistQueued) {
+      supervisorLedgerPersistQueued = false;
+      try {
+        await persistSupervisorLedgerStore();
+      } catch (error) {
+        app.log.warn({ error }, "failed to persist supervisor ledger store");
+        supervisorLedgerPersistQueued = true;
+        scheduleSupervisorLedgerPersistence(1000);
+        break;
+      }
+    }
+  })();
+
+  try {
+    await supervisorLedgerPersistInFlight;
+  } finally {
+    supervisorLedgerPersistInFlight = null;
   }
 }
 
@@ -2397,7 +2791,78 @@ function latestAgentMessageFromTurn(turn: CodexTurn): string | null {
   return null;
 }
 
-function buildSuggestionPrompt(contextEntries: Array<TranscriptEntry>, draft?: string): string {
+function latestSupervisorContextForSuggestion(threadId: string): string | null {
+  const entries = listSupplementalTranscriptEntries(threadId);
+  let latestReview: TurnSupervisorReviewJobResult["review"] | null = null;
+  let latestRiskBatch: {
+    summary: RiskRecheckBatchJobResult["summary"];
+    checks: RiskRecheckBatchJobResult["checks"];
+  } | null = null;
+
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index]?.entry;
+    if (!entry) {
+      continue;
+    }
+
+    if (!latestReview && entry.type === "turn.supervisorReview" && entry.status === "complete") {
+      const parsed = parseDetailsObject(entry.details);
+      const candidate = parsed?.review;
+      if (candidate) {
+        try {
+          latestReview = turnSupervisorReviewJobResultSchema.shape.review.parse(candidate);
+        } catch {
+          // Ignore malformed supplemental details.
+        }
+      }
+      continue;
+    }
+
+    if (!latestRiskBatch && entry.type === "riskRecheck.batch" && entry.status === "complete") {
+      const parsed = parseDetailsObject(entry.details);
+      const summaryCandidate = parsed?.summary;
+      const checksCandidate = parsed?.checks;
+      if (summaryCandidate && checksCandidate) {
+        try {
+          latestRiskBatch = {
+            summary: riskRecheckBatchJobResultSchema.shape.summary.parse(summaryCandidate),
+            checks: riskRecheckBatchJobResultSchema.shape.checks.parse(checksCandidate)
+          };
+        } catch {
+          // Ignore malformed supplemental details.
+        }
+      }
+    }
+
+    if (latestReview && latestRiskBatch) {
+      break;
+    }
+  }
+
+  const lines: Array<string> = [];
+  if (latestReview) {
+    lines.push(`Supervisor overall change: ${latestReview.overallChange}`);
+    lines.push(`Supervisor next best action: ${latestReview.nextBestAction}`);
+    lines.push(`Supervisor guidance: ${latestReview.suggestReplyGuidance}`);
+  }
+
+  if (latestRiskBatch) {
+    const unresolvedChecks = latestRiskBatch.checks.filter((check) => check.status !== "passed");
+    if (unresolvedChecks.length > 0) {
+      const topChecks = unresolvedChecks
+        .slice(0, 4)
+        .map((check) => `${check.itemId} [${check.status}]`)
+        .join(", ");
+      lines.push(
+        `Risk recheck unresolved: ${latestRiskBatch.summary.failed} failed, ${latestRiskBatch.summary.error} error, ${latestRiskBatch.summary.timeout} timeout, ${latestRiskBatch.summary.skipped} skipped (${topChecks})`
+      );
+    }
+  }
+
+  return lines.length > 0 ? lines.join("\n") : null;
+}
+
+function buildSuggestionPrompt(contextEntries: Array<TranscriptEntry>, draft?: string, supervisorContext?: string | null): string {
   const lines = contextEntries
     .map((entry) => {
       const cleaned = entry.content
@@ -2419,6 +2884,7 @@ function buildSuggestionPrompt(contextEntries: Array<TranscriptEntry>, draft?: s
     "Return only the suggested message text that the user should send next.",
     "Do not include role labels, markdown code fences, or any explanation.",
     "Keep it concise, practical, and aligned with the latest user intent.",
+    supervisorContext ? `Supervisor context:\n${supervisorContext}\n` : "",
     "",
     "Conversation excerpt:",
     lines.join("\n"),
@@ -2565,7 +3031,8 @@ async function generateSuggestedReplyForJob(
   let helperThreadId: string | null = null;
   let targetThreadId: string | null = null;
   let fallbackReason = "unknown";
-  const suggestionPrompt = buildSuggestionPrompt(contextEntries, payload.draft);
+  const supervisorContext = latestSupervisorContextForSuggestion(payload.sessionId);
+  const suggestionPrompt = buildSuggestionPrompt(contextEntries, payload.draft, supervisorContext);
   const runSuggestionTurn = async (threadId: string): Promise<string> => {
     throwIfAborted(options?.signal);
     const turn = await supervisor.call<{ turn: { id: string } }>("turn/start", {
@@ -2704,7 +3171,14 @@ function upsertFileChangeExplainabilityEntry(
     role: "system",
     type: "fileChange.explainability",
     content: input.content,
-    details: fileChangeExplainDetails(payload.anchorItemId),
+    details: fileChangeExplainDetails(
+      payload.anchorItemId,
+      payload.approvalId
+        ? {
+            approvalId: payload.approvalId
+          }
+        : undefined
+    ),
     startedAt: now,
     ...(typeof input.completedAt === "number" ? { completedAt: input.completedAt } : {}),
     status: input.status
@@ -2713,12 +3187,10 @@ function upsertFileChangeExplainabilityEntry(
 
 function buildFileChangeExplainPrompt(payload: FileChangeExplainJobPayload): string {
   return [
-    "You are explaining a completed code diff to a developer.",
-    "Write a concise markdown explanation with these sections:",
-    "1) What changed",
-    "2) Why it likely changed",
-    "3) Potential risks or follow-up checks",
-    "Keep it factual and avoid speculation beyond reasonable inference.",
+    "You are summarizing a completed code diff for a developer.",
+    "Output only a concise markdown section titled exactly: What changed",
+    "Use short bullet points focused strictly on concrete file/content changes.",
+    "Do not include why it changed, risk analysis, recommendations, or follow-up tasks.",
     "",
     `Diff summary: ${payload.summary}`,
     "",
@@ -2728,17 +3200,180 @@ function buildFileChangeExplainPrompt(payload: FileChangeExplainJobPayload): str
 }
 
 function fallbackFileChangeExplanation(payload: FileChangeExplainJobPayload): string {
-  return [
-    "### What changed",
-    payload.summary,
-    "",
-    "### Why it likely changed",
-    "The update appears to align with the current turn intent and requested modifications.",
-    "",
-    "### Potential risks or follow-up checks",
-    "- Review touched files for edge cases.",
-    "- Run relevant tests for modified paths."
-  ].join("\n");
+  let detailsRecord: Record<string, unknown> | null = null;
+  try {
+    const parsed = JSON.parse(payload.details) as unknown;
+    if (isObjectRecord(parsed)) {
+      detailsRecord = parsed;
+    }
+  } catch {
+    detailsRecord = null;
+  }
+
+  const changes = Array.isArray(detailsRecord?.changes) ? detailsRecord.changes : [];
+  const bullets: Array<string> = [];
+  for (const change of changes) {
+    if (!isObjectRecord(change)) {
+      continue;
+    }
+
+    const path = typeof change.path === "string" && change.path.trim().length > 0 ? change.path.trim() : "file";
+    const kind = typeof change.kind === "string" && change.kind.trim().length > 0 ? change.kind.trim() : "update";
+    bullets.push(`- ${kind}: ${path}`);
+  }
+
+  if (bullets.length === 0) {
+    bullets.push(`- ${payload.summary}`);
+  }
+
+  return ["### What changed", ...bullets].join("\n");
+}
+
+function normalizeExplainableFileChanges(changes: unknown): {
+  normalizedChanges: Array<Record<string, unknown>>;
+  hasAnyDiff: boolean;
+} {
+  const inputChanges = Array.isArray(changes) ? changes : [];
+  const normalizedChanges: Array<Record<string, unknown>> = [];
+  let hasAnyDiff = false;
+  for (const change of inputChanges) {
+    if (!isObjectRecord(change)) {
+      continue;
+    }
+    const normalized: Record<string, unknown> = {};
+    if (typeof change.path === "string" && change.path.trim().length > 0) {
+      normalized.path = change.path.trim();
+    }
+    if (change.kind !== undefined) {
+      normalized.kind = change.kind;
+    }
+    if (typeof change.diff === "string" && change.diff.length > 0) {
+      normalized.diff = change.diff;
+      hasAnyDiff = true;
+    }
+    normalizedChanges.push(normalized);
+  }
+
+  return {
+    normalizedChanges,
+    hasAnyDiff
+  };
+}
+
+function parseDetailsObject(details: string | undefined): Record<string, unknown> | null {
+  if (typeof details !== "string" || details.trim().length === 0) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(details) as unknown;
+    if (isObjectRecord(parsed)) {
+      return parsed;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function extractExplainableChangesCandidate(details: Record<string, unknown> | null): unknown {
+  if (!details) {
+    return undefined;
+  }
+
+  if (Array.isArray(details.changes)) {
+    return details.changes;
+  }
+
+  if (isObjectRecord(details.item) && Array.isArray(details.item.changes)) {
+    return details.item.changes;
+  }
+
+  if (isObjectRecord(details.fileChange) && Array.isArray(details.fileChange.changes)) {
+    return details.fileChange.changes;
+  }
+
+  return undefined;
+}
+
+function normalizeNonEmptyString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function resolveExplainableChangesFromApproval(approval: PendingApprovalRecord): {
+  normalizedChanges: Array<Record<string, unknown>>;
+  itemId: string | null;
+  turnId: string | null;
+} | null {
+  const resolveCandidate = (input: {
+    changes: unknown;
+    itemId: string | null;
+    turnId: string | null;
+  }): {
+    normalizedChanges: Array<Record<string, unknown>>;
+    itemId: string | null;
+    turnId: string | null;
+  } | null => {
+    const { normalizedChanges, hasAnyDiff } = normalizeExplainableFileChanges(input.changes);
+    if (normalizedChanges.length === 0 || !hasAnyDiff) {
+      return null;
+    }
+    return {
+      normalizedChanges,
+      itemId: input.itemId,
+      turnId: input.turnId
+    };
+  };
+
+  const approvalDetails = isObjectRecord(approval.details) ? approval.details : null;
+  const directCandidate = resolveCandidate({
+    changes: extractExplainableChangesCandidate(approvalDetails),
+    itemId: normalizeNonEmptyString(approval.itemId) ?? normalizeNonEmptyString(extractItemId(approval.details)),
+    turnId: normalizeNonEmptyString(approval.turnId) ?? normalizeNonEmptyString(extractTurnId(approval.details))
+  });
+  if (directCandidate) {
+    return directCandidate;
+  }
+
+  const targetItemId = normalizeNonEmptyString(approval.itemId) ?? normalizeNonEmptyString(extractItemId(approval.details));
+  const targetTurnId = normalizeNonEmptyString(approval.turnId) ?? normalizeNonEmptyString(extractTurnId(approval.details));
+  if (!targetItemId && !targetTurnId) {
+    return null;
+  }
+
+  const supplementalEntries = listSupplementalTranscriptEntries(approval.threadId);
+  for (let index = supplementalEntries.length - 1; index >= 0; index -= 1) {
+    const entry = supplementalEntries[index]?.entry;
+    if (!entry || entry.type !== "fileChange") {
+      continue;
+    }
+
+    if (targetItemId && entry.messageId !== targetItemId) {
+      continue;
+    }
+
+    if (!targetItemId && targetTurnId && entry.turnId !== targetTurnId) {
+      continue;
+    }
+
+    const parsedDetails = parseDetailsObject(entry.details);
+    const candidate = resolveCandidate({
+      changes: extractExplainableChangesCandidate(parsedDetails),
+      itemId: normalizeNonEmptyString(entry.messageId),
+      turnId: normalizeNonEmptyString(entry.turnId)
+    });
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  return null;
 }
 
 async function generateFileChangeExplainabilityForJob(
@@ -2748,34 +3383,117 @@ async function generateFileChangeExplainabilityForJob(
     onTurnStarted?: (threadId: string, turnId: string) => void;
   }
 ): Promise<FileChangeExplainJobResult> {
-  throwIfAborted(options?.signal);
-  await ensureProjectOrchestrationSessions();
-  const orchestrationSessionId = sessionMetadata.projectOrchestratorSessionById[payload.projectId];
-  if (!orchestrationSessionId) {
-    throw new Error(`missing project orchestrator session for ${payload.projectId}`);
-  }
+  const runExplainabilityTurn = async (orchestrationSessionId: string): Promise<string> => {
+    const turn = await supervisor.call<{ turn: { id: string } }>("turn/start", {
+      threadId: orchestrationSessionId,
+      sandboxPolicy: toTurnSandboxPolicy("read-only"),
+      approvalPolicy: "never",
+      input: [
+        {
+          type: "text",
+          text: buildFileChangeExplainPrompt(payload),
+          text_elements: []
+        }
+      ]
+    });
+    options?.onTurnStarted?.(orchestrationSessionId, turn.turn.id);
+    throwIfAborted(options?.signal);
+    return waitForSuggestedReply(orchestrationSessionId, turn.turn.id, options?.signal);
+  };
 
-  const turn = await supervisor.call<{ turn: { id: string } }>("turn/start", {
-    threadId: orchestrationSessionId,
-    sandboxPolicy: toTurnSandboxPolicy("read-only"),
-    approvalPolicy: "never",
-    input: [
-      {
-        type: "text",
-        text: buildFileChangeExplainPrompt(payload),
-        text_elements: []
+  const recreateProjectOrchestrationSession = async (): Promise<string | null> => {
+    const project = sessionMetadata.projects[payload.projectId];
+    if (!project) {
+      return null;
+    }
+
+    const mappedSessionId = sessionMetadata.projectOrchestratorSessionById[payload.projectId];
+    let metadataChanged = false;
+    if (mappedSessionId) {
+      metadataChanged = setSessionProjectAssignment(mappedSessionId, null) || metadataChanged;
+      metadataChanged = setSessionTitleOverride(mappedSessionId, null) || metadataChanged;
+      if (payload.projectId in sessionMetadata.projectOrchestratorSessionById) {
+        delete sessionMetadata.projectOrchestratorSessionById[payload.projectId];
+        metadataChanged = true;
       }
-    ]
-  });
-  options?.onTurnStarted?.(orchestrationSessionId, turn.turn.id);
-  throwIfAborted(options?.signal);
+    }
 
-  const rawExplanation = await waitForSuggestedReply(orchestrationSessionId, turn.turn.id, options?.signal);
-  const explanation = rawExplanation.trim().length > 0 ? rawExplanation.trim() : fallbackFileChangeExplanation(payload);
+    if (metadataChanged) {
+      await persistSessionMetadata();
+    }
+
+    await ensureProjectOrchestrationSessions();
+    const nextSessionId = sessionMetadata.projectOrchestratorSessionById[payload.projectId];
+    return typeof nextSessionId === "string" && nextSessionId.trim().length > 0 ? nextSessionId : null;
+  };
+
+  const shouldRecoverSession = (error: unknown): boolean => {
+    if (isNoRolloutFoundError(error) || isInvalidThreadIdError(error)) {
+      return true;
+    }
+    if (!(error instanceof Error)) {
+      return false;
+    }
+    return error.message.toLowerCase().includes("missing project orchestrator session");
+  };
+
+  throwIfAborted(options?.signal);
+  try {
+    await ensureProjectOrchestrationSessions();
+    const orchestrationSessionId = sessionMetadata.projectOrchestratorSessionById[payload.projectId];
+    if (!orchestrationSessionId) {
+      throw new Error(`missing project orchestrator session for ${payload.projectId}`);
+    }
+
+    const rawExplanation = await runExplainabilityTurn(orchestrationSessionId);
+    const explanation = rawExplanation.trim().length > 0 ? rawExplanation.trim() : fallbackFileChangeExplanation(payload);
+    return {
+      messageId: fileChangeExplainMessageId(payload),
+      explanation,
+      anchorItemId: payload.anchorItemId
+    };
+  } catch (error) {
+    if (isAbortError(error) || options?.signal?.aborted) {
+      throw error;
+    }
+
+    if (shouldRecoverSession(error)) {
+      app.log.warn(
+        { error, projectId: payload.projectId, sourceSessionId: payload.sourceSessionId },
+        "file-change explainability turn failed due stale/missing orchestration session; recreating session"
+      );
+
+      try {
+        const recoveredSessionId = await recreateProjectOrchestrationSession();
+        if (recoveredSessionId) {
+          const rawExplanation = await runExplainabilityTurn(recoveredSessionId);
+          const explanation = rawExplanation.trim().length > 0 ? rawExplanation.trim() : fallbackFileChangeExplanation(payload);
+          return {
+            messageId: fileChangeExplainMessageId(payload),
+            explanation,
+            anchorItemId: payload.anchorItemId
+          };
+        }
+      } catch (recoveryError) {
+        if (isAbortError(recoveryError) || options?.signal?.aborted) {
+          throw recoveryError;
+        }
+        app.log.warn(
+          { error: recoveryError, projectId: payload.projectId, sourceSessionId: payload.sourceSessionId },
+          "file-change explainability session recovery failed; using fallback explanation"
+        );
+      }
+    } else {
+      app.log.warn(
+        { error, projectId: payload.projectId, sourceSessionId: payload.sourceSessionId },
+        "file-change explainability generation failed; using fallback explanation"
+      );
+    }
+  }
 
   return {
     messageId: fileChangeExplainMessageId(payload),
-    explanation,
+    explanation: fallbackFileChangeExplanation(payload),
     anchorItemId: payload.anchorItemId
   };
 }
@@ -2804,25 +3522,7 @@ function buildFileChangeExplainJobPayload(input: {
     return null;
   }
 
-  const normalizedChanges: Array<Record<string, unknown>> = [];
-  let hasAnyDiff = false;
-  for (const change of changes) {
-    if (!isObjectRecord(change)) {
-      continue;
-    }
-    const normalized: Record<string, unknown> = {};
-    if (typeof change.path === "string" && change.path.trim().length > 0) {
-      normalized.path = change.path.trim();
-    }
-    if (change.kind !== undefined) {
-      normalized.kind = change.kind;
-    }
-    if (typeof change.diff === "string" && change.diff.length > 0) {
-      normalized.diff = change.diff;
-      hasAnyDiff = true;
-    }
-    normalizedChanges.push(normalized);
-  }
+  const { normalizedChanges, hasAnyDiff } = normalizeExplainableFileChanges(changes);
 
   if (normalizedChanges.length === 0 || !hasAnyDiff) {
     return null;
@@ -2848,6 +3548,881 @@ function buildFileChangeExplainJobPayload(input: {
     details,
     anchorItemId: input.itemId
   };
+}
+
+function buildFileChangeExplainJobPayloadFromApproval(approval: PendingApprovalRecord): FileChangeExplainJobPayload | null {
+  if (approval.method !== "item/fileChange/requestApproval") {
+    return null;
+  }
+  if (isSystemOwnedSession(approval.threadId)) {
+    return null;
+  }
+
+  const projectId = resolveSessionProjectId(approval.threadId);
+  if (!projectId) {
+    return null;
+  }
+
+  const resolved = resolveExplainableChangesFromApproval(approval);
+  if (!resolved) {
+    return null;
+  }
+
+  const fallbackItemId = `approval-${approval.approvalId}`;
+  const itemId = normalizeNonEmptyString(approval.itemId) ?? resolved.itemId ?? fallbackItemId;
+  const turnId = normalizeNonEmptyString(approval.turnId) ?? resolved.turnId ?? "approval";
+
+  const normalizedChanges = resolved.normalizedChanges;
+  const summary = `File change awaiting approval: ${normalizedChanges.length} change${normalizedChanges.length === 1 ? "" : "s"}`;
+  const detailsRecord = {
+    status: "pending_approval",
+    changes: normalizedChanges
+  };
+  let serializedDetails = JSON.stringify(detailsRecord, null, 2);
+  if (serializedDetails.length > env.ORCHESTRATOR_DIFF_EXPLAIN_MAX_DIFF_CHARS) {
+    serializedDetails = `${serializedDetails.slice(0, env.ORCHESTRATOR_DIFF_EXPLAIN_MAX_DIFF_CHARS)}\n... (truncated)`;
+  }
+
+  return {
+    threadId: approval.threadId,
+    turnId,
+    itemId,
+    projectId,
+    sourceSessionId: approval.threadId,
+    approvalId: approval.approvalId,
+    summary,
+    details: serializedDetails,
+    anchorItemId: itemId
+  };
+}
+
+function enqueueFileChangeExplainabilityFromApproval(
+  approval: PendingApprovalRecord,
+  source: "approval_request" | "approvals_reconcile"
+): void {
+  if (approval.method !== "item/fileChange/requestApproval" || !orchestratorQueue) {
+    return;
+  }
+
+  const explainPayload = buildFileChangeExplainJobPayloadFromApproval(approval);
+  if (!explainPayload) {
+    app.log.debug(
+      {
+        threadId: approval.threadId,
+        turnId: approval.turnId,
+        itemId: approval.itemId,
+        approvalId: approval.approvalId,
+        source
+      },
+      "skipping file-change explainability enqueue; no explainable file-change diff metadata was found"
+    );
+    return;
+  }
+
+  void orchestratorQueue
+    .enqueue({
+      type: "file_change_explain",
+      projectId: explainPayload.projectId,
+      sourceSessionId: approval.threadId,
+      payload: explainPayload
+    })
+    .catch((error) => {
+      app.log.warn(
+        {
+          error,
+          threadId: approval.threadId,
+          turnId: approval.turnId,
+          itemId: approval.itemId,
+          approvalId: approval.approvalId,
+          source
+        },
+        "failed to enqueue file-change explainability job from approval request"
+      );
+    });
+}
+
+function fileChangeSupervisorInsightMessageId(payload: {
+  threadId: string;
+  turnId: string;
+  itemId: string;
+}): string {
+  return `file-change-supervisor-insight-${payload.threadId}-${payload.turnId}-${payload.itemId}`;
+}
+
+function fileChangeSupervisorInsightDetails(payload: {
+  anchorItemId: string;
+  approvalId?: string;
+  insight?: FileChangeSupervisorInsightJobResult["insight"];
+}): string {
+  return JSON.stringify(
+    {
+      anchorItemId: payload.anchorItemId,
+      ...(payload.approvalId ? { approvalId: payload.approvalId } : {}),
+      ...(payload.insight ? { insight: payload.insight } : {})
+    },
+    null,
+    2
+  );
+}
+
+function formatSupervisorInsightMarkdown(insight: FileChangeSupervisorInsightJobResult["insight"]): string {
+  return [
+    "### Supervisor Insight",
+    `- Change: ${insight.change}`,
+    `- Impact: ${insight.impact}`,
+    `- Risk: ${insight.risk.level} - ${insight.risk.reason}`,
+    `- Check: ${insight.check.instruction} (expect: ${insight.check.expected})`,
+    `- Confidence: ${insight.confidence}`
+  ].join("\n");
+}
+
+function upsertFileChangeSupervisorInsightEntry(
+  payload: FileChangeSupervisorInsightJobPayload,
+  input: {
+    status: TranscriptEntry["status"];
+    content: string;
+    insight?: FileChangeSupervisorInsightJobResult["insight"];
+    completedAt?: number;
+  }
+): void {
+  const now = Date.now();
+  upsertSupplementalTranscriptEntry(payload.threadId, {
+    messageId: fileChangeSupervisorInsightMessageId(payload),
+    turnId: payload.turnId,
+    role: "system",
+    type: "fileChange.supervisorInsight",
+    content: input.content,
+    details: fileChangeSupervisorInsightDetails({
+      anchorItemId: payload.anchorItemId,
+      approvalId: payload.approvalId,
+      insight: input.insight
+    }),
+    startedAt: now,
+    ...(typeof input.completedAt === "number" ? { completedAt: input.completedAt } : {}),
+    status: input.status
+  });
+}
+
+function safeModelJsonSlice(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    return trimmed;
+  }
+
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    return trimmed.slice(firstBrace, lastBrace + 1);
+  }
+  return trimmed;
+}
+
+function buildFileChangeSupervisorInsightPrompt(payload: FileChangeSupervisorInsightJobPayload): string {
+  return [
+    "You are a coding supervisor generating compact diff insight for transcript display.",
+    "Return JSON only with this exact schema:",
+    '{ "change": string, "impact": string, "risk": { "level": "none|low|med|high", "reason": string }, "check": { "instruction": string, "expected": string }, "confidence": "low|med|high" }',
+    "Rules:",
+    "- concise, concrete, no markdown",
+    "- one file-change event only",
+    "- check.instruction must be executable as a shell command",
+    "- do not include destructive commands",
+    "",
+    `Event status: ${payload.fileChangeStatus}`,
+    `Event summary: ${payload.summary}`,
+    "",
+    "Diff details JSON:",
+    payload.details
+  ].join("\n");
+}
+
+function firstNonEmptyPathFromDiffDetails(payload: { details: string }): string | null {
+  try {
+    const parsed = JSON.parse(payload.details) as unknown;
+    if (!isObjectRecord(parsed) || !Array.isArray(parsed.changes)) {
+      return null;
+    }
+    for (const change of parsed.changes) {
+      if (isObjectRecord(change) && typeof change.path === "string" && change.path.trim().length > 0) {
+        return change.path.trim();
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function fallbackSupervisorInsight(payload: FileChangeSupervisorInsightJobPayload): FileChangeSupervisorInsightJobResult["insight"] {
+  const firstPath = firstNonEmptyPathFromDiffDetails(payload);
+  const pathLabel = firstPath ?? "the edited file";
+  const defaultCheckInstruction = firstPath ? `sed -n '1,220p' ${JSON.stringify(firstPath)}` : "git status --short";
+  return {
+    change: payload.summary,
+    impact: payload.fileChangeStatus === "pending_approval" ? "Change is pending approval." : "Change is applied to the workspace.",
+    risk: {
+      level: "low",
+      reason: `Review ${pathLabel} to confirm expected behavior.`
+    },
+    check: {
+      instruction: defaultCheckInstruction,
+      expected: firstPath ? pathLabel : "M "
+    },
+    confidence: "low"
+  };
+}
+
+function parseSupervisorInsightFromText(rawText: string): FileChangeSupervisorInsightJobResult["insight"] | null {
+  const slice = safeModelJsonSlice(rawText);
+  if (!slice) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(slice);
+    const schema = fileChangeSupervisorInsightJobResultSchema.shape.insight;
+    return schema.parse(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function sanitizeSupervisorInsight(
+  payload: FileChangeSupervisorInsightJobPayload,
+  insight: FileChangeSupervisorInsightJobResult["insight"]
+): FileChangeSupervisorInsightJobResult["insight"] {
+  const fallback = fallbackSupervisorInsight(payload);
+  const instruction = insight.check.instruction.trim();
+  const expected = insight.check.expected.trim();
+  const normalizedInstruction = instruction.length > 0 ? instruction : fallback.check.instruction;
+  const normalizedExpected = expected.length > 0 ? expected : fallback.check.expected;
+  return {
+    change: insight.change.trim().length > 0 ? insight.change.trim() : fallback.change,
+    impact: insight.impact.trim().length > 0 ? insight.impact.trim() : fallback.impact,
+    risk: {
+      level: insight.risk.level,
+      reason: insight.risk.reason.trim().length > 0 ? insight.risk.reason.trim() : fallback.risk.reason
+    },
+    check: {
+      instruction: normalizedInstruction,
+      expected: normalizedExpected
+    },
+    confidence: insight.confidence
+  };
+}
+
+async function generateFileChangeSupervisorInsightForJob(
+  payload: FileChangeSupervisorInsightJobPayload,
+  options?: {
+    signal?: AbortSignal;
+    onTurnStarted?: (threadId: string, turnId: string) => void;
+  }
+): Promise<FileChangeSupervisorInsightJobResult> {
+  const fallback = fallbackSupervisorInsight(payload);
+  try {
+    throwIfAborted(options?.signal);
+    await ensureProjectOrchestrationSessions();
+    const orchestrationSessionId = sessionMetadata.projectOrchestratorSessionById[payload.projectId];
+    if (!orchestrationSessionId) {
+      throw new Error(`missing project orchestrator session for ${payload.projectId}`);
+    }
+
+    const turn = await supervisor.call<{ turn: { id: string } }>("turn/start", {
+      threadId: orchestrationSessionId,
+      sandboxPolicy: toTurnSandboxPolicy("read-only"),
+      approvalPolicy: "never",
+      input: [
+        {
+          type: "text",
+          text: buildFileChangeSupervisorInsightPrompt(payload),
+          text_elements: []
+        }
+      ]
+    });
+    options?.onTurnStarted?.(orchestrationSessionId, turn.turn.id);
+    throwIfAborted(options?.signal);
+
+    const raw = await waitForSuggestedReply(orchestrationSessionId, turn.turn.id, options?.signal);
+    const parsed = parseSupervisorInsightFromText(raw);
+    const insight = parsed ? sanitizeSupervisorInsight(payload, parsed) : fallback;
+    return {
+      messageId: fileChangeSupervisorInsightMessageId(payload),
+      anchorItemId: payload.anchorItemId,
+      ...(payload.approvalId ? { approvalId: payload.approvalId } : {}),
+      insight
+    };
+  } catch (error) {
+    if (isAbortError(error) || options?.signal?.aborted) {
+      throw error;
+    }
+
+    app.log.warn(
+      { error, projectId: payload.projectId, sourceSessionId: payload.sourceSessionId, itemId: payload.itemId },
+      "file-change supervisor insight generation failed; using fallback insight"
+    );
+    return {
+      messageId: fileChangeSupervisorInsightMessageId(payload),
+      anchorItemId: payload.anchorItemId,
+      ...(payload.approvalId ? { approvalId: payload.approvalId } : {}),
+      insight: fallback
+    };
+  }
+}
+
+function buildFileChangeSupervisorInsightJobPayload(input: {
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  item: CodexThreadItem;
+  sourceEvent: "item_completed";
+}): FileChangeSupervisorInsightJobPayload | null {
+  const explainPayload = buildFileChangeExplainJobPayload({
+    threadId: input.threadId,
+    turnId: input.turnId,
+    itemId: input.itemId,
+    item: input.item
+  });
+  if (!explainPayload) {
+    return null;
+  }
+
+  return {
+    ...explainPayload,
+    sourceEvent: input.sourceEvent,
+    fileChangeStatus: "completed"
+  };
+}
+
+function buildFileChangeSupervisorInsightJobPayloadFromApproval(
+  approval: PendingApprovalRecord,
+  sourceEvent: "approval_request" | "approvals_reconcile"
+): FileChangeSupervisorInsightJobPayload | null {
+  const explainPayload = buildFileChangeExplainJobPayloadFromApproval(approval);
+  if (!explainPayload) {
+    return null;
+  }
+
+  return {
+    ...explainPayload,
+    sourceEvent,
+    fileChangeStatus: "pending_approval"
+  };
+}
+
+function enqueueFileChangeSupervisorInsightFromApproval(
+  approval: PendingApprovalRecord,
+  source: "approval_request" | "approvals_reconcile"
+): void {
+  if (approval.method !== "item/fileChange/requestApproval" || !orchestratorQueue || !env.ORCHESTRATOR_SUPERVISOR_INSIGHT_ENABLED) {
+    return;
+  }
+
+  const payload = buildFileChangeSupervisorInsightJobPayloadFromApproval(approval, source);
+  if (!payload) {
+    return;
+  }
+
+  void orchestratorQueue
+    .enqueue({
+      type: "file_change_supervisor_insight",
+      projectId: payload.projectId,
+      sourceSessionId: approval.threadId,
+      payload
+    })
+    .catch((error) => {
+      app.log.warn(
+        {
+          error,
+          threadId: approval.threadId,
+          turnId: approval.turnId,
+          itemId: approval.itemId,
+          approvalId: approval.approvalId,
+          source
+        },
+        "failed to enqueue file-change supervisor insight job from approval request"
+      );
+    });
+}
+
+function riskRecheckBatchMessageId(payload: { threadId: string; turnId: string }): string {
+  return `risk-recheck-batch-${payload.threadId}-${payload.turnId}`;
+}
+
+function turnSupervisorReviewMessageId(payload: { threadId: string; turnId: string }): string {
+  return `turn-supervisor-review-${payload.threadId}-${payload.turnId}`;
+}
+
+function truncateText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+  return `${value.slice(0, maxChars)}...`;
+}
+
+function riskBatchSummaryFromChecks(
+  checks: Array<{ status: SupervisorCheckStatus }>
+): RiskRecheckBatchJobResult["summary"] {
+  const summary: RiskRecheckBatchJobResult["summary"] = {
+    total: checks.length,
+    passed: 0,
+    failed: 0,
+    error: 0,
+    timeout: 0,
+    skipped: 0
+  };
+
+  for (const check of checks) {
+    if (check.status === "passed") {
+      summary.passed += 1;
+    } else if (check.status === "failed") {
+      summary.failed += 1;
+    } else if (check.status === "error") {
+      summary.error += 1;
+    } else if (check.status === "timeout") {
+      summary.timeout += 1;
+    } else if (check.status === "skipped") {
+      summary.skipped += 1;
+    }
+  }
+
+  return summary;
+}
+
+function formatRiskRecheckBatchMarkdown(input: {
+  summary: RiskRecheckBatchJobResult["summary"];
+  checks: RiskRecheckBatchJobResult["checks"];
+}): string {
+  const header = `### Risk Recheck Results\n${input.summary.total} checks | ${input.summary.passed} passed | ${input.summary.failed} failed | ${input.summary.error} error | ${input.summary.timeout} timeout | ${input.summary.skipped} skipped`;
+  if (input.checks.length === 0) {
+    return `${header}\n- No risk checks were queued for this turn.`;
+  }
+
+  const lines = input.checks.map(
+    (check) =>
+      `- [${check.status}] ${check.itemId} (${check.riskLevel}) :: ${truncateText(check.instruction, 120)} :: ${truncateText(check.evidence, 120)}`
+  );
+  return [header, ...lines].join("\n");
+}
+
+function upsertRiskRecheckBatchEntry(
+  payload: RiskRecheckBatchJobPayload,
+  input: {
+    status: TranscriptEntry["status"];
+    content: string;
+    summary?: RiskRecheckBatchJobResult["summary"];
+    checks?: RiskRecheckBatchJobResult["checks"];
+    completedAt?: number;
+  }
+): void {
+  const now = Date.now();
+  upsertSupplementalTranscriptEntry(payload.threadId, {
+    messageId: riskRecheckBatchMessageId(payload),
+    turnId: payload.turnId,
+    role: "system",
+    type: "riskRecheck.batch",
+    content: input.content,
+    details: stringifyDetails({
+      summary: input.summary ?? null,
+      checks: input.checks ?? null
+    }),
+    startedAt: now,
+    ...(typeof input.completedAt === "number" ? { completedAt: input.completedAt } : {}),
+    status: input.status
+  });
+}
+
+function formatTurnSupervisorReviewMarkdown(review: TurnSupervisorReviewJobResult["review"]): string {
+  const riskLines =
+    review.topRisks.length > 0
+      ? review.topRisks.map((risk) => `- ${risk.itemId} (${risk.level}, ${risk.state}): ${risk.why}`)
+      : ["- No unresolved risks identified."];
+
+  return [
+    "### Turn Supervisor Review",
+    `**Overall Change**: ${review.overallChange}`,
+    "",
+    "**Top Risks**",
+    ...riskLines,
+    "",
+    `**Next Best Action**: ${review.nextBestAction}`,
+    `**Suggest Reply Guidance**: ${review.suggestReplyGuidance}`
+  ].join("\n");
+}
+
+function upsertTurnSupervisorReviewEntry(
+  payload: TurnSupervisorReviewJobPayload,
+  input: {
+    status: TranscriptEntry["status"];
+    content: string;
+    review?: TurnSupervisorReviewJobResult["review"];
+    completedAt?: number;
+  }
+): void {
+  const now = Date.now();
+  upsertSupplementalTranscriptEntry(payload.threadId, {
+    messageId: turnSupervisorReviewMessageId(payload),
+    turnId: payload.turnId,
+    role: "system",
+    type: "turn.supervisorReview",
+    content: input.content,
+    details: stringifyDetails({
+      review: input.review ?? null
+    }),
+    startedAt: now,
+    ...(typeof input.completedAt === "number" ? { completedAt: input.completedAt } : {}),
+    status: input.status
+  });
+}
+
+function isRiskCheckInstructionSafe(instruction: string): { safe: boolean; reason?: string } {
+  const normalized = instruction.trim().toLowerCase();
+  if (normalized.length === 0) {
+    return { safe: false, reason: "empty instruction" };
+  }
+  const blockedTokens = [
+    " rm ",
+    " rm-",
+    "rm -",
+    "sudo ",
+    "chmod ",
+    "chown ",
+    " mv ",
+    "mv ",
+    "git reset",
+    "git checkout",
+    "git rebase",
+    "git cherry-pick",
+    ">>",
+    " >",
+    "| sh",
+    "| bash",
+    "curl ",
+    "wget ",
+    "apt ",
+    "apk ",
+    "dnf ",
+    "yum "
+  ];
+  for (const token of blockedTokens) {
+    if (normalized.includes(token)) {
+      return { safe: false, reason: `blocked token: ${token.trim()}` };
+    }
+  }
+
+  return { safe: true };
+}
+
+function extractExitCodeFromCommandResponse(response: unknown): number | null {
+  if (!isObjectRecord(response)) {
+    return null;
+  }
+
+  const direct = response.exitCode ?? response.exit_code;
+  if (typeof direct === "number" && Number.isFinite(direct)) {
+    return direct;
+  }
+
+  if (isObjectRecord(response.result)) {
+    const nested = response.result.exitCode ?? response.result.exit_code;
+    if (typeof nested === "number" && Number.isFinite(nested)) {
+      return nested;
+    }
+  }
+
+  return null;
+}
+
+function extractCommandEvidence(response: unknown): string {
+  if (!isObjectRecord(response)) {
+    return String(response);
+  }
+
+  const candidates: Array<unknown> = [
+    response.aggregatedOutput,
+    response.output,
+    response.stdout,
+    response.stderr,
+    isObjectRecord(response.result) ? response.result.aggregatedOutput : null,
+    isObjectRecord(response.result) ? response.result.output : null,
+    isObjectRecord(response.result) ? response.result.stdout : null,
+    isObjectRecord(response.result) ? response.result.stderr : null
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return truncateText(candidate.trim(), 800);
+    }
+  }
+
+  return truncateText(safePrettyJson(response) ?? "command executed", 800);
+}
+
+async function runRiskRecheckBatchForJob(payload: RiskRecheckBatchJobPayload): Promise<RiskRecheckBatchJobResult> {
+  const maxConcurrency = Math.max(1, payload.execution?.maxConcurrency ?? env.ORCHESTRATOR_RISK_RECHECK_MAX_CONCURRENCY);
+  const perCheckTimeoutMs = Math.max(
+    1_000,
+    payload.execution?.perCheckTimeoutMs ?? env.ORCHESTRATOR_RISK_RECHECK_PER_CHECK_TIMEOUT_MS
+  );
+
+  const queued = [...payload.checks];
+  const results: Array<RiskRecheckBatchJobResult["checks"][number]> = [];
+
+  const runOne = async (check: RiskRecheckBatchJobPayload["checks"][number]): Promise<void> => {
+    const startedAt = Date.now();
+    const safety = isRiskCheckInstructionSafe(check.instruction);
+    if (!safety.safe) {
+      results.push({
+        itemId: check.itemId,
+        riskLevel: check.riskLevel,
+        instruction: check.instruction,
+        expected: check.expected,
+        status: "skipped",
+        evidence: safety.reason ?? "skipped by policy",
+        durationMs: Date.now() - startedAt
+      });
+      return;
+    }
+
+    try {
+      const cwd = sessionMetadata.projects[payload.projectId]?.workingDirectory ?? env.WORKSPACE_ROOT;
+      const response = await supervisor.call("command/exec", {
+        command: ["/bin/bash", "-lc", check.instruction],
+        cwd,
+        timeoutMs: perCheckTimeoutMs,
+        sandboxPolicy: null
+      });
+      const exitCode = extractExitCodeFromCommandResponse(response);
+      const evidence = extractCommandEvidence(response);
+      const expectedLower = check.expected.trim().toLowerCase();
+      const evidenceLower = evidence.toLowerCase();
+      const expectedMatched = expectedLower.length === 0 ? true : evidenceLower.includes(expectedLower);
+      const status: SupervisorCheckStatus = !expectedMatched || (exitCode !== null && exitCode !== 0) ? "failed" : "passed";
+
+      results.push({
+        itemId: check.itemId,
+        riskLevel: check.riskLevel,
+        instruction: check.instruction,
+        expected: check.expected,
+        status,
+        evidence,
+        durationMs: Date.now() - startedAt
+      });
+    } catch (error) {
+      const message = serializeError(error);
+      const status: SupervisorCheckStatus =
+        message.toLowerCase().includes("timed out") || message.toLowerCase().includes("timeout") ? "timeout" : "error";
+      results.push({
+        itemId: check.itemId,
+        riskLevel: check.riskLevel,
+        instruction: check.instruction,
+        expected: check.expected,
+        status,
+        evidence: truncateText(message, 800),
+        durationMs: Date.now() - startedAt
+      });
+    }
+  };
+
+  const workers = Array.from({ length: Math.min(maxConcurrency, queued.length) }).map(async () => {
+    while (queued.length > 0) {
+      const next = queued.shift();
+      if (!next) {
+        return;
+      }
+      await runOne(next);
+    }
+  });
+  await Promise.all(workers);
+
+  const summary = riskBatchSummaryFromChecks(results);
+  return {
+    messageId: riskRecheckBatchMessageId(payload),
+    turnId: payload.turnId,
+    summary,
+    checks: results
+  };
+}
+
+function deterministicTurnSupervisorReview(payload: TurnSupervisorReviewJobPayload): TurnSupervisorReviewJobResult["review"] {
+  const topRisks = payload.insights
+    .filter((insight) => insight.riskLevel !== "none")
+    .map((insight) => {
+      const check = payload.riskBatch?.checks.find((entry) => entry.itemId === insight.itemId);
+      const state: "open" | "validated" | "mitigated" =
+        check && check.status === "passed" ? "validated" : check && check.status === "skipped" ? "open" : "open";
+      return {
+        itemId: insight.itemId,
+        level: insight.riskLevel as "low" | "med" | "high",
+        why: insight.riskReason,
+        state
+      };
+    })
+    .slice(0, 6);
+
+  const overallChange = `${payload.insights.length} file-change insight${payload.insights.length === 1 ? "" : "s"} captured for this turn.`;
+  const unresolved = topRisks.filter((risk) => risk.state === "open");
+  const nextBestAction =
+    unresolved.length > 0
+      ? `Address unresolved risk checks for ${unresolved[0].itemId}, then continue with next scoped task.`
+      : "Proceed with the next scoped implementation step and keep validations green.";
+  const suggestReplyGuidance =
+    unresolved.length > 0
+      ? "Ask to resolve the highest unresolved risk first, then propose a concrete next implementation step."
+      : "Acknowledge completed checks and propose the next concrete project step.";
+
+  return {
+    overallChange,
+    topRisks,
+    nextBestAction,
+    suggestReplyGuidance
+  };
+}
+
+async function generateTurnSupervisorReviewForJob(payload: TurnSupervisorReviewJobPayload): Promise<TurnSupervisorReviewJobResult> {
+  const review = deterministicTurnSupervisorReview(payload);
+  return {
+    messageId: turnSupervisorReviewMessageId(payload),
+    turnId: payload.turnId,
+    review
+  };
+}
+
+function buildTurnSupervisorReviewPayload(input: {
+  threadId: string;
+  turnId: string;
+  projectId: string;
+  sourceSessionId: string;
+  riskBatch: RiskRecheckBatchJobResult | null;
+}): TurnSupervisorReviewJobPayload {
+  const insights = listSupervisorInsightsForTurn(input.projectId, input.turnId).map(({ itemId, insight }) => ({
+    itemId,
+    change: insight.change,
+    impact: insight.impact,
+    riskLevel: insight.riskLevel,
+    riskReason: insight.riskReason
+  }));
+  const riskBatch =
+    input.riskBatch === null
+      ? null
+      : {
+          summary: input.riskBatch.summary,
+          checks: input.riskBatch.checks.map((check) => ({
+            itemId: check.itemId,
+            status: check.status,
+            evidence: check.evidence
+          }))
+        };
+  const transcriptSnapshot = listSupplementalTranscriptEntries(input.threadId)
+    .filter((entry) => entry.entry.turnId === input.turnId)
+    .map((entry) => `${entry.entry.type}:${entry.entry.content}`)
+    .join("\n")
+    .slice(-40_000);
+
+  return {
+    threadId: input.threadId,
+    turnId: input.turnId,
+    projectId: input.projectId,
+    sourceSessionId: input.sourceSessionId,
+    insights,
+    riskBatch,
+    turnTranscriptSnapshot: transcriptSnapshot.length > 0 ? transcriptSnapshot : "No transcript snapshot available."
+  };
+}
+
+function enqueueTurnSupervisorReview(input: {
+  threadId: string;
+  turnId: string;
+  projectId: string;
+  sourceSessionId: string;
+  riskBatch: RiskRecheckBatchJobResult | null;
+  source: "turn_completed_no_risks" | "risk_recheck_terminal";
+}): void {
+  if (!orchestratorQueue || !env.ORCHESTRATOR_TURN_SUPERVISOR_REVIEW_ENABLED) {
+    return;
+  }
+
+  const payload = buildTurnSupervisorReviewPayload({
+    threadId: input.threadId,
+    turnId: input.turnId,
+    projectId: input.projectId,
+    sourceSessionId: input.sourceSessionId,
+    riskBatch: input.riskBatch
+  });
+
+  void orchestratorQueue
+    .enqueue({
+      type: "turn_supervisor_review",
+      projectId: input.projectId,
+      sourceSessionId: input.sourceSessionId,
+      payload
+    })
+    .then((queued) => {
+      setSupervisorReviewJobId(input.projectId, input.turnId, queued.job.id);
+    })
+    .catch((error) => {
+      app.log.warn(
+        { error, threadId: input.threadId, turnId: input.turnId, projectId: input.projectId, source: input.source },
+        "failed to enqueue turn supervisor review job"
+      );
+    });
+}
+
+function enqueueTurnSupervisorPostProcessing(threadId: string, turnId: string): void {
+  if (!orchestratorQueue) {
+    return;
+  }
+  const projectId = resolveSessionProjectId(threadId);
+  if (!projectId) {
+    return;
+  }
+
+  const candidates = buildRiskRecheckCandidates(projectId, turnId);
+  if (candidates.length === 0 || !env.ORCHESTRATOR_RISK_RECHECK_ENABLED) {
+    enqueueTurnSupervisorReview({
+      threadId,
+      turnId,
+      projectId,
+      sourceSessionId: threadId,
+      riskBatch: null,
+      source: "turn_completed_no_risks"
+    });
+    return;
+  }
+
+  const payload: RiskRecheckBatchJobPayload = {
+    threadId,
+    turnId,
+    projectId,
+    sourceSessionId: threadId,
+    checks: candidates,
+    execution: {
+      maxConcurrency: env.ORCHESTRATOR_RISK_RECHECK_MAX_CONCURRENCY,
+      perCheckTimeoutMs: env.ORCHESTRATOR_RISK_RECHECK_PER_CHECK_TIMEOUT_MS
+    }
+  };
+
+  void orchestratorQueue
+    .enqueue({
+      type: "risk_recheck_batch",
+      projectId,
+      sourceSessionId: threadId,
+      payload
+    })
+    .then((queued) => {
+      setSupervisorRiskBatchJobId(projectId, turnId, queued.job.id);
+    })
+    .catch((error) => {
+      app.log.warn({ error, threadId, turnId, projectId }, "failed to enqueue risk recheck batch job");
+      enqueueTurnSupervisorReview({
+        threadId,
+        turnId,
+        projectId,
+        sourceSessionId: threadId,
+        riskBatch: null,
+        source: "turn_completed_no_risks"
+      });
+    });
 }
 
 async function ensureSuggestionThread(sessionId: string, sourceThread: CodexThread, model?: string): Promise<string> {
@@ -2976,6 +4551,36 @@ function extractTurnId(params: unknown): string | null {
 
     if (typeof params.turn.turn_id === "string" && params.turn.turn_id.trim().length > 0) {
       return params.turn.turn_id;
+    }
+  }
+
+  if (isObjectRecord(params.item)) {
+    if (typeof params.item.turnId === "string" && params.item.turnId.trim().length > 0) {
+      return params.item.turnId;
+    }
+
+    if (typeof params.item.turn_id === "string" && params.item.turn_id.trim().length > 0) {
+      return params.item.turn_id;
+    }
+
+    if (typeof params.item.parentTurnId === "string" && params.item.parentTurnId.trim().length > 0) {
+      return params.item.parentTurnId;
+    }
+
+    if (typeof params.item.parent_turn_id === "string" && params.item.parent_turn_id.trim().length > 0) {
+      return params.item.parent_turn_id;
+    }
+
+    if (isObjectRecord(params.item.turn)) {
+      if (typeof params.item.turn.id === "string" && params.item.turn.id.trim().length > 0) {
+        return params.item.turn.id;
+      }
+      if (typeof params.item.turn.turnId === "string" && params.item.turn.turnId.trim().length > 0) {
+        return params.item.turn.turnId;
+      }
+      if (typeof params.item.turn.turn_id === "string" && params.item.turn.turn_id.trim().length > 0) {
+        return params.item.turn.turn_id;
+      }
     }
   }
 
@@ -4158,6 +5763,280 @@ function buildOrchestratorJobDefinitions(): JobDefinitionsMap {
     });
   }
 
+  if (env.ORCHESTRATOR_SUPERVISOR_INSIGHT_ENABLED) {
+    definitions.push({
+      type: "file_change_supervisor_insight",
+      version: 1,
+      priority: "interactive",
+      payloadSchema: fileChangeSupervisorInsightJobPayloadSchema,
+      resultSchema: fileChangeSupervisorInsightJobResultSchema,
+      dedupe: {
+        key: (payload: FileChangeSupervisorInsightJobPayload) =>
+          `${payload.projectId}:${payload.threadId}:${payload.turnId}:${payload.itemId}:supervisor_insight:v1`,
+        mode: "drop_duplicate"
+      },
+      retry: {
+        maxAttempts: env.ORCHESTRATOR_QUEUE_MAX_ATTEMPTS,
+        classify: (error: unknown) => {
+          const message =
+            error instanceof Error
+              ? error.message.toLowerCase()
+              : typeof error === "string"
+                ? error.toLowerCase()
+                : "";
+          if (message.includes("timed out") || message.includes("timeout") || message.includes("temporarily unavailable")) {
+            return "retryable";
+          }
+          return "fatal";
+        },
+        baseDelayMs: 1_000,
+        maxDelayMs: 10_000,
+        jitter: true
+      },
+      timeoutMs: Math.max(env.ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS, 90_000),
+      cancel: {
+        strategy: "interrupt_turn",
+        gracefulWaitMs: 1_500
+      },
+      onQueued: async (_ctx: unknown, payload: FileChangeSupervisorInsightJobPayload) => {
+        upsertFileChangeSupervisorInsightEntry(payload, {
+          status: "streaming",
+          content: "Supervisor insight queued..."
+        });
+      },
+      onStarted: async (_ctx: unknown, payload: FileChangeSupervisorInsightJobPayload) => {
+        upsertFileChangeSupervisorInsightEntry(payload, {
+          status: "streaming",
+          content: "Supervisor analyzing diff..."
+        });
+      },
+      onCompleted: async (
+        _ctx: unknown,
+        payload: FileChangeSupervisorInsightJobPayload,
+        result: FileChangeSupervisorInsightJobResult
+      ) => {
+        upsertFileChangeSupervisorInsightEntry(payload, {
+          status: "complete",
+          content: formatSupervisorInsightMarkdown(result.insight),
+          insight: result.insight,
+          completedAt: Date.now()
+        });
+        upsertSupervisorInsightLedger({
+          projectId: payload.projectId,
+          turnId: payload.turnId,
+          itemId: payload.itemId,
+          threadId: payload.threadId,
+          approvalId: payload.approvalId ?? null,
+          applied: payload.fileChangeStatus === "completed",
+          insight: {
+            change: result.insight.change,
+            impact: result.insight.impact,
+            riskLevel: result.insight.risk.level,
+            riskReason: result.insight.risk.reason,
+            checkInstruction: result.insight.check.instruction,
+            checkExpected: result.insight.check.expected,
+            confidence: result.insight.confidence
+          }
+        });
+      },
+      onFailed: async (_ctx: unknown, payload: FileChangeSupervisorInsightJobPayload, error: string) => {
+        upsertFileChangeSupervisorInsightEntry(payload, {
+          status: "error",
+          content: `Supervisor insight failed: ${error}`,
+          completedAt: Date.now()
+        });
+      },
+      onCanceled: async (_ctx: unknown, payload: FileChangeSupervisorInsightJobPayload) => {
+        upsertFileChangeSupervisorInsightEntry(payload, {
+          status: "canceled",
+          content: "Supervisor insight canceled before completion.",
+          completedAt: Date.now()
+        });
+      },
+      run: async (ctx: JobRunContext, payload: FileChangeSupervisorInsightJobPayload) =>
+        generateFileChangeSupervisorInsightForJob(payload, {
+          signal: ctx.signal,
+          onTurnStarted: (threadId, turnId) => {
+            ctx.setRunningContext({ threadId, turnId });
+          }
+        })
+    });
+  }
+
+  if (env.ORCHESTRATOR_RISK_RECHECK_ENABLED) {
+    definitions.push({
+      type: "risk_recheck_batch",
+      version: 1,
+      priority: "background",
+      payloadSchema: riskRecheckBatchJobPayloadSchema,
+      resultSchema: riskRecheckBatchJobResultSchema,
+      dedupe: {
+        key: (payload: RiskRecheckBatchJobPayload) =>
+          `${payload.projectId}:${payload.threadId}:${payload.turnId}:risk_recheck_batch:v1`,
+        mode: "single_flight"
+      },
+      retry: {
+        maxAttempts: env.ORCHESTRATOR_QUEUE_MAX_ATTEMPTS,
+        classify: (error: unknown) => {
+          const message =
+            error instanceof Error
+              ? error.message.toLowerCase()
+              : typeof error === "string"
+                ? error.toLowerCase()
+                : "";
+          if (message.includes("timed out") || message.includes("timeout") || message.includes("temporarily unavailable")) {
+            return "retryable";
+          }
+          return "fatal";
+        },
+        baseDelayMs: 2_000,
+        maxDelayMs: 12_000,
+        jitter: true
+      },
+      timeoutMs: Math.max(env.ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS, 300_000),
+      cancel: {
+        strategy: "interrupt_turn",
+        gracefulWaitMs: 1_500
+      },
+      onQueued: async (_ctx: unknown, payload: RiskRecheckBatchJobPayload) => {
+        upsertRiskRecheckBatchEntry(payload, {
+          status: "streaming",
+          content: "Queued risk recheck analysis..."
+        });
+      },
+      onStarted: async (_ctx: unknown, payload: RiskRecheckBatchJobPayload) => {
+        upsertRiskRecheckBatchEntry(payload, {
+          status: "streaming",
+          content: "Running queued risk checks..."
+        });
+      },
+      onCompleted: async (_ctx: unknown, payload: RiskRecheckBatchJobPayload, result: RiskRecheckBatchJobResult) => {
+        upsertRiskRecheckBatchEntry(payload, {
+          status: "complete",
+          content: formatRiskRecheckBatchMarkdown({
+            summary: result.summary,
+            checks: result.checks
+          }),
+          summary: result.summary,
+          checks: result.checks,
+          completedAt: Date.now()
+        });
+        enqueueTurnSupervisorReview({
+          threadId: payload.threadId,
+          turnId: payload.turnId,
+          projectId: payload.projectId,
+          sourceSessionId: payload.sourceSessionId,
+          riskBatch: result,
+          source: "risk_recheck_terminal"
+        });
+      },
+      onFailed: async (_ctx: unknown, payload: RiskRecheckBatchJobPayload, error: string) => {
+        upsertRiskRecheckBatchEntry(payload, {
+          status: "error",
+          content: `Risk recheck failed: ${error}`,
+          completedAt: Date.now()
+        });
+        enqueueTurnSupervisorReview({
+          threadId: payload.threadId,
+          turnId: payload.turnId,
+          projectId: payload.projectId,
+          sourceSessionId: payload.sourceSessionId,
+          riskBatch: null,
+          source: "risk_recheck_terminal"
+        });
+      },
+      onCanceled: async (_ctx: unknown, payload: RiskRecheckBatchJobPayload) => {
+        upsertRiskRecheckBatchEntry(payload, {
+          status: "canceled",
+          content: "Risk recheck canceled before completion.",
+          completedAt: Date.now()
+        });
+        enqueueTurnSupervisorReview({
+          threadId: payload.threadId,
+          turnId: payload.turnId,
+          projectId: payload.projectId,
+          sourceSessionId: payload.sourceSessionId,
+          riskBatch: null,
+          source: "risk_recheck_terminal"
+        });
+      },
+      run: async (_ctx: JobRunContext, payload: RiskRecheckBatchJobPayload) => runRiskRecheckBatchForJob(payload)
+    });
+  }
+
+  if (env.ORCHESTRATOR_TURN_SUPERVISOR_REVIEW_ENABLED) {
+    definitions.push({
+      type: "turn_supervisor_review",
+      version: 1,
+      priority: "background",
+      payloadSchema: turnSupervisorReviewJobPayloadSchema,
+      resultSchema: turnSupervisorReviewJobResultSchema,
+      dedupe: {
+        key: (payload: TurnSupervisorReviewJobPayload) =>
+          `${payload.projectId}:${payload.threadId}:${payload.turnId}:turn_supervisor_review:v1`,
+        mode: "single_flight"
+      },
+      retry: {
+        maxAttempts: env.ORCHESTRATOR_QUEUE_MAX_ATTEMPTS,
+        classify: (error: unknown) => {
+          const message =
+            error instanceof Error
+              ? error.message.toLowerCase()
+              : typeof error === "string"
+                ? error.toLowerCase()
+                : "";
+          if (message.includes("timed out") || message.includes("timeout") || message.includes("temporarily unavailable")) {
+            return "retryable";
+          }
+          return "fatal";
+        },
+        baseDelayMs: 1_000,
+        maxDelayMs: 8_000,
+        jitter: true
+      },
+      timeoutMs: Math.max(env.ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS, 120_000),
+      cancel: {
+        strategy: "mark_canceled",
+        gracefulWaitMs: 0
+      },
+      onQueued: async (_ctx: unknown, payload: TurnSupervisorReviewJobPayload) => {
+        upsertTurnSupervisorReviewEntry(payload, {
+          status: "streaming",
+          content: "Queued supervisor turn review..."
+        });
+      },
+      onStarted: async (_ctx: unknown, payload: TurnSupervisorReviewJobPayload) => {
+        upsertTurnSupervisorReviewEntry(payload, {
+          status: "streaming",
+          content: "Compiling supervisor turn review..."
+        });
+      },
+      onCompleted: async (_ctx: unknown, payload: TurnSupervisorReviewJobPayload, result: TurnSupervisorReviewJobResult) => {
+        upsertTurnSupervisorReviewEntry(payload, {
+          status: "complete",
+          content: formatTurnSupervisorReviewMarkdown(result.review),
+          review: result.review,
+          completedAt: Date.now()
+        });
+      },
+      onFailed: async (_ctx: unknown, payload: TurnSupervisorReviewJobPayload, error: string) => {
+        upsertTurnSupervisorReviewEntry(payload, {
+          status: "error",
+          content: `Turn supervisor review failed: ${error}`,
+          completedAt: Date.now()
+        });
+      },
+      onCanceled: async (_ctx: unknown, payload: TurnSupervisorReviewJobPayload) => {
+        upsertTurnSupervisorReviewEntry(payload, {
+          status: "canceled",
+          content: "Turn supervisor review canceled before completion.",
+          completedAt: Date.now()
+        });
+      },
+      run: async (_ctx: JobRunContext, payload: TurnSupervisorReviewJobPayload) => generateTurnSupervisorReviewForJob(payload)
+    });
+  }
+
   return createJobDefinitionsRegistry(definitions);
 }
 
@@ -4339,17 +6218,20 @@ function toTurnSandboxPolicy(
   return { type: "dangerFullAccess" };
 }
 
-function listPendingApprovalsByThread(threadId: string): Array<PendingApproval> {
-  const approvals: Array<PendingApproval> = [];
-
+function listPendingApprovalRecordsByThread(threadId: string): Array<PendingApprovalRecord> {
+  const approvals: Array<PendingApprovalRecord> = [];
   for (const approval of pendingApprovals.values()) {
     if (approval.threadId === threadId && approval.status === "pending") {
-      approvals.push(toPublicApproval(approval));
+      approvals.push(approval);
     }
   }
 
   approvals.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   return approvals;
+}
+
+function listPendingApprovalsByThread(threadId: string): Array<PendingApproval> {
+  return listPendingApprovalRecordsByThread(threadId).map((approval) => toPublicApproval(approval));
 }
 
 function clearPendingApprovalsForTurn(threadId: string, turnId: string): void {
@@ -4447,6 +6329,10 @@ supervisor.on("notification", (notification: JsonRpcNotification) => {
 
         clearPendingApprovalsForTurn(params.threadId, params.turn.id);
         clearPendingToolInputsForTurn(params.threadId, params.turn.id);
+
+        if (notification.method === "turn/completed") {
+          enqueueTurnSupervisorPostProcessing(params.threadId, params.turn.id);
+        }
       }
     }
   }
@@ -4508,6 +6394,41 @@ supervisor.on("notification", (notification: JsonRpcNotification) => {
                 itemId: item.id
               },
               "failed to enqueue file-change explainability job"
+            );
+          });
+      }
+
+      const supervisorPayload = buildFileChangeSupervisorInsightJobPayload({
+        threadId,
+        turnId,
+        itemId: item.id,
+        item,
+        sourceEvent: "item_completed"
+      });
+      if (supervisorPayload && env.ORCHESTRATOR_SUPERVISOR_INSIGHT_ENABLED) {
+        markSupervisorInsightApplied({
+          projectId: supervisorPayload.projectId,
+          turnId: supervisorPayload.turnId,
+          itemId: supervisorPayload.itemId,
+          threadId: supervisorPayload.threadId
+        });
+
+        void orchestratorQueue
+          .enqueue({
+            type: "file_change_supervisor_insight",
+            projectId: supervisorPayload.projectId,
+            sourceSessionId: threadId,
+            payload: supervisorPayload
+          })
+          .catch((error) => {
+            app.log.warn(
+              {
+                error,
+                threadId,
+                turnId,
+                itemId: item.id
+              },
+              "failed to enqueue file-change supervisor insight job"
             );
           });
       }
@@ -4599,6 +6520,9 @@ supervisor.on("serverRequest", (serverRequest: JsonRpcServerRequest) => {
     pendingApprovals.set(approval.approvalId, approval);
     upsertSupplementalTranscriptEntry(approval.threadId, approvalToTranscriptEntry(approval));
     publishToSockets("approval", toPublicApproval(approval), approval.threadId);
+    enqueueFileChangeExplainabilityFromApproval(approval, "approval_request");
+    enqueueFileChangeSupervisorInsightFromApproval(approval, "approval_request");
+
     return;
   }
 
@@ -6161,8 +8085,14 @@ app.get("/api/sessions/:sessionId/approvals", async (request, reply) => {
     return systemSessionPayload(params.sessionId);
   }
 
+  const approvals = listPendingApprovalRecordsByThread(params.sessionId);
+  for (const approval of approvals) {
+    enqueueFileChangeExplainabilityFromApproval(approval, "approvals_reconcile");
+    enqueueFileChangeSupervisorInsightFromApproval(approval, "approvals_reconcile");
+  }
+
   return {
-    data: listPendingApprovalsByThread(params.sessionId)
+    data: approvals.map((approval) => toPublicApproval(approval))
   };
 });
 
@@ -6744,6 +8674,11 @@ app.addHook("onClose", async () => {
     supplementalTranscriptPersistTimer = null;
   }
   await flushSupplementalTranscriptPersistence();
+  if (supervisorLedgerPersistTimer !== null) {
+    clearTimeout(supervisorLedgerPersistTimer);
+    supervisorLedgerPersistTimer = null;
+  }
+  await flushSupervisorLedgerPersistence();
 
   for (const socket of sockets) {
     try {

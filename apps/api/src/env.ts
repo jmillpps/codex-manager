@@ -29,7 +29,12 @@ const envSchema = z.object({
   ORCHESTRATOR_SUGGEST_REPLY_ALLOW_HELPER_FALLBACK: z.enum(["true", "false"]).default("false"),
   ORCHESTRATOR_SUGGEST_REPLY_WAIT_MS: z.coerce.number().int().positive().default(12_000),
   ORCHESTRATOR_DIFF_EXPLAIN_ENABLED: z.enum(["true", "false"]).default("true"),
-  ORCHESTRATOR_DIFF_EXPLAIN_MAX_DIFF_CHARS: z.coerce.number().int().positive().default(50_000)
+  ORCHESTRATOR_DIFF_EXPLAIN_MAX_DIFF_CHARS: z.coerce.number().int().positive().default(50_000),
+  ORCHESTRATOR_SUPERVISOR_INSIGHT_ENABLED: z.enum(["true", "false"]).default("true"),
+  ORCHESTRATOR_RISK_RECHECK_ENABLED: z.enum(["true", "false"]).default("true"),
+  ORCHESTRATOR_TURN_SUPERVISOR_REVIEW_ENABLED: z.enum(["true", "false"]).default("true"),
+  ORCHESTRATOR_RISK_RECHECK_MAX_CONCURRENCY: z.coerce.number().int().positive().default(3),
+  ORCHESTRATOR_RISK_RECHECK_PER_CHECK_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000)
 });
 
 const parsed = envSchema.parse(process.env);
@@ -64,6 +69,9 @@ export const env = {
   ORCHESTRATOR_SUGGEST_REPLY_ENABLED: parsed.ORCHESTRATOR_SUGGEST_REPLY_ENABLED === "true",
   ORCHESTRATOR_SUGGEST_REPLY_ALLOW_HELPER_FALLBACK: parsed.ORCHESTRATOR_SUGGEST_REPLY_ALLOW_HELPER_FALLBACK === "true",
   ORCHESTRATOR_DIFF_EXPLAIN_ENABLED: parsed.ORCHESTRATOR_DIFF_EXPLAIN_ENABLED === "true",
+  ORCHESTRATOR_SUPERVISOR_INSIGHT_ENABLED: parsed.ORCHESTRATOR_SUPERVISOR_INSIGHT_ENABLED === "true",
+  ORCHESTRATOR_RISK_RECHECK_ENABLED: parsed.ORCHESTRATOR_RISK_RECHECK_ENABLED === "true",
+  ORCHESTRATOR_TURN_SUPERVISOR_REVIEW_ENABLED: parsed.ORCHESTRATOR_TURN_SUPERVISOR_REVIEW_ENABLED === "true",
   WORKSPACE_ROOT: workspaceRoot,
   DATA_DIR: resolveFromWorkspaceRoot(parsed.DATA_DIR),
   CODEX_HOME: parsed.CODEX_HOME ? resolveFromWorkspaceRoot(parsed.CODEX_HOME) : undefined

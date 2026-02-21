@@ -1862,6 +1862,24 @@ body {
   margin-top: 0.42rem;
 }
 
+.thought-diff-explain-bundle {
+  margin-top: 0.42rem;
+  border: 1px solid #dce4f0;
+  border-radius: 9px;
+  background: #f8fafd;
+  padding: 0.45rem 0.5rem;
+}
+
+.thought-diff-explain-section + .thought-diff-explain-section {
+  margin-top: 0.46rem;
+  padding-top: 0.46rem;
+  border-top: 1px solid #e2e8f0;
+}
+
+.thought-diff-explain-bundle > .thought-row-meta:first-child {
+  margin-top: 0;
+}
+
 .thought-diff-block {
   margin: 0.26rem 0 0;
   border: 1px solid #2a3345;

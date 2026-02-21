@@ -676,3 +676,286 @@ test("stop force-cancels non-cooperative jobs without hanging shutdown", async (
   assert.equal(terminal?.state, "canceled");
   assert.ok(terminal?.error === "shutdown_timeout" || terminal?.error === "interrupt_timeout");
 });
+
+test("queued jobs with invalid payload fail terminal instead of retrying forever", async () => {
+  const store = new InMemoryStore({
+    version: 1,
+    jobs: [
+      {
+        id: "job-invalid-payload",
+        type: "payload_strict",
+        version: 1,
+        projectId: "p1",
+        sourceSessionId: "s1",
+        priority: "interactive",
+        state: "queued",
+        dedupeKey: null,
+        payload: {},
+        result: null,
+        error: null,
+        attempts: 0,
+        maxAttempts: 2,
+        createdAt: new Date(Date.now() - 5_000).toISOString(),
+        startedAt: null,
+        completedAt: null,
+        cancelRequestedAt: null,
+        nextAttemptAt: null,
+        lastAttemptAt: null,
+        runningContext: {
+          threadId: null,
+          turnId: null
+        }
+      }
+    ]
+  });
+
+  const definitions: JobDefinitionsMap = {
+    payload_strict: {
+      type: "payload_strict",
+      version: 1,
+      priority: "interactive",
+      payloadSchema: z.object({ key: z.string().min(1) }),
+      resultSchema: z.object({ ok: z.boolean() }),
+      dedupe: {
+        key: () => null,
+        mode: "none"
+      },
+      retry: {
+        maxAttempts: 2,
+        classify: () => "retryable",
+        baseDelayMs: 10,
+        maxDelayMs: 50,
+        jitter: false
+      },
+      timeoutMs: 1_000,
+      cancel: {
+        strategy: "mark_canceled",
+        gracefulWaitMs: 0
+      },
+      run: async () => ({ ok: true })
+    }
+  };
+
+  const { queue } = createQueue({
+    definitions,
+    store,
+    globalConcurrency: 1
+  });
+  await queue.start();
+
+  const terminal = await queue.waitForTerminal("job-invalid-payload", 2_000);
+  assert.equal(terminal?.state, "failed");
+  assert.ok(typeof terminal?.error === "string" && terminal.error.includes("invalid_payload"));
+
+  await queue.stop();
+});
+
+test("recovery preserves unknown job types as explicit terminal failures", async () => {
+  const store = new InMemoryStore({
+    version: 1,
+    jobs: [
+      {
+        id: "job-unknown-type",
+        type: "removed_job_type",
+        version: 1,
+        projectId: "p1",
+        sourceSessionId: "s1",
+        priority: "interactive",
+        state: "queued",
+        dedupeKey: null,
+        payload: { key: "value" },
+        result: null,
+        error: null,
+        attempts: 0,
+        maxAttempts: 2,
+        createdAt: new Date(Date.now() - 5_000).toISOString(),
+        startedAt: null,
+        completedAt: null,
+        cancelRequestedAt: null,
+        nextAttemptAt: null,
+        lastAttemptAt: null,
+        runningContext: {
+          threadId: null,
+          turnId: null
+        }
+      }
+    ]
+  });
+
+  const definitions: JobDefinitionsMap = {
+    known: {
+      type: "known",
+      version: 1,
+      priority: "interactive",
+      payloadSchema: z.object({ key: z.string() }),
+      resultSchema: z.object({ ok: z.boolean() }),
+      dedupe: {
+        key: () => null,
+        mode: "none"
+      },
+      retry: {
+        maxAttempts: 1,
+        classify: () => "fatal",
+        baseDelayMs: 10,
+        maxDelayMs: 20,
+        jitter: false
+      },
+      timeoutMs: 1_000,
+      cancel: {
+        strategy: "mark_canceled",
+        gracefulWaitMs: 0
+      },
+      run: async () => ({ ok: true })
+    }
+  };
+
+  const { queue } = createQueue({
+    definitions,
+    store,
+    globalConcurrency: 1
+  });
+  await queue.start();
+
+  const recovered = queue.get("job-unknown-type");
+  assert.equal(recovered?.state, "failed");
+  assert.equal(recovered?.error, "recovery_unknown_job_type:removed_job_type");
+
+  await queue.stop();
+});
+
+test("recovery preserves invalid payload jobs as explicit terminal failures", async () => {
+  const store = new InMemoryStore({
+    version: 1,
+    jobs: [
+      {
+        id: "job-invalid-recovery-payload",
+        type: "strict_recovery",
+        version: 1,
+        projectId: "p1",
+        sourceSessionId: "s1",
+        priority: "interactive",
+        state: "queued",
+        dedupeKey: null,
+        payload: {},
+        result: null,
+        error: null,
+        attempts: 0,
+        maxAttempts: 2,
+        createdAt: new Date(Date.now() - 5_000).toISOString(),
+        startedAt: null,
+        completedAt: null,
+        cancelRequestedAt: null,
+        nextAttemptAt: null,
+        lastAttemptAt: null,
+        runningContext: {
+          threadId: null,
+          turnId: null
+        }
+      }
+    ]
+  });
+
+  const definitions: JobDefinitionsMap = {
+    strict_recovery: {
+      type: "strict_recovery",
+      version: 1,
+      priority: "interactive",
+      payloadSchema: z.object({ key: z.string().min(1) }),
+      resultSchema: z.object({ ok: z.boolean() }),
+      dedupe: {
+        key: () => null,
+        mode: "none"
+      },
+      retry: {
+        maxAttempts: 1,
+        classify: () => "fatal",
+        baseDelayMs: 10,
+        maxDelayMs: 20,
+        jitter: false
+      },
+      timeoutMs: 1_000,
+      cancel: {
+        strategy: "mark_canceled",
+        gracefulWaitMs: 0
+      },
+      run: async () => ({ ok: true })
+    }
+  };
+
+  const { queue } = createQueue({
+    definitions,
+    store,
+    globalConcurrency: 1
+  });
+  await queue.start();
+
+  const recovered = queue.get("job-invalid-recovery-payload");
+  assert.equal(recovered?.state, "failed");
+  assert.ok(typeof recovered?.error === "string" && recovered.error.startsWith("recovery_invalid_payload:"));
+
+  await queue.stop();
+});
+
+test("retryable failures honor backoff and eventually complete", async () => {
+  const runTimestamps: Array<number> = [];
+  let invocationCount = 0;
+
+  const definitions: JobDefinitionsMap = {
+    retry_job: {
+      type: "retry_job",
+      version: 1,
+      priority: "interactive",
+      payloadSchema: z.object({ key: z.string() }),
+      resultSchema: z.object({ ok: z.boolean() }),
+      dedupe: {
+        key: () => null,
+        mode: "none"
+      },
+      retry: {
+        maxAttempts: 3,
+        classify: (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          return message.includes("transient") ? "retryable" : "fatal";
+        },
+        baseDelayMs: 120,
+        maxDelayMs: 200,
+        jitter: false
+      },
+      timeoutMs: 1_000,
+      cancel: {
+        strategy: "mark_canceled",
+        gracefulWaitMs: 0
+      },
+      run: async () => {
+        invocationCount += 1;
+        runTimestamps.push(Date.now());
+        if (invocationCount === 1) {
+          throw new Error("transient network hiccup");
+        }
+        return { ok: true };
+      }
+    }
+  };
+
+  const { queue } = createQueue({
+    definitions,
+    globalConcurrency: 1
+  });
+  await queue.start();
+
+  const enqueued = await queue.enqueue({
+    type: "retry_job",
+    projectId: "p1",
+    sourceSessionId: "s1",
+    payload: { key: "x" }
+  });
+
+  const terminal = await queue.waitForTerminal(enqueued.job.id, 5_000);
+  assert.equal(terminal?.state, "completed");
+  assert.equal(invocationCount, 2);
+  assert.equal(runTimestamps.length, 2);
+  assert.ok(runTimestamps[1] - runTimestamps[0] >= 90, "retry should be delayed by backoff");
+  assert.equal(terminal?.attempts, 2);
+
+  await queue.stop();
+});

@@ -1809,6 +1809,30 @@ export function extractMarkdownSectionHeader(content: string): { title: string; 
   };
 }
 
+function normalizeSectionComparable(value: string): string {
+  return value.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function dedupeSectionRemainder(title: string, remainder: string | null): string | null {
+  if (!remainder) {
+    return null;
+  }
+
+  const lines = remainder
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length === 0) {
+    return null;
+  }
+
+  if (normalizeSectionComparable(lines[0]) === normalizeSectionComparable(title)) {
+    lines.shift();
+  }
+
+  return lines.length > 0 ? lines.join("\n") : null;
+}
+
 function formatElapsedLabel(durationMs: number): string {
   if (durationMs < 1000) {
     return "<1s";
@@ -2992,6 +3016,7 @@ export function App() {
       if (!response.ok) {
         if (await handleDeletedSessionResponse(response, sessionId)) {
           setMessages([]);
+          setMessageTimingById({});
           setThoughtPanelStateByTurnId({});
           return;
         }
@@ -3074,7 +3099,7 @@ export function App() {
       setMessageTimingById({});
       setThoughtPanelStateByTurnId({});
     } finally {
-      if (selectedSessionIdRef.current === sessionId && transcriptLoadRequestIdRef.current === requestId) {
+      if (transcriptLoadRequestIdRef.current === requestId) {
         setLoadingTranscript(false);
       }
     }
@@ -6628,6 +6653,10 @@ export function App() {
     };
     const reasoningLinesByMessageId = new Map<string, { summaryLines: Array<string>; contentLines: Array<string> }>();
     const fileChangeMessagesById = new Map<string, ChatMessage>();
+    const fileChangeExplainabilityMessagesByAnchorItemId = new Map<string, ChatMessage>();
+    const fileChangeExplainabilityMessagesByApprovalId = new Map<string, ChatMessage>();
+    const fileChangeSupervisorInsightMessagesByAnchorItemId = new Map<string, ChatMessage>();
+    const fileChangeSupervisorInsightMessagesByApprovalId = new Map<string, ChatMessage>();
     for (const thoughtMessage of thoughtMessages) {
       if (thoughtMessage.type === "reasoning") {
         reasoningLinesByMessageId.set(
@@ -6637,6 +6666,40 @@ export function App() {
       }
       if (thoughtMessage.type === "fileChange") {
         fileChangeMessagesById.set(thoughtMessage.id, thoughtMessage);
+      }
+      if (thoughtMessage.type === "fileChange.explainability") {
+        const details = parseDetailsRecord(thoughtMessage.details);
+        const anchorItemId =
+          details && typeof details.anchorItemId === "string" && details.anchorItemId.trim().length > 0
+            ? details.anchorItemId.trim()
+            : null;
+        const approvalId =
+          details && typeof details.approvalId === "string" && details.approvalId.trim().length > 0
+            ? details.approvalId.trim()
+            : null;
+        if (anchorItemId) {
+          fileChangeExplainabilityMessagesByAnchorItemId.set(anchorItemId, thoughtMessage);
+        }
+        if (approvalId) {
+          fileChangeExplainabilityMessagesByApprovalId.set(approvalId, thoughtMessage);
+        }
+      }
+      if (thoughtMessage.type === "fileChange.supervisorInsight") {
+        const details = parseDetailsRecord(thoughtMessage.details);
+        const anchorItemId =
+          details && typeof details.anchorItemId === "string" && details.anchorItemId.trim().length > 0
+            ? details.anchorItemId.trim()
+            : null;
+        const approvalId =
+          details && typeof details.approvalId === "string" && details.approvalId.trim().length > 0
+            ? details.approvalId.trim()
+            : null;
+        if (anchorItemId) {
+          fileChangeSupervisorInsightMessagesByAnchorItemId.set(anchorItemId, thoughtMessage);
+        }
+        if (approvalId) {
+          fileChangeSupervisorInsightMessagesByApprovalId.set(approvalId, thoughtMessage);
+        }
       }
     }
     const hasMeaningfulFutureEvent = new Array<boolean>(thoughtMessages.length).fill(false);
@@ -6691,23 +6754,26 @@ export function App() {
         for (const [index, line] of summaryLines.entries()) {
           const rowKey = `reasoning-summary-${message.id}-${index}`;
           const marker = extractMarkdownSectionHeader(line);
+          const markerRemainder = marker ? dedupeSectionRemainder(marker.title, marker.remainder) : null;
           const markerLeadNode =
-            marker && marker.remainder
+            marker && markerRemainder
               ? (
                   <div key={`${rowKey}-lead`} className="thought-row-line summary" data-thought-collapse="true">
-                    <MarkdownText content={marker.remainder} className="thought-markdown" />
+                    <MarkdownText content={markerRemainder} className="thought-markdown" />
                   </div>
                 )
               : null;
+          const suppressDuplicateTitleBodyLine = marker !== null && markerRemainder === null;
           appendThoughtRow({
             key: rowKey,
-            node:
-              markerLeadNode ??
-              (
-                <div key={rowKey} className="thought-row-line summary" data-thought-collapse="true">
-                  <MarkdownText content={line} className="thought-markdown" />
-                </div>
-              ),
+            node: suppressDuplicateTitleBodyLine
+              ? null
+              : markerLeadNode ??
+                (
+                  <div key={rowKey} className="thought-row-line summary" data-thought-collapse="true">
+                    <MarkdownText content={line} className="thought-markdown" />
+                  </div>
+                ),
             sectionTitle: marker?.title ?? null
           });
         }
@@ -6715,23 +6781,26 @@ export function App() {
         for (const [index, line] of contentLines.entries()) {
           const rowKey = `reasoning-content-${message.id}-${index}`;
           const marker = extractMarkdownSectionHeader(line);
+          const markerRemainder = marker ? dedupeSectionRemainder(marker.title, marker.remainder) : null;
           const markerLeadNode =
-            marker && marker.remainder
+            marker && markerRemainder
               ? (
                   <div key={`${rowKey}-lead`} className="thought-row-line content" data-thought-collapse="true">
-                    <MarkdownText content={marker.remainder} className="thought-markdown" />
+                    <MarkdownText content={markerRemainder} className="thought-markdown" />
                   </div>
                 )
               : null;
+          const suppressDuplicateTitleBodyLine = marker !== null && markerRemainder === null;
           appendThoughtRow({
             key: rowKey,
-            node:
-              markerLeadNode ??
-              (
-                <div key={rowKey} className="thought-row-line content" data-thought-collapse="true">
-                  <MarkdownText content={line} className="thought-markdown" />
-                </div>
-              ),
+            node: suppressDuplicateTitleBodyLine
+              ? null
+              : markerLeadNode ??
+                (
+                  <div key={rowKey} className="thought-row-line content" data-thought-collapse="true">
+                    <MarkdownText content={line} className="thought-markdown" />
+                  </div>
+                ),
             sectionTitle: marker?.title ?? null
           });
         }
@@ -6778,6 +6847,8 @@ export function App() {
         }
 
         const { status, changeCount, files, diffs } = summarizeFileChangeMessage(message);
+        const linkedExplainabilityMessage = fileChangeExplainabilityMessagesByAnchorItemId.get(message.id) ?? null;
+        const linkedSupervisorInsightMessage = fileChangeSupervisorInsightMessagesByAnchorItemId.get(message.id) ?? null;
         const fileChangeLabel = formatFileChangeLabel(changeCount);
         const actionText =
           status === "streaming"
@@ -6796,23 +6867,39 @@ export function App() {
             : null;
 
         const eventRow = (
-          <div key={`event-${message.id}`} className="thought-row-event inline" data-thought-no-collapse="true">
+          <div key={`event-${message.id}`} className="thought-row-event" data-thought-no-collapse="true">
             {actionText ? <p className="thought-row-text">{actionText}</p> : null}
-            {fileListPreview ? <p className="thought-row-meta">{fileListPreview}</p> : null}
-            {diffs.map((diffEntry, diffIndex) => (
-              <div key={`diff-${message.id}-${diffIndex}`} className="thought-diff-section">
-                <pre className="thought-diff-block">
-                  {diffEntry.path ? (
-                    <span className="thought-diff-line hunk">{toProjectRelativePath(diffEntry.path, selectedSession?.cwd ?? null)}</span>
-                  ) : null}
-                  {diffEntry.lines.map((line, lineIndex) => (
-                    <span key={`diff-line-${message.id}-${diffIndex}-${lineIndex}`} className={`thought-diff-line ${classifyDiffLineTone(line)}`}>
-                      {line.length > 0 ? replaceDisplayHomePath(line, selectedSession?.cwd ?? null) : " "}
-                    </span>
-                  ))}
-                </pre>
+            {diffs.length > 0 || fileListPreview || linkedExplainabilityMessage || linkedSupervisorInsightMessage ? (
+              <div className="thought-diff-explain-bundle">
+                {fileListPreview ? <p className="thought-row-meta">{fileListPreview}</p> : null}
+                {diffs.map((diffEntry, diffIndex) => (
+                  <div key={`diff-${message.id}-${diffIndex}`} className="thought-diff-section">
+                    <pre className="thought-diff-block">
+                      {diffEntry.path ? (
+                        <span className="thought-diff-line hunk">{toProjectRelativePath(diffEntry.path, selectedSession?.cwd ?? null)}</span>
+                      ) : null}
+                      {diffEntry.lines.map((line, lineIndex) => (
+                        <span key={`diff-line-${message.id}-${diffIndex}-${lineIndex}`} className={`thought-diff-line ${classifyDiffLineTone(line)}`}>
+                          {line.length > 0 ? replaceDisplayHomePath(line, selectedSession?.cwd ?? null) : " "}
+                        </span>
+                      ))}
+                    </pre>
+                  </div>
+                ))}
+                {linkedExplainabilityMessage ? (
+                  <div className="thought-diff-explain-section">
+                    <p className="thought-row-title">Diff Explainability</p>
+                    <MarkdownText content={linkedExplainabilityMessage.content} className="thought-markdown thought-row-text" />
+                  </div>
+                ) : null}
+                {linkedSupervisorInsightMessage ? (
+                  <div className="thought-diff-explain-section">
+                    <p className="thought-row-title">Supervisor Insight</p>
+                    <MarkdownText content={linkedSupervisorInsightMessage.content} className="thought-markdown thought-row-text" />
+                  </div>
+                ) : null}
               </div>
-            ))}
+            ) : null}
           </div>
         );
         appendThoughtRow({
@@ -6824,9 +6911,92 @@ export function App() {
       }
 
       if (message.type === "fileChange.explainability") {
+        const details = parseDetailsRecord(message.details);
+        const anchorItemId =
+          details && typeof details.anchorItemId === "string" && details.anchorItemId.trim().length > 0
+            ? details.anchorItemId.trim()
+            : null;
+        const approvalId =
+          details && typeof details.approvalId === "string" && details.approvalId.trim().length > 0
+            ? details.approvalId.trim()
+            : null;
+        const isLinkedToPendingApproval =
+          (anchorItemId && pendingFileChangeApprovalsByItemId.has(anchorItemId)) ||
+          (approvalId && pendingApprovalsById.has(approvalId));
+        if (isLinkedToPendingApproval) {
+          continue;
+        }
+        if (anchorItemId && fileChangeMessagesById.has(anchorItemId)) {
+          continue;
+        }
+
         const eventRow = (
           <div key={`event-${message.id}`} className="thought-row-event inline" data-thought-no-collapse="true">
             <p className="thought-row-title">Diff Explainability</p>
+            <MarkdownText content={message.content} className="thought-markdown thought-row-text" />
+          </div>
+        );
+        appendThoughtRow({
+          key: `event-${message.id}`,
+          node: eventRow,
+          sectionTitle: null
+        });
+        continue;
+      }
+
+      if (message.type === "fileChange.supervisorInsight") {
+        const details = parseDetailsRecord(message.details);
+        const anchorItemId =
+          details && typeof details.anchorItemId === "string" && details.anchorItemId.trim().length > 0
+            ? details.anchorItemId.trim()
+            : null;
+        const approvalId =
+          details && typeof details.approvalId === "string" && details.approvalId.trim().length > 0
+            ? details.approvalId.trim()
+            : null;
+        const isLinkedToPendingApproval =
+          (anchorItemId && pendingFileChangeApprovalsByItemId.has(anchorItemId)) ||
+          (approvalId && pendingApprovalsById.has(approvalId));
+        if (isLinkedToPendingApproval) {
+          continue;
+        }
+        if (anchorItemId && fileChangeMessagesById.has(anchorItemId)) {
+          continue;
+        }
+
+        const eventRow = (
+          <div key={`event-${message.id}`} className="thought-row-event inline" data-thought-no-collapse="true">
+            <p className="thought-row-title">Supervisor Insight</p>
+            <MarkdownText content={message.content} className="thought-markdown thought-row-text" />
+          </div>
+        );
+        appendThoughtRow({
+          key: `event-${message.id}`,
+          node: eventRow,
+          sectionTitle: null
+        });
+        continue;
+      }
+
+      if (message.type === "riskRecheck.batch") {
+        const eventRow = (
+          <div key={`event-${message.id}`} className="thought-row-event inline" data-thought-no-collapse="true">
+            <p className="thought-row-title">Risk Recheck Results</p>
+            <MarkdownText content={message.content} className="thought-markdown thought-row-text" />
+          </div>
+        );
+        appendThoughtRow({
+          key: `event-${message.id}`,
+          node: eventRow,
+          sectionTitle: null
+        });
+        continue;
+      }
+
+      if (message.type === "turn.supervisorReview") {
+        const eventRow = (
+          <div key={`event-${message.id}`} className="thought-row-event inline" data-thought-no-collapse="true">
+            <p className="thought-row-title">Turn Supervisor Review</p>
             <MarkdownText content={message.content} className="thought-markdown thought-row-text" />
           </div>
         );
@@ -6866,6 +7036,22 @@ export function App() {
         const pendingFileChangePreview = isFileChangeApproval && pendingApproval ? summarizePendingFileChangeApproval(pendingApproval) : null;
         const linkedFileChangeMessage =
           isFileChangeApproval && pendingApproval?.itemId ? fileChangeMessagesById.get(pendingApproval.itemId) ?? null : null;
+        const linkedExplainabilityMessage =
+          isFileChangeApproval && activeApprovalId
+            ? pendingApproval?.itemId
+              ? fileChangeExplainabilityMessagesByAnchorItemId.get(pendingApproval.itemId) ??
+                fileChangeExplainabilityMessagesByApprovalId.get(activeApprovalId) ??
+                null
+              : fileChangeExplainabilityMessagesByApprovalId.get(activeApprovalId) ?? null
+            : null;
+        const linkedSupervisorInsightMessage =
+          isFileChangeApproval && activeApprovalId
+            ? pendingApproval?.itemId
+              ? fileChangeSupervisorInsightMessagesByAnchorItemId.get(pendingApproval.itemId) ??
+                fileChangeSupervisorInsightMessagesByApprovalId.get(activeApprovalId) ??
+                null
+              : fileChangeSupervisorInsightMessagesByApprovalId.get(activeApprovalId) ?? null
+            : null;
         const linkedFileChangePreview = linkedFileChangeMessage ? summarizeFileChangeMessage(linkedFileChangeMessage) : null;
         const effectiveFileChangePreview = (() => {
           if (!isFileChangeApproval) {
@@ -6908,34 +7094,52 @@ export function App() {
             <div key={`event-${message.id}`} className="thought-row-event" data-thought-no-collapse="true">
               <p className="thought-row-text">{approvalText}</p>
               {requestedApprovalAt ? <p className="approval-time">Requested: {formatApprovalDate(requestedApprovalAt)}</p> : null}
-              {pendingApproval && isFileChangeApproval && effectiveFileChangePreview ? (
-                effectiveFileChangePreview.diffs.length > 0 ? (
-                  effectiveFileChangePreview.diffs.map((diffEntry, diffIndex) => (
-                    <div key={`approval-diff-${message.id}-${diffIndex}`} className="thought-diff-section">
-                      <pre className="thought-diff-block">
-                        {diffEntry.path && !shouldHidePathHeaderForCreatePreview(effectiveFileChangePreview) ? (
-                          <span className="thought-diff-line hunk">{toProjectRelativePath(diffEntry.path, selectedSession?.cwd ?? null)}</span>
-                        ) : null}
-                        {diffEntry.lines.map((line, lineIndex) => (
-                          <span
-                            key={`approval-diff-line-${message.id}-${diffIndex}-${lineIndex}`}
-                            className={`thought-diff-line ${classifyDiffLineTone(line)}`}
-                          >
-                            {line.length > 0 ? replaceDisplayHomePath(line, selectedSession?.cwd ?? null) : " "}
-                          </span>
-                        ))}
-                      </pre>
-                    </div>
-                  ))
-                ) : effectiveFileChangePreview.files.length > 0 ? (
-                  <p className="thought-row-meta">
-                    {effectiveFileChangePreview.files
-                      .slice(0, 3)
-                      .map((path) => toProjectRelativePath(path, selectedSession?.cwd ?? null))
-                      .join(", ")}
-                    {effectiveFileChangePreview.files.length > 3 ? ` (+${effectiveFileChangePreview.files.length - 3} more)` : ""}
-                  </p>
-                ) : null
+              {isFileChangeApproval && pendingApproval ? (
+                <div className="thought-diff-explain-bundle">
+                  {effectiveFileChangePreview ? (
+                    effectiveFileChangePreview.diffs.length > 0 ? (
+                      effectiveFileChangePreview.diffs.map((diffEntry, diffIndex) => (
+                        <div key={`approval-diff-${message.id}-${diffIndex}`} className="thought-diff-section">
+                          <pre className="thought-diff-block">
+                            {diffEntry.path && !shouldHidePathHeaderForCreatePreview(effectiveFileChangePreview) ? (
+                              <span className="thought-diff-line hunk">{toProjectRelativePath(diffEntry.path, selectedSession?.cwd ?? null)}</span>
+                            ) : null}
+                            {diffEntry.lines.map((line, lineIndex) => (
+                              <span
+                                key={`approval-diff-line-${message.id}-${diffIndex}-${lineIndex}`}
+                                className={`thought-diff-line ${classifyDiffLineTone(line)}`}
+                              >
+                                {line.length > 0 ? replaceDisplayHomePath(line, selectedSession?.cwd ?? null) : " "}
+                              </span>
+                            ))}
+                          </pre>
+                        </div>
+                      ))
+                    ) : effectiveFileChangePreview.files.length > 0 ? (
+                      <p className="thought-row-meta">
+                        {effectiveFileChangePreview.files
+                          .slice(0, 3)
+                          .map((path) => toProjectRelativePath(path, selectedSession?.cwd ?? null))
+                          .join(", ")}
+                        {effectiveFileChangePreview.files.length > 3 ? ` (+${effectiveFileChangePreview.files.length - 3} more)` : ""}
+                      </p>
+                    ) : null
+                  ) : null}
+                  <div className="thought-diff-explain-section">
+                    <p className="thought-row-title">Diff Explainability</p>
+                    <MarkdownText
+                      content={linkedExplainabilityMessage?.content ?? "Explainability pending..."}
+                      className="thought-markdown thought-row-text"
+                    />
+                  </div>
+                  <div className="thought-diff-explain-section">
+                    <p className="thought-row-title">Supervisor Insight</p>
+                    <MarkdownText
+                      content={linkedSupervisorInsightMessage?.content ?? "Supervisor insight queued..."}
+                      className="thought-markdown thought-row-text"
+                    />
+                  </div>
+                </div>
               ) : null}
               {activeApprovalId ? (
                 <div className="approval-actions">
@@ -6997,10 +7201,11 @@ export function App() {
       const showEventTitle = message.type !== "agentMessage";
       const showDetails = Boolean(message.details) && !message.type.startsWith("approval.");
       const agentSectionHeader = message.type === "agentMessage" ? extractMarkdownSectionHeader(message.content || "") : null;
+      const agentSectionBody = agentSectionHeader ? dedupeSectionRemainder(agentSectionHeader.title, agentSectionHeader.remainder) : null;
       const agentMessageBody =
         message.type === "agentMessage"
           ? agentSectionHeader
-            ? agentSectionHeader.remainder
+            ? agentSectionBody
             : message.content || "(empty)"
           : null;
       const activeApprovalId = pendingApproval?.approvalId ?? maybeApprovalId;
