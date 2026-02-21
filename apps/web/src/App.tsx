@@ -5863,6 +5863,28 @@ export function App() {
           const payload = asRecord(envelope.payload);
           const jobId = payload && typeof payload.jobId === "string" ? payload.jobId : null;
           const jobType = payload && typeof payload.jobType === "string" ? payload.jobType : null;
+          const sourceSessionId =
+            payload && typeof payload.sourceSessionId === "string"
+              ? payload.sourceSessionId
+              : typeof envelope.threadId === "string"
+                ? envelope.threadId
+                : null;
+
+          if (jobType === "file_change_explain") {
+            if (
+              sourceSessionId &&
+              selectedSessionIdRef.current === sourceSessionId &&
+              (envelope.type === "orchestrator_job_queued" ||
+                envelope.type === "orchestrator_job_started" ||
+                envelope.type === "orchestrator_job_completed" ||
+                envelope.type === "orchestrator_job_failed" ||
+                envelope.type === "orchestrator_job_canceled")
+            ) {
+              void loadSessionTranscript(sourceSessionId);
+            }
+            return;
+          }
+
           const pending = pendingSuggestReplyJobRef.current;
 
           if (!jobId || !pending || pending.jobId !== jobId || jobType !== "suggest_reply") {
@@ -6696,6 +6718,21 @@ export function App() {
                 </pre>
               </div>
             ))}
+          </div>
+        );
+        appendThoughtRow({
+          key: `event-${message.id}`,
+          node: eventRow,
+          sectionTitle: null
+        });
+        continue;
+      }
+
+      if (message.type === "fileChange.explainability") {
+        const eventRow = (
+          <div key={`event-${message.id}`} className="thought-row-event inline" data-thought-no-collapse="true">
+            <p className="thought-row-title">Diff Explainability</p>
+            <MarkdownText content={message.content} className="thought-markdown thought-row-text" />
           </div>
         );
         appendThoughtRow({

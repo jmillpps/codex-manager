@@ -12,6 +12,10 @@ import { OrchestratorQueue, OrchestratorQueueError } from "./orchestrator-queue.
 import { FileOrchestratorQueueStore } from "./orchestrator-store.js";
 import { createJobDefinitionsRegistry } from "./orchestrator-job-definitions.js";
 import {
+  fileChangeExplainJobPayloadSchema,
+  fileChangeExplainJobResultSchema,
+  type FileChangeExplainJobPayload,
+  type FileChangeExplainJobResult,
   suggestReplyJobPayloadSchema,
   suggestReplyJobResultSchema,
   type SuggestReplyJobPayload,
@@ -922,6 +926,23 @@ function extractItemCompletedAt(item: CodexThreadItem): number | null {
   );
 }
 
+function extractAnchorItemIdFromTranscriptEntry(entry: TranscriptEntry): string | null {
+  if (!entry.details || entry.details.trim().length === 0) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(entry.details) as Record<string, unknown>;
+    if (typeof parsed.anchorItemId === "string" && parsed.anchorItemId.trim().length > 0) {
+      return parsed.anchorItemId.trim();
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
 function mergeTranscriptWithSupplemental(
   threadId: string,
   transcript: Array<TranscriptEntry>
@@ -1100,9 +1121,19 @@ function mergeTranscriptWithSupplemental(
         continue;
       }
 
-      const insertAt = Math.min(insertionIndex, mergedTurnEntries.length);
+      let insertAt = Math.min(insertionIndex, mergedTurnEntries.length);
+      const anchorItemId = extractAnchorItemIdFromTranscriptEntry(supplementalEntry);
+      if (anchorItemId) {
+        const anchorIndex = indexByMessageId.get(anchorItemId);
+        if (typeof anchorIndex === "number") {
+          insertAt = Math.min(anchorIndex + 1, mergedTurnEntries.length);
+        }
+      }
+
       mergedTurnEntries.splice(insertAt, 0, supplementalEntry);
-      insertionIndex += 1;
+      if (insertAt <= insertionIndex) {
+        insertionIndex += 1;
+      }
       for (let index = insertAt; index < mergedTurnEntries.length; index += 1) {
         indexByMessageId.set(mergedTurnEntries[index].messageId, index);
       }
@@ -2565,6 +2596,177 @@ async function generateSuggestedReplyForJob(payload: SuggestReplyJobPayload): Pr
   }
 }
 
+function fileChangeExplainMessageId(payload: { threadId: string; turnId: string; itemId: string }): string {
+  return `file-change-explain-${payload.threadId}-${payload.turnId}-${payload.itemId}`;
+}
+
+function fileChangeExplainDetails(anchorItemId: string, metadata?: Record<string, unknown>): string {
+  return JSON.stringify(
+    {
+      anchorItemId,
+      ...(metadata ?? {})
+    },
+    null,
+    2
+  );
+}
+
+function upsertFileChangeExplainabilityEntry(
+  payload: FileChangeExplainJobPayload,
+  input: {
+    status: TranscriptEntry["status"];
+    content: string;
+    completedAt?: number;
+  }
+): void {
+  const now = Date.now();
+  const messageId = fileChangeExplainMessageId(payload);
+  upsertSupplementalTranscriptEntry(payload.threadId, {
+    messageId,
+    turnId: payload.turnId,
+    role: "system",
+    type: "fileChange.explainability",
+    content: input.content,
+    details: fileChangeExplainDetails(payload.anchorItemId),
+    startedAt: now,
+    ...(typeof input.completedAt === "number" ? { completedAt: input.completedAt } : {}),
+    status: input.status
+  });
+}
+
+function buildFileChangeExplainPrompt(payload: FileChangeExplainJobPayload): string {
+  return [
+    "You are explaining a completed code diff to a developer.",
+    "Write a concise markdown explanation with these sections:",
+    "1) What changed",
+    "2) Why it likely changed",
+    "3) Potential risks or follow-up checks",
+    "Keep it factual and avoid speculation beyond reasonable inference.",
+    "",
+    `Diff summary: ${payload.summary}`,
+    "",
+    "Diff details JSON:",
+    payload.details
+  ].join("\n");
+}
+
+function fallbackFileChangeExplanation(payload: FileChangeExplainJobPayload): string {
+  return [
+    "### What changed",
+    payload.summary,
+    "",
+    "### Why it likely changed",
+    "The update appears to align with the current turn intent and requested modifications.",
+    "",
+    "### Potential risks or follow-up checks",
+    "- Review touched files for edge cases.",
+    "- Run relevant tests for modified paths."
+  ].join("\n");
+}
+
+async function generateFileChangeExplainabilityForJob(
+  payload: FileChangeExplainJobPayload,
+  onTurnStarted?: (threadId: string, turnId: string) => void
+): Promise<FileChangeExplainJobResult> {
+  await ensureProjectOrchestrationSessions();
+  const orchestrationSessionId = sessionMetadata.projectOrchestratorSessionById[payload.projectId];
+  if (!orchestrationSessionId) {
+    throw new Error(`missing project orchestrator session for ${payload.projectId}`);
+  }
+
+  const turn = await supervisor.call<{ turn: { id: string } }>("turn/start", {
+    threadId: orchestrationSessionId,
+    sandboxPolicy: toTurnSandboxPolicy("read-only"),
+    approvalPolicy: "never",
+    input: [
+      {
+        type: "text",
+        text: buildFileChangeExplainPrompt(payload),
+        text_elements: []
+      }
+    ]
+  });
+  if (onTurnStarted) {
+    onTurnStarted(orchestrationSessionId, turn.turn.id);
+  }
+
+  const rawExplanation = await waitForSuggestedReply(orchestrationSessionId, turn.turn.id);
+  const explanation = rawExplanation.trim().length > 0 ? rawExplanation.trim() : fallbackFileChangeExplanation(payload);
+
+  return {
+    messageId: fileChangeExplainMessageId(payload),
+    explanation,
+    anchorItemId: payload.anchorItemId
+  };
+}
+
+function buildFileChangeExplainJobPayload(input: {
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  item: CodexThreadItem;
+}): FileChangeExplainJobPayload | null {
+  const projectId = resolveSessionProjectId(input.threadId);
+  if (!projectId) {
+    return null;
+  }
+
+  const status = typeof input.item.status === "string" ? input.item.status.toLowerCase() : "";
+  if (status.includes("fail") || status.includes("error") || status.includes("cancel")) {
+    return null;
+  }
+
+  const changes = Array.isArray(input.item.changes) ? input.item.changes : [];
+  if (changes.length === 0) {
+    return null;
+  }
+
+  const normalizedChanges: Array<Record<string, unknown>> = [];
+  let hasAnyDiff = false;
+  for (const change of changes) {
+    if (!isObjectRecord(change)) {
+      continue;
+    }
+    const normalized: Record<string, unknown> = {};
+    if (typeof change.path === "string" && change.path.trim().length > 0) {
+      normalized.path = change.path.trim();
+    }
+    if (change.kind !== undefined) {
+      normalized.kind = change.kind;
+    }
+    if (typeof change.diff === "string" && change.diff.length > 0) {
+      normalized.diff = change.diff;
+      hasAnyDiff = true;
+    }
+    normalizedChanges.push(normalized);
+  }
+
+  if (normalizedChanges.length === 0 || !hasAnyDiff) {
+    return null;
+  }
+
+  const summary = `File change completed: ${normalizedChanges.length} change${normalizedChanges.length === 1 ? "" : "s"}`;
+  const detailsRecord = {
+    status: typeof input.item.status === "string" ? input.item.status : "completed",
+    changes: normalizedChanges
+  };
+  let details = JSON.stringify(detailsRecord, null, 2);
+  if (details.length > env.ORCHESTRATOR_DIFF_EXPLAIN_MAX_DIFF_CHARS) {
+    details = `${details.slice(0, env.ORCHESTRATOR_DIFF_EXPLAIN_MAX_DIFF_CHARS)}\n... (truncated)`;
+  }
+
+  return {
+    threadId: input.threadId,
+    turnId: input.turnId,
+    itemId: input.itemId,
+    projectId,
+    sourceSessionId: input.threadId,
+    summary,
+    details,
+    anchorItemId: input.itemId
+  };
+}
+
 async function ensureSuggestionThread(sessionId: string, sourceThread: CodexThread, model?: string): Promise<string> {
   const previousThreadId = suggestionThreadBySession.get(sessionId);
   if (previousThreadId) {
@@ -3788,6 +3990,80 @@ function buildOrchestratorJobDefinitions(): JobDefinitionsMap {
     });
   }
 
+  if (env.ORCHESTRATOR_DIFF_EXPLAIN_ENABLED) {
+    definitions.push({
+      type: "file_change_explain",
+      version: 1,
+      priority: "background",
+      payloadSchema: fileChangeExplainJobPayloadSchema,
+      resultSchema: fileChangeExplainJobResultSchema,
+      dedupe: {
+        key: (payload: FileChangeExplainJobPayload) => `${payload.projectId}:${payload.threadId}:${payload.turnId}:${payload.itemId}`,
+        mode: "drop_duplicate"
+      },
+      retry: {
+        maxAttempts: env.ORCHESTRATOR_QUEUE_MAX_ATTEMPTS,
+        classify: (error: unknown) => {
+          const message =
+            error instanceof Error
+              ? error.message.toLowerCase()
+              : typeof error === "string"
+                ? error.toLowerCase()
+                : "";
+          if (message.includes("timed out") || message.includes("timeout")) {
+            return "retryable";
+          }
+          return "fatal";
+        },
+        baseDelayMs: 1_000,
+        maxDelayMs: 10_000,
+        jitter: true
+      },
+      timeoutMs: Math.max(env.ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS, 90_000),
+      cancel: {
+        strategy: "interrupt_turn",
+        gracefulWaitMs: 1_500
+      },
+      onQueued: async (_ctx: unknown, payload: FileChangeExplainJobPayload) => {
+        upsertFileChangeExplainabilityEntry(payload, {
+          status: "streaming",
+          content: "Queued explainability analysis..."
+        });
+      },
+      onStarted: async (_ctx: unknown, payload: FileChangeExplainJobPayload) => {
+        upsertFileChangeExplainabilityEntry(payload, {
+          status: "streaming",
+          content: "Analyzing completed file change..."
+        });
+      },
+      onCompleted: async (_ctx: unknown, payload: FileChangeExplainJobPayload, result: FileChangeExplainJobResult) => {
+        upsertFileChangeExplainabilityEntry(payload, {
+          status: "complete",
+          content: result.explanation,
+          completedAt: Date.now()
+        });
+      },
+      onFailed: async (_ctx: unknown, payload: FileChangeExplainJobPayload, error: string) => {
+        upsertFileChangeExplainabilityEntry(payload, {
+          status: "error",
+          content: `Explainability failed: ${error}`,
+          completedAt: Date.now()
+        });
+      },
+      onCanceled: async (_ctx: unknown, payload: FileChangeExplainJobPayload) => {
+        upsertFileChangeExplainabilityEntry(payload, {
+          status: "canceled",
+          content: "Explainability canceled before completion.",
+          completedAt: Date.now()
+        });
+      },
+      run: async (ctx: { setRunningContext: (value: { threadId: string; turnId: string }) => void }, payload: FileChangeExplainJobPayload) =>
+        generateFileChangeExplainabilityForJob(payload, (threadId, turnId) => {
+          ctx.setRunningContext({ threadId, turnId });
+        })
+    });
+  }
+
   return createJobDefinitionsRegistry(definitions);
 }
 
@@ -4113,6 +4389,35 @@ supervisor.on("notification", (notification: JsonRpcNotification) => {
       transcriptEntry.completedAt = itemCompletedAt ?? observedAt;
     }
     upsertSupplementalTranscriptEntry(threadId, transcriptEntry);
+
+    if (notification.method === "item/completed" && item.type === "fileChange" && orchestratorQueue) {
+      const explainPayload = buildFileChangeExplainJobPayload({
+        threadId,
+        turnId,
+        itemId: item.id,
+        item
+      });
+      if (explainPayload) {
+        void orchestratorQueue
+          .enqueue({
+            type: "file_change_explain",
+            projectId: explainPayload.projectId,
+            sourceSessionId: threadId,
+            payload: explainPayload
+          })
+          .catch((error) => {
+            app.log.warn(
+              {
+                error,
+                threadId,
+                turnId,
+                itemId: item.id
+              },
+              "failed to enqueue file-change explainability job"
+            );
+          });
+      }
+    }
   }
 
   if (notification.method === "thread/tokenUsage/updated") {

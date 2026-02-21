@@ -253,8 +253,8 @@ export class OrchestratorQueue {
     this.trimTerminalHistoryForProject(job.projectId);
     await this.persistSnapshot();
 
-    this.emitJobEvent("orchestrator_job_queued", job);
     await this.safeRunHook(job, () => definition.onQueued?.(this.noopContext(job), payload, job.id));
+    this.emitJobEvent("orchestrator_job_queued", job);
     this.scheduleProcessing();
 
     return {
@@ -578,7 +578,6 @@ export class OrchestratorQueue {
     }
 
     await this.persistSnapshot();
-    this.emitJobEvent("orchestrator_job_started", job);
 
     const jobContext: JobRunContext = {
       jobId: job.id,
@@ -618,6 +617,7 @@ export class OrchestratorQueue {
     }
 
     await this.safeRunHook(job, () => definition.onStarted?.(jobContext, payload, job.id));
+    this.emitJobEvent("orchestrator_job_started", job);
 
     try {
       const rawResult = await definition.run(jobContext, payload);
