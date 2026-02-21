@@ -353,6 +353,52 @@ async function main() {
     const activeCountAfterCreate = Array.isArray(sessionsAfterCreate.body?.data) ? sessionsAfterCreate.body.data.length : -1;
     assert.ok(activeCountAfterCreate >= 1, "expected at least one active session after create");
 
+    const projectCreate = await request("/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: `api-contract-project-${Date.now()}`,
+        workingDirectory: root
+      })
+    });
+    assert.equal(projectCreate.status, 200);
+    const projectId = projectCreate.body?.project?.projectId;
+    const orchestratorSessionId = projectCreate.body?.orchestrationSession?.sessionId;
+    assert.equal(typeof projectId, "string");
+    assert.equal(typeof orchestratorSessionId, "string");
+
+    const sessionsAfterProjectCreate = await request("/sessions?archived=false&limit=200");
+    assert.equal(sessionsAfterProjectCreate.status, 200);
+    assert.equal(
+      Array.isArray(sessionsAfterProjectCreate.body?.data) &&
+        sessionsAfterProjectCreate.body.data.some((entry) => entry?.sessionId === orchestratorSessionId),
+      false,
+      "system-owned orchestrator session should be hidden from session list"
+    );
+
+    const systemOwnedRead = await request(`/sessions/${encodeURIComponent(orchestratorSessionId)}`);
+    assert.equal(systemOwnedRead.status, 403);
+    assert.equal(systemOwnedRead.body?.code, "system_session");
+
+    const systemOwnedMessage = await request(`/sessions/${encodeURIComponent(orchestratorSessionId)}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "should fail" })
+    });
+    assert.equal(systemOwnedMessage.status, 403);
+    assert.equal(systemOwnedMessage.body?.code, "system_session");
+
+    const systemOwnedDelete = await request(`/sessions/${encodeURIComponent(orchestratorSessionId)}`, {
+      method: "DELETE"
+    });
+    assert.equal(systemOwnedDelete.status, 403);
+    assert.equal(systemOwnedDelete.body?.code, "system_session");
+
+    const projectDelete = await request(`/projects/${encodeURIComponent(projectId)}`, {
+      method: "DELETE"
+    });
+    assert.equal(projectDelete.status, 200);
+
     const setLegacyBackOnFailure = await request(`/sessions/${encodeURIComponent(sessionId)}/approval-policy`, {
       method: "POST",
       headers: { "content-type": "application/json" },

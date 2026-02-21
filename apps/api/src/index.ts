@@ -201,6 +201,7 @@ type SessionMetadataStore = {
   defaultSessionControls: SessionControlsTuple;
   projectOrchestratorSessionById: Record<string, string>;
   suggestionHelperSessionIds: Record<string, true>;
+  systemOwnedSessionIds: Record<string, true>;
   turnTimingBySessionId: Record<string, Record<string, TurnTimingRecord>>;
 };
 
@@ -1369,6 +1370,7 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
     const defaultSessionControls = defaultSessionControlsFromEnv();
     const projectOrchestratorSessionById: Record<string, string> = {};
     const suggestionHelperSessionIds: Record<string, true> = {};
+    const systemOwnedSessionIds: Record<string, true> = {};
     const turnTimingBySessionId: Record<string, Record<string, TurnTimingRecord>> = {};
     const now = new Date().toISOString();
 
@@ -1464,6 +1466,7 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
           continue;
         }
         projectOrchestratorSessionById[projectId] = sessionId;
+        systemOwnedSessionIds[sessionId] = true;
       }
     }
 
@@ -1471,6 +1474,15 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
       for (const [sessionId, enabled] of Object.entries(parsed.suggestionHelperSessionIds)) {
         if (enabled === true) {
           suggestionHelperSessionIds[sessionId] = true;
+          systemOwnedSessionIds[sessionId] = true;
+        }
+      }
+    }
+
+    if (isObjectRecord(parsed) && isObjectRecord(parsed.systemOwnedSessionIds)) {
+      for (const [sessionId, enabled] of Object.entries(parsed.systemOwnedSessionIds)) {
+        if (enabled === true) {
+          systemOwnedSessionIds[sessionId] = true;
         }
       }
     }
@@ -1528,6 +1540,7 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
       defaultSessionControls,
       projectOrchestratorSessionById,
       suggestionHelperSessionIds,
+      systemOwnedSessionIds,
       turnTimingBySessionId
     };
   } catch (error) {
@@ -1544,6 +1557,7 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
       defaultSessionControls: defaultSessionControlsFromEnv(),
       projectOrchestratorSessionById: {},
       suggestionHelperSessionIds: {},
+      systemOwnedSessionIds: {},
       turnTimingBySessionId: {}
     };
   }
@@ -1856,6 +1870,7 @@ async function createProjectOrchestrationSession(
   const orchestrationThread = startResponse.thread;
   sessionMetadata.sessionProjectById[orchestrationThread.id] = projectId;
   sessionMetadata.projectOrchestratorSessionById[projectId] = orchestrationThread.id;
+  setSystemOwnedSession(orchestrationThread.id, true);
   await setSessionTitle(orchestrationThread.id, buildProjectOrchestratorTitle(projectName));
   await persistSessionMetadata();
   return orchestrationThread;
@@ -1871,8 +1886,12 @@ async function ensureProjectOrchestrationSessions(): Promise<void> {
     for (const [projectId, project] of Object.entries(sessionMetadata.projects)) {
       const mappedSessionId = sessionMetadata.projectOrchestratorSessionById[projectId];
       if (typeof mappedSessionId === "string" && mappedSessionId.trim().length > 0) {
+        const systemOwnedChanged = setSystemOwnedSession(mappedSessionId, true);
         const exists = await sessionExistsForProjectAssignment(mappedSessionId);
         if (exists) {
+          if (systemOwnedChanged) {
+            await persistSessionMetadata();
+          }
           continue;
         }
 
@@ -1913,25 +1932,50 @@ function clearProjectOrchestratorSessionForSession(sessionId: string): boolean {
   return changed;
 }
 
+function setSystemOwnedSession(sessionId: string, enabled: boolean): boolean {
+  if (enabled) {
+    if (sessionMetadata.systemOwnedSessionIds[sessionId] === true) {
+      return false;
+    }
+    sessionMetadata.systemOwnedSessionIds[sessionId] = true;
+    return true;
+  }
+
+  if (sessionId in sessionMetadata.systemOwnedSessionIds) {
+    delete sessionMetadata.systemOwnedSessionIds[sessionId];
+    return true;
+  }
+
+  return false;
+}
+
+function isSystemOwnedSession(sessionId: string): boolean {
+  return sessionMetadata.systemOwnedSessionIds[sessionId] === true;
+}
+
 function isSuggestionHelperSession(sessionId: string): boolean {
   return sessionMetadata.suggestionHelperSessionIds[sessionId] === true;
 }
 
 function setSuggestionHelperSession(sessionId: string, enabled: boolean): boolean {
+  let changed = false;
   if (enabled) {
     if (sessionMetadata.suggestionHelperSessionIds[sessionId] === true) {
-      return false;
+      return setSystemOwnedSession(sessionId, true);
     }
     sessionMetadata.suggestionHelperSessionIds[sessionId] = true;
-    return true;
+    changed = true;
+    changed = setSystemOwnedSession(sessionId, true) || changed;
+    return changed;
   }
 
   if (sessionId in sessionMetadata.suggestionHelperSessionIds) {
     delete sessionMetadata.suggestionHelperSessionIds[sessionId];
-    return true;
+    changed = true;
   }
 
-  return false;
+  changed = setSystemOwnedSession(sessionId, false) || changed;
+  return changed;
 }
 
 async function cleanupSuggestionHelperSessions(): Promise<void> {
@@ -1965,10 +2009,14 @@ async function cleanupSuggestionHelperSessions(): Promise<void> {
   }
 }
 
-function listSessionIdsForProject(projectId: string): Array<string> {
+function listSessionIdsForProject(projectId: string, options?: { includeSystemOwned?: boolean }): Array<string> {
+  const includeSystemOwned = options?.includeSystemOwned === true;
   const sessionIds: Array<string> = [];
   for (const [sessionId, assignedProjectId] of Object.entries(sessionMetadata.sessionProjectById)) {
     if (assignedProjectId === projectId) {
+      if (!includeSystemOwned && isSystemOwnedSession(sessionId)) {
+        continue;
+      }
       sessionIds.push(sessionId);
     }
   }
@@ -2496,6 +2544,20 @@ function isInvalidThreadIdError(error: unknown): boolean {
 
 function isSessionPurged(sessionId: string): boolean {
   return purgedSessionIds.has(sessionId);
+}
+
+function systemSessionPayload(sessionId: string): {
+  status: "error";
+  code: "system_session";
+  sessionId: string;
+  message: string;
+} {
+  return {
+    status: "error",
+    code: "system_session",
+    sessionId,
+    message: "system-owned sessions are reserved for orchestrator workers"
+  };
 }
 
 function deletedSessionPayload(sessionId: string, title?: string): DeletedSessionPayload {
@@ -3310,13 +3372,39 @@ async function pruneStaleSessionControlMetadata(): Promise<number> {
   return classification.staleSessionIds.length;
 }
 
+async function pruneStaleSystemOwnedSessions(): Promise<number> {
+  const sessionIds = Object.keys(sessionMetadata.systemOwnedSessionIds);
+  if (sessionIds.length === 0) {
+    return 0;
+  }
+
+  const classification = await classifyProjectSessionAssignments(sessionIds);
+  if (classification.staleSessionIds.length === 0) {
+    return 0;
+  }
+
+  let changed = false;
+  for (const sessionId of classification.staleSessionIds) {
+    if (setSystemOwnedSession(sessionId, false)) {
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    await persistSessionMetadata();
+  }
+
+  return classification.staleSessionIds.length;
+}
+
 async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOutcome> {
   if (isSessionPurged(sessionId)) {
     const helperMetadataChanged = setSuggestionHelperSession(sessionId, false);
+    const systemMetadataChanged = setSystemOwnedSession(sessionId, false);
     const policyMetadataChanged = setSessionApprovalPolicy(sessionId, null);
     const turnTimingMetadataChanged = clearSessionTurnTimings(sessionId);
     clearSupplementalTranscriptEntries(sessionId);
-    if (helperMetadataChanged || policyMetadataChanged || turnTimingMetadataChanged) {
+    if (helperMetadataChanged || systemMetadataChanged || policyMetadataChanged || turnTimingMetadataChanged) {
       await persistSessionMetadata();
     }
     return {
@@ -3372,6 +3460,7 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
     const projectMetadataChanged = setSessionProjectAssignment(sessionId, null);
     const orchestratorMetadataChanged = clearProjectOrchestratorSessionForSession(sessionId);
     const helperMetadataChanged = setSuggestionHelperSession(sessionId, false);
+    const systemMetadataChanged = setSystemOwnedSession(sessionId, false);
     const policyMetadataChanged = setSessionApprovalPolicy(sessionId, null);
     const turnTimingMetadataChanged = clearSessionTurnTimings(sessionId);
     clearSupplementalTranscriptEntries(sessionId);
@@ -3380,6 +3469,7 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
       projectMetadataChanged ||
       orchestratorMetadataChanged ||
       helperMetadataChanged ||
+      systemMetadataChanged ||
       policyMetadataChanged ||
       turnTimingMetadataChanged
     ) {
@@ -3410,6 +3500,7 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
   const projectMetadataChanged = setSessionProjectAssignment(sessionId, null);
   const orchestratorMetadataChanged = clearProjectOrchestratorSessionForSession(sessionId);
   const helperMetadataChanged = setSuggestionHelperSession(sessionId, false);
+  const systemMetadataChanged = setSystemOwnedSession(sessionId, false);
   const policyMetadataChanged = setSessionApprovalPolicy(sessionId, null);
   const turnTimingMetadataChanged = clearSessionTurnTimings(sessionId);
   if (
@@ -3417,6 +3508,7 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
     projectMetadataChanged ||
     orchestratorMetadataChanged ||
     helperMetadataChanged ||
+    systemMetadataChanged ||
     policyMetadataChanged ||
     turnTimingMetadataChanged
   ) {
@@ -3669,7 +3761,7 @@ function clearPendingApprovalsForTurn(threadId: string, turnId: string): void {
 
 supervisor.on("notification", (notification: JsonRpcNotification) => {
   const threadId = extractThreadId(notification.params);
-  if (threadId && (suggestionThreadIds.has(threadId) || isSuggestionHelperSession(threadId))) {
+  if (threadId && (suggestionThreadIds.has(threadId) || isSuggestionHelperSession(threadId) || isSystemOwnedSession(threadId))) {
     return;
   }
   if (threadId && isSessionPurged(threadId)) {
@@ -3806,7 +3898,10 @@ supervisor.on("notification", (notification: JsonRpcNotification) => {
 
 supervisor.on("serverRequest", (serverRequest: JsonRpcServerRequest) => {
   const requestThreadId = extractThreadId(serverRequest.params);
-  if (requestThreadId && (suggestionThreadIds.has(requestThreadId) || isSuggestionHelperSession(requestThreadId))) {
+  if (
+    requestThreadId &&
+    (suggestionThreadIds.has(requestThreadId) || isSuggestionHelperSession(requestThreadId) || isSystemOwnedSession(requestThreadId))
+  ) {
     const approval = createPendingApproval(serverRequest);
     if (approval) {
       const payload = approvalDecisionPayload(approval, "decline", "turn");
@@ -4780,7 +4875,9 @@ app.get("/api/sessions", async (request) => {
     cursor
   });
 
-  const threads = response.data.filter((thread) => !isSessionPurged(thread.id) && !isSuggestionHelperSession(thread.id));
+  const threads = response.data.filter(
+    (thread) => !isSessionPurged(thread.id) && !isSuggestionHelperSession(thread.id) && !isSystemOwnedSession(thread.id)
+  );
   const materializedByThreadId = new Map<string, boolean>();
   for (const thread of threads) {
     materializedByThreadId.set(thread.id, true);
@@ -4791,7 +4888,11 @@ app.get("/api/sessions", async (request) => {
       const loaded = await supervisor.call<{ data: Array<string> }>("thread/loaded/list", {});
       const existingIds = new Set(threads.map((thread) => thread.id));
       const missingThreadIds = loaded.data.filter(
-        (threadId) => !existingIds.has(threadId) && !isSessionPurged(threadId) && !isSuggestionHelperSession(threadId)
+        (threadId) =>
+          !existingIds.has(threadId) &&
+          !isSessionPurged(threadId) &&
+          !isSuggestionHelperSession(threadId) &&
+          !isSystemOwnedSession(threadId)
       );
 
       if (missingThreadIds.length > 0) {
@@ -4875,7 +4976,9 @@ app.post("/api/sessions", async (request) => {
   });
 
   await setSessionTitle(response.thread.id, defaultSessionTitle());
-  if (setSessionControls(response.thread.id, requestedControls)) {
+  const controlsChanged = setSessionControls(response.thread.id, requestedControls);
+  const systemOwnedChanged = setSystemOwnedSession(response.thread.id, false);
+  if (controlsChanged || systemOwnedChanged) {
     await persistSessionMetadata();
   }
 
@@ -4890,6 +4993,11 @@ app.get("/api/sessions/:sessionId", async (request, reply) => {
   if (isSessionPurged(params.sessionId)) {
     reply.code(410);
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
   }
 
   let response: { thread: CodexThread };
@@ -4931,6 +5039,11 @@ app.post("/api/sessions/:sessionId/fork", async (request, reply) => {
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
 
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
+  }
+
   try {
     const sourceControls = resolveSessionControls(params.sessionId);
     const response = await callThreadMethodWithRawEventsFallback<{ thread: CodexThread }>("thread/fork", {
@@ -4963,6 +5076,11 @@ app.post("/api/sessions/:sessionId/compact", async (request, reply) => {
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
 
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
+  }
+
   try {
     const response = await supervisor.call("thread/compact/start", {
       threadId: params.sessionId
@@ -4985,6 +5103,11 @@ app.post("/api/sessions/:sessionId/rollback", async (request, reply) => {
   if (isSessionPurged(params.sessionId)) {
     reply.code(410);
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
   }
   const body = rollbackBodySchema.parse(request.body);
 
@@ -5015,6 +5138,11 @@ app.post("/api/sessions/:sessionId/background-terminals/clean", async (request, 
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
 
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
+  }
+
   try {
     const response = await supervisor.call("thread/backgroundTerminals/clean", {
       threadId: params.sessionId
@@ -5037,6 +5165,11 @@ app.post("/api/sessions/:sessionId/review", async (request, reply) => {
   if (isSessionPurged(params.sessionId)) {
     reply.code(410);
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
   }
   const body = reviewBodySchema.parse(request.body ?? {});
 
@@ -5075,6 +5208,11 @@ app.post("/api/sessions/:sessionId/turns/:turnId/steer", async (request, reply) 
     reply.code(410);
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
+
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
+  }
   const body = steerBodySchema.parse(request.body);
 
   try {
@@ -5110,6 +5248,11 @@ app.post("/api/sessions/:sessionId/rename", async (request, reply) => {
     reply.code(410);
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
+
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
+  }
   const body = renameSessionBodySchema.parse(request.body);
 
   await setSessionTitle(params.sessionId, body.title);
@@ -5144,6 +5287,11 @@ app.post("/api/sessions/:sessionId/project", async (request, reply) => {
   if (isSessionPurged(params.sessionId)) {
     reply.code(410);
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
   }
 
   const body = setSessionProjectBodySchema.parse(request.body);
@@ -5192,6 +5340,11 @@ app.post("/api/sessions/:sessionId/archive", async (request, reply) => {
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
 
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
+  }
+
   try {
     await supervisor.call("thread/archive", {
       threadId: params.sessionId
@@ -5221,6 +5374,11 @@ app.post("/api/sessions/:sessionId/unarchive", async (request, reply) => {
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
 
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
+  }
+
   const response = await supervisor.call<{ thread: CodexThread }>("thread/unarchive", {
     threadId: params.sessionId
   });
@@ -5234,6 +5392,10 @@ app.post("/api/sessions/:sessionId/unarchive", async (request, reply) => {
 
 app.delete("/api/sessions/:sessionId", async (request, reply) => {
   const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
+  }
   const outcome = await hardDeleteSession(params.sessionId);
   if (outcome.status === "gone") {
     reply.code(410);
@@ -5263,6 +5425,11 @@ app.get("/api/sessions/:sessionId/approvals", async (request, reply) => {
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
 
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
+  }
+
   return {
     data: listPendingApprovalsByThread(params.sessionId)
   };
@@ -5275,6 +5442,11 @@ app.get("/api/sessions/:sessionId/tool-input", async (request, reply) => {
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
 
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
+  }
+
   return {
     data: listPendingToolInputsByThread(params.sessionId)
   };
@@ -5285,6 +5457,11 @@ app.post("/api/sessions/:sessionId/resume", async (request, reply) => {
   if (isSessionPurged(params.sessionId)) {
     reply.code(410);
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
   }
 
   const sessionControls = resolveSessionControls(params.sessionId);
@@ -5307,6 +5484,11 @@ app.get("/api/sessions/:sessionId/session-controls", async (request, reply) => {
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
 
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
+  }
+
   const exists = await sessionExistsForProjectAssignment(params.sessionId);
   if (!exists) {
     reply.code(404);
@@ -5327,6 +5509,11 @@ app.post("/api/sessions/:sessionId/session-controls", async (request, reply) => 
   if (isSessionPurged(params.sessionId)) {
     reply.code(410);
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
   }
 
   const exists = await sessionExistsForProjectAssignment(params.sessionId);
@@ -5403,6 +5590,11 @@ app.post("/api/sessions/:sessionId/approval-policy", async (request, reply) => {
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
 
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
+  }
+
   const exists = await sessionExistsForProjectAssignment(params.sessionId);
   if (!exists) {
     reply.code(404);
@@ -5429,6 +5621,11 @@ app.post("/api/sessions/:sessionId/suggested-reply", async (request, reply) => {
   if (isSessionPurged(params.sessionId)) {
     reply.code(410);
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
   }
   const body = suggestedReplyBodySchema.parse(request.body);
 
@@ -5581,6 +5778,11 @@ app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
   }
 
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
+  }
+
   const exists = await sessionExistsForProjectAssignment(params.sessionId);
   if (!exists) {
     reply.code(404);
@@ -5673,6 +5875,11 @@ app.post("/api/sessions/:sessionId/interrupt", async (request, reply) => {
   if (isSessionPurged(params.sessionId)) {
     reply.code(410);
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
   }
   const body = interruptBodySchema.parse(request.body);
 
@@ -5854,6 +6061,10 @@ try {
   const prunedControlEntries = await pruneStaleSessionControlMetadata();
   if (prunedControlEntries > 0) {
     app.log.info({ prunedControlEntries }, "pruned stale session-control metadata entries");
+  }
+  const prunedSystemOwnedSessions = await pruneStaleSystemOwnedSessions();
+  if (prunedSystemOwnedSessions > 0) {
+    app.log.info({ prunedSystemOwnedSessions }, "pruned stale system-owned session metadata entries");
   }
   await cleanupSuggestionHelperSessions();
   await ensureProjectOrchestrationSessions();
