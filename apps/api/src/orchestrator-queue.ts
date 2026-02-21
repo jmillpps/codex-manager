@@ -175,7 +175,15 @@ export class OrchestratorQueue {
     if (this.runningPromiseByJobId.size > 0) {
       const runningJobs = Array.from(this.runningPromiseByJobId.keys());
       await Promise.all(runningJobs.map((jobId) => this.cancel(jobId, "shutdown")));
-      await Promise.all(Array.from(this.runningPromiseByJobId.values()));
+
+      const shutdownWaitMs = Math.max(250, drainMs > 0 ? drainMs : 2_000);
+      await this.waitForRunningSettle(shutdownWaitMs);
+
+      if (this.runningPromiseByJobId.size > 0) {
+        await this.forceCancelLingeringRunningJobs("shutdown_timeout");
+      }
+
+      this.runningPromiseByJobId.clear();
     }
 
     await this.persistChain;
@@ -1109,5 +1117,32 @@ export class OrchestratorQueue {
         setTimeout(resolve, timeoutMs);
       })
     ]);
+  }
+
+  private async forceCancelLingeringRunningJobs(reason: string): Promise<void> {
+    const lingeringJobIds = Array.from(this.runningRuntimeByJobId.keys());
+    if (lingeringJobIds.length === 0) {
+      return;
+    }
+
+    for (const jobId of lingeringJobIds) {
+      const runtime = this.runningRuntimeByJobId.get(jobId);
+      runtime?.controller.abort(`forced cancel: ${reason}`);
+
+      const current = this.jobsById.get(jobId);
+      if (current && current.state === "running") {
+        await this.transitionToCanceled(current, reason);
+      }
+
+      this.clearRuntime(jobId);
+    }
+
+    this.logger?.warn(
+      {
+        count: lingeringJobIds.length,
+        reason
+      },
+      "forced cancellation of lingering orchestrator jobs during stop"
+    );
   }
 }

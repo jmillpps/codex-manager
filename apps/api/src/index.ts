@@ -21,7 +21,7 @@ import {
   type SuggestReplyJobPayload,
   type SuggestReplyJobResult
 } from "./orchestrator-processors.js";
-import type { JobDefinitionsMap } from "./orchestrator-types.js";
+import type { JobDefinitionsMap, JobRunContext } from "./orchestrator-types.js";
 
 type JsonRpcNotification = {
   method: string;
@@ -2329,6 +2329,54 @@ function delay(ms: number): Promise<void> {
   });
 }
 
+function isAbortError(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return true;
+  }
+
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase();
+    return message.includes("abort");
+  }
+
+  if (typeof error === "string") {
+    return error.toLowerCase().includes("abort");
+  }
+
+  return false;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) {
+    return;
+  }
+  throw new Error("orchestrator job aborted");
+}
+
+async function delayWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+
+  if (!signal) {
+    await delay(ms);
+    return;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(new Error("orchestrator job aborted"));
+    };
+
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 function isTurnStillRunning(status: string): boolean {
   return status === "in_progress" || status === "pending" || status === "running";
 }
@@ -2491,7 +2539,14 @@ function suggestionQueueProjectId(sessionId: string): string {
   return `session:${sessionId}`;
 }
 
-async function generateSuggestedReplyForJob(payload: SuggestReplyJobPayload): Promise<SuggestReplyJobResult> {
+async function generateSuggestedReplyForJob(
+  payload: SuggestReplyJobPayload,
+  options?: {
+    signal?: AbortSignal;
+    onTurnStarted?: (threadId: string, turnId: string) => void;
+  }
+): Promise<SuggestReplyJobResult> {
+  throwIfAborted(options?.signal);
   const context = await loadSuggestionContext(payload.sessionId);
   const contextEntries = context.contextEntries;
   const helperFallbackEnabled = env.ORCHESTRATOR_SUGGEST_REPLY_ALLOW_HELPER_FALLBACK;
@@ -2512,6 +2567,7 @@ async function generateSuggestedReplyForJob(payload: SuggestReplyJobPayload): Pr
   let fallbackReason = "unknown";
   const suggestionPrompt = buildSuggestionPrompt(contextEntries, payload.draft);
   const runSuggestionTurn = async (threadId: string): Promise<string> => {
+    throwIfAborted(options?.signal);
     const turn = await supervisor.call<{ turn: { id: string } }>("turn/start", {
       threadId,
       model: payload.model,
@@ -2526,8 +2582,10 @@ async function generateSuggestedReplyForJob(payload: SuggestReplyJobPayload): Pr
         }
       ]
     });
+    options?.onTurnStarted?.(threadId, turn.turn.id);
+    throwIfAborted(options?.signal);
 
-    const rawSuggestion = await waitForSuggestedReply(threadId, turn.turn.id);
+    const rawSuggestion = await waitForSuggestedReply(threadId, turn.turn.id, options?.signal);
     const suggestion = stripSuggestionScaffolding(rawSuggestion);
     if (!suggestion) {
       throw new Error("suggestion output contained only orchestration scaffolding");
@@ -2596,6 +2654,9 @@ async function generateSuggestedReplyForJob(payload: SuggestReplyJobPayload): Pr
       requestKey: payload.requestKey
     };
   } catch (error) {
+    if (isAbortError(error) || options?.signal?.aborted) {
+      throw error;
+    }
     if (fallbackReason === "unknown") {
       fallbackReason = "unexpected_error";
     }
@@ -2682,8 +2743,12 @@ function fallbackFileChangeExplanation(payload: FileChangeExplainJobPayload): st
 
 async function generateFileChangeExplainabilityForJob(
   payload: FileChangeExplainJobPayload,
-  onTurnStarted?: (threadId: string, turnId: string) => void
+  options?: {
+    signal?: AbortSignal;
+    onTurnStarted?: (threadId: string, turnId: string) => void;
+  }
 ): Promise<FileChangeExplainJobResult> {
+  throwIfAborted(options?.signal);
   await ensureProjectOrchestrationSessions();
   const orchestrationSessionId = sessionMetadata.projectOrchestratorSessionById[payload.projectId];
   if (!orchestrationSessionId) {
@@ -2702,11 +2767,10 @@ async function generateFileChangeExplainabilityForJob(
       }
     ]
   });
-  if (onTurnStarted) {
-    onTurnStarted(orchestrationSessionId, turn.turn.id);
-  }
+  options?.onTurnStarted?.(orchestrationSessionId, turn.turn.id);
+  throwIfAborted(options?.signal);
 
-  const rawExplanation = await waitForSuggestedReply(orchestrationSessionId, turn.turn.id);
+  const rawExplanation = await waitForSuggestedReply(orchestrationSessionId, turn.turn.id, options?.signal);
   const explanation = rawExplanation.trim().length > 0 ? rawExplanation.trim() : fallbackFileChangeExplanation(payload);
 
   return {
@@ -2724,6 +2788,9 @@ function buildFileChangeExplainJobPayload(input: {
 }): FileChangeExplainJobPayload | null {
   const projectId = resolveSessionProjectId(input.threadId);
   if (!projectId) {
+    return null;
+  }
+  if (isSystemOwnedSession(input.threadId)) {
     return null;
   }
 
@@ -2827,19 +2894,21 @@ async function cleanupSuggestionThread(sessionId: string, helperThreadId: string
   }
 }
 
-async function waitForSuggestedReply(helperThreadId: string, turnId: string): Promise<string> {
+async function waitForSuggestedReply(threadId: string, turnId: string, signal?: AbortSignal): Promise<string> {
+  throwIfAborted(signal);
   const startedAt = Date.now();
   const timeoutMs = 30_000;
   let sawCompletedTurnWithoutOutput = false;
 
   while (Date.now() - startedAt < timeoutMs) {
+    throwIfAborted(signal);
     const response = await supervisor.call<{ thread: CodexThread }>("thread/read", {
-      threadId: helperThreadId,
+      threadId,
       includeTurns: true
     });
     const turn = response.thread.turns.find((entry) => entry.id === turnId);
     if (!turn) {
-      await delay(350);
+      await delayWithSignal(350, signal);
       continue;
     }
 
@@ -2849,11 +2918,11 @@ async function waitForSuggestedReply(helperThreadId: string, turnId: string): Pr
         return suggestion;
       }
       sawCompletedTurnWithoutOutput = true;
-      await delay(350);
+      await delayWithSignal(350, signal);
       continue;
     }
 
-    await delay(350);
+    await delayWithSignal(350, signal);
   }
 
   if (sawCompletedTurnWithoutOutput) {
@@ -4002,7 +4071,13 @@ function buildOrchestratorJobDefinitions(): JobDefinitionsMap {
         strategy: "interrupt_turn",
         gracefulWaitMs: 1_500
       },
-      run: async (_ctx: unknown, payload: SuggestReplyJobPayload) => generateSuggestedReplyForJob(payload)
+      run: async (ctx: JobRunContext, payload: SuggestReplyJobPayload) =>
+        generateSuggestedReplyForJob(payload, {
+          signal: ctx.signal,
+          onTurnStarted: (threadId, turnId) => {
+            ctx.setRunningContext({ threadId, turnId });
+          }
+        })
     });
   }
 
@@ -4073,9 +4148,12 @@ function buildOrchestratorJobDefinitions(): JobDefinitionsMap {
           completedAt: Date.now()
         });
       },
-      run: async (ctx: { setRunningContext: (value: { threadId: string; turnId: string }) => void }, payload: FileChangeExplainJobPayload) =>
-        generateFileChangeExplainabilityForJob(payload, (threadId, turnId) => {
-          ctx.setRunningContext({ threadId, turnId });
+      run: async (ctx: JobRunContext, payload: FileChangeExplainJobPayload) =>
+        generateFileChangeExplainabilityForJob(payload, {
+          signal: ctx.signal,
+          onTurnStarted: (threadId, turnId) => {
+            ctx.setRunningContext({ threadId, turnId });
+          }
         })
     });
   }

@@ -620,3 +620,59 @@ test("stop cancels running work when drain window is exhausted", async () => {
   assert.equal(terminal?.state, "canceled");
   assert.equal(terminal?.error, "shutdown");
 });
+
+test("stop force-cancels non-cooperative jobs without hanging shutdown", async () => {
+  const definitions: JobDefinitionsMap = {
+    non_cooperative: {
+      type: "non_cooperative",
+      version: 1,
+      priority: "interactive",
+      payloadSchema: z.object({ key: z.string() }),
+      resultSchema: z.object({ ok: z.boolean() }),
+      dedupe: {
+        key: () => null,
+        mode: "none"
+      },
+      retry: {
+        maxAttempts: 1,
+        classify: () => "fatal",
+        baseDelayMs: 10,
+        maxDelayMs: 20,
+        jitter: false
+      },
+      timeoutMs: 10_000,
+      cancel: {
+        strategy: "interrupt_turn",
+        gracefulWaitMs: 0
+      },
+      run: async () => {
+        return await new Promise<{ ok: boolean }>(() => {
+          // Intentionally never settles and ignores abort to simulate a wedged worker.
+        });
+      }
+    }
+  };
+
+  const { queue } = createQueue({
+    definitions,
+    globalConcurrency: 1
+  });
+  await queue.start();
+
+  const enqueued = await queue.enqueue({
+    type: "non_cooperative",
+    projectId: "p1",
+    sourceSessionId: "s1",
+    payload: { key: "wedged" }
+  });
+
+  await waitForState(queue, enqueued.job.id, "running", 1_000);
+  const startedAt = Date.now();
+  await queue.stop({ drainMs: 20 });
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.ok(elapsedMs < 1_000, `stop should not hang on non-cooperative jobs, elapsed=${elapsedMs}ms`);
+  const terminal = queue.get(enqueued.job.id);
+  assert.equal(terminal?.state, "canceled");
+  assert.ok(terminal?.error === "shutdown_timeout" || terminal?.error === "interrupt_timeout");
+});

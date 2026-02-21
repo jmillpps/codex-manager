@@ -2125,6 +2125,101 @@ export function App() {
       }
     }
   }, [approvalActionById]);
+  useEffect(() => {
+    const pending = pendingSuggestReplyJob;
+    if (!pending) {
+      return;
+    }
+
+    let canceled = false;
+    let timerId: number | null = null;
+
+    const clearTimer = (): void => {
+      if (timerId !== null) {
+        window.clearTimeout(timerId);
+        timerId = null;
+      }
+    };
+
+    const settlePendingFromJob = (state: string, result: unknown, error: unknown): void => {
+      if (state === "completed") {
+        const resultRecord = asRecord(result);
+        const suggestion = resultRecord && typeof resultRecord.suggestion === "string" ? resultRecord.suggestion.trim() : "";
+        if (
+          suggestion.length > 0 &&
+          selectedSessionIdRef.current === pending.sessionId &&
+          suggestedReplyRequestIdRef.current === pending.requestId &&
+          draftRef.current.trim() === pending.draftAtStart
+        ) {
+          setDraft(suggestion);
+        }
+        setPendingSuggestReplyJob((current) => (current && current.jobId === pending.jobId ? null : current));
+        setEnqueueingSuggestedReply(false);
+        return;
+      }
+
+      if (state === "failed" || state === "canceled") {
+        const message =
+          typeof error === "string" && error.trim().length > 0 ? error.trim() : "suggested reply job failed";
+        if (selectedSessionIdRef.current === pending.sessionId) {
+          setError(message);
+        }
+        setPendingSuggestReplyJob((current) => (current && current.jobId === pending.jobId ? null : current));
+        setEnqueueingSuggestedReply(false);
+      }
+    };
+
+    const schedulePoll = (delayMs: number): void => {
+      if (canceled) {
+        return;
+      }
+      clearTimer();
+      timerId = window.setTimeout(() => {
+        void poll();
+      }, delayMs);
+    };
+
+    const poll = async (): Promise<void> => {
+      if (canceled) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`${apiBase}/orchestrator/jobs/${encodeURIComponent(pending.jobId)}`);
+        if (!response.ok) {
+          if (response.status === 404) {
+            setPendingSuggestReplyJob((current) => (current && current.jobId === pending.jobId ? null : current));
+            setEnqueueingSuggestedReply(false);
+            return;
+          }
+          schedulePoll(4_000);
+          return;
+        }
+
+        const payload = (await response.json()) as { status?: string; job?: { state?: string; result?: unknown; error?: unknown } };
+        if (payload.status !== "ok" || !payload.job || typeof payload.job.state !== "string") {
+          schedulePoll(4_000);
+          return;
+        }
+
+        if (payload.job.state === "queued" || payload.job.state === "running") {
+          schedulePoll(2_500);
+          return;
+        }
+
+        settlePendingFromJob(payload.job.state, payload.job.result, payload.job.error);
+      } catch {
+        schedulePoll(4_000);
+      }
+    };
+
+    schedulePoll(3_000);
+
+    return () => {
+      canceled = true;
+      clearTimer();
+    };
+  }, [apiBase, pendingSuggestReplyJob]);
   const selectedSession = useMemo(
     () => sessions.find((session) => session.sessionId === selectedSessionId) ?? null,
     [sessions, selectedSessionId]

@@ -657,3 +657,73 @@ Phase completion status (current repository implementation):
 - Extensibility via typed JobDefinition registry defined.
 - FileChange enqueue eligibility tightened.
 - Store durability and corruption handling defined.
+
+---
+
+## Post-Review Remediation (Completed)
+
+The following four issues were identified during implementation review and are now resolved in code.
+
+### 1) Queue shutdown/cancel could hang on non-cooperative workers
+
+Issue:
+
+- Queue `stop()` awaited running promises without a hard upper bound.
+- Jobs that ignored `AbortSignal` could keep the lane wedged during shutdown.
+
+Resolution:
+
+1. Added bounded shutdown settle window after cancel requests.
+2. Added forced terminal transition for lingering running jobs (`shutdown_timeout`) when workers do not cooperate.
+3. Added warning logs for forced shutdown cancellation events.
+4. Added unit test coverage for non-cooperative worker shutdown behavior.
+
+Resulting contract:
+
+- `stop({ drainMs })` is now bounded and does not hang indefinitely on wedged job runners.
+
+### 2) `suggest_reply` cancel strategy could not interrupt active turn
+
+Issue:
+
+- `suggest_reply` used `interrupt_turn` but did not set queue `runningContext` (`threadId`/`turnId`), so interrupt could not be routed.
+
+Resolution:
+
+1. `suggest_reply` run path now reports active `threadId`/`turnId` via `ctx.setRunningContext(...)` once `turn/start` returns.
+2. Suggest worker now runs with `ctx.signal` propagation for cooperative cancel/timeout handling.
+
+Resulting contract:
+
+- Running `suggest_reply` cancel requests can route turn interrupts to the correct active turn context.
+
+### 3) File-change explainability could enqueue from system-owned sessions
+
+Issue:
+
+- Enqueue filter did not explicitly reject system-owned source sessions.
+
+Resolution:
+
+1. Added system-owned session guard to explainability payload eligibility.
+2. System-owned source threads are now ignored for `file_change_explain` enqueue.
+
+Resulting contract:
+
+- Explainability enqueue is restricted to eligible user-session file-change completions only.
+
+### 4) Web suggest-reply could remain stuck pending if websocket terminal event was missed
+
+Issue:
+
+- Pending suggest state was websocket-terminal-event dependent with no reconcile fallback.
+
+Resolution:
+
+1. Added client-side reconcile polling for pending suggest jobs using `GET /api/orchestrator/jobs/:jobId`.
+2. Poller clears pending state on terminal job states and applies suggestion with existing guard checks.
+3. Poller retries transient lookup failures and self-cancels once job is terminal/cleared.
+
+Resulting contract:
+
+- Suggest-reply pending state is self-healing when websocket delivery misses terminal job events.

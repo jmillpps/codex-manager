@@ -45,6 +45,7 @@ Use this with:
     - suggest-reply jobs are single-flight per source chat (`already_queued` dedupe when one is queued/running).
   - suggest-reply generation supports optional reasoning effort override (`effort`) for suggestion-generation turns.
   - suggest-reply helper fallback is disabled by default in queue mode; optional helper fallback is controlled by `ORCHESTRATOR_SUGGEST_REPLY_ALLOW_HELPER_FALLBACK`.
+  - suggest/file-change queue workers now propagate queue abort signals and running turn context so cancel/timeout behavior can interrupt active orchestrator turns and avoid wedged shutdown lanes.
   - completed eligible `fileChange` items enqueue background `file_change_explain` jobs, and lifecycle writes synthetic explainability transcript rows anchored to the source diff item.
   - orchestrator queue inspection/cancel APIs:
     - `GET /api/orchestrator/jobs/:jobId`
@@ -161,6 +162,7 @@ Use this with:
   - when approval policy is `never`, panel displays `Escalation requests disabled for this chat.` and runtime state avoids approval-focused copy.
   - model list hydration is normalized to one entry per model id, and same-session synchronization now preserves a valid local model/effort selection instead of reapplying fallback/session defaults during unrelated state updates.
   - suggest-reply interactions are queue-job guarded: duplicate clicks while a suggest job is pending are suppressed, and composer updates apply only when websocket completion events match the active request guard (`sessionId` + draft snapshot + request id + job id).
+  - suggest-reply pending state includes job-status reconcile polling against `GET /api/orchestrator/jobs/:jobId`, so missed websocket terminal events do not leave the composer in a permanently pending state.
   - pending approval cards and approval decisions.
   - tool-input request cards with answer submission.
   - active-turn controls (interrupt + steer).
