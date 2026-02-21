@@ -13,12 +13,12 @@ Use this with:
 
 ## Last verified
 
-- Date: February 18, 2026
+- Date: February 21, 2026
 - Validation run:
+  - `pnpm --filter @repo/api typecheck` (pass)
+  - `pnpm --filter @repo/api test` (pass)
   - `pnpm --filter @repo/web typecheck` (pass)
-  - `pnpm --filter @repo/web test -- --runInBand` (pass)
-  - `pnpm test:e2e -- tests/e2e/approvals.spec.ts` (pass)
-  - `pnpm test:e2e -- tests/e2e/streaming-core.spec.ts` (pass)
+  - `pnpm --filter @repo/web test` (pass)
 
 ## Current implemented scope
 
@@ -39,8 +39,17 @@ Use this with:
   - session controls API supports persisted per-chat and default tuples via `GET/POST /api/sessions/:sessionId/session-controls` with explicit scope (`session` / `default`), lock-aware default editing (`SESSION_DEFAULTS_LOCKED`), and audit-log transcript entries for control changes (`old -> new`, actor, source=`ui`).
   - send message applies the persisted session-controls tuple (`model`, approval policy, network access, filesystem sandbox) and still accepts optional per-turn overrides for compatibility.
   - thread lifecycle calls (`thread/start`, `thread/fork`, `thread/resume`) optimistically request `experimentalRawEvents` and automatically retry without it when unsupported (`requires experimentalApi capability`) so runtime compatibility is preserved across app-server versions.
-  - suggested reply endpoint (`POST /api/sessions/:sessionId/suggested-reply`) that uses the project orchestration chat when the source chat belongs to a project (falls back to helper thread for unassigned chats), sanitizes orchestration scaffolding from model output, supports non-materialized chats by returning draft-based fallback text (or `409 no_context` when no draft/context exists), and hard-cleans helper sessions so they do not leak into user-visible chat lists.
-  - suggested reply also supports optional reasoning effort override (`effort`) for suggestion-generation turns.
+  - queue-backed suggested reply APIs:
+    - `POST /api/sessions/:sessionId/suggested-reply/jobs` enqueues `suggest_reply` and returns `202` with queue dedupe status.
+    - `POST /api/sessions/:sessionId/suggested-reply` enqueues the same job and waits briefly (`ORCHESTRATOR_SUGGEST_REPLY_WAIT_MS`) before returning `200` suggestion or `202 queued`.
+    - suggest-reply jobs are single-flight per source chat (`already_queued` dedupe when one is queued/running).
+  - suggest-reply generation supports optional reasoning effort override (`effort`) for suggestion-generation turns.
+  - suggest-reply helper fallback is disabled by default in queue mode; optional helper fallback is controlled by `ORCHESTRATOR_SUGGEST_REPLY_ALLOW_HELPER_FALLBACK`.
+  - completed eligible `fileChange` items enqueue background `file_change_explain` jobs, and lifecycle writes synthetic explainability transcript rows anchored to the source diff item.
+  - orchestrator queue inspection/cancel APIs:
+    - `GET /api/orchestrator/jobs/:jobId`
+    - `GET /api/projects/:projectId/orchestrator/jobs`
+    - `POST /api/orchestrator/jobs/:jobId/cancel`
   - thread actions: fork, compact, rollback, background terminals clean, review start.
   - turn steering endpoint for active turns.
 - Approvals + tool user-input:
@@ -65,6 +74,7 @@ Use this with:
   - protocol notifications + approvals.
   - session/project metadata updates.
   - tool user-input requested/resolved.
+  - orchestrator queue lifecycle events (`orchestrator_job_queued|started|progress|completed|failed|canceled`).
   - plan/diff/token-usage updates.
   - app/account/mcp update notifications.
 - Error handling:
@@ -74,6 +84,7 @@ Use this with:
   - `GET /api/sessions` merges persisted `thread/list` output with `thread/loaded/list` so newly created, non-materialized chats appear immediately.
   - Session summaries expose `materialized` (`true` when backed by persisted rollout state; `false` for loaded in-memory threads read via `includeTurns: false` fallback).
   - Session summaries expose `projectId` (`string | null`) so assigned chats render under project sections and unassigned chats render under `Your chats`.
+  - System-owned orchestration/helper sessions are hidden from session lists and denied for normal chat operations with HTTP `403` + `code: "system_session"`.
   - Session summaries expose `sessionControls` (`model | approvalPolicy | networkAccess | filesystemSandbox`) and retain `approvalPolicy` for backward compatibility.
   - `POST /api/sessions/:sessionId/approval-policy` and `POST /api/sessions/:sessionId/messages` now require the target session to resolve via runtime existence checks; unknown/invalid/deleted-after-restart ids return `404 not_found` and do not create session-control metadata entries.
   - `POST /api/sessions/:sessionId/messages` persists per-chat session controls only after turn acceptance (`202`), preventing orphan control writes when `turn/start` fails.
@@ -91,7 +102,9 @@ Use this with:
   - Transcript assembly now canonicalizes per-turn synthetic `item-N` rows emitted by raw-events fallbacks: when a canonical same-turn item exists, matching synthetic duplicates are removed (including duplicate user/assistant/reasoning rows) so reload/restart does not double-render thought content.
   - Supplemental transcript rows now capture locally observed item timing (`startedAt`/`completedAt`) when Codex item payloads omit timestamps, and merge/upsert logic preserves earliest start plus latest completion per item id for stronger post-restart timing fidelity.
   - `POST /api/sessions/:sessionId/suggested-reply` now builds context from the same merged/canonicalized transcript pipeline as `GET /api/sessions/:sessionId`, keeping suggested-reply context consistent with visible chat history after reload/restart.
-  - Suggested-reply helper sessions are persisted as harness metadata for cleanup, filtered out of `GET /api/sessions`, filtered from forwarded stream traffic, auto-declined/canceled for helper-thread approvals/tool-input requests, and cleaned on startup plus post-request finally cleanup.
+  - `GET /api/health` exposes orchestrator queue availability and state counters (`enabled`, queued/running/completed/failed/canceled/projects).
+  - Explainability supplemental transcript rows (`type: fileChange.explainability`) are upserted by stable message id and anchored after the corresponding file-change item when present in-turn.
+  - Suggested-reply helper sessions remain harness metadata for optional fallback mode and are still filtered from `GET /api/sessions`, filtered from forwarded stream traffic, auto-declined/canceled for helper-thread approvals/tool-input requests, and cleaned on startup plus post-request finally cleanup.
 
 ### Web (`apps/web`)
 
@@ -104,7 +117,7 @@ Use this with:
   - project-level and chat-level context menus with nested move menus/flyouts, including project-scoped bulk operations and project-aware move destinations.
 - Session/project actions:
   - create, rename, archive/unarchive, hard delete with confirmation.
-  - project creation inserts an auto-created orchestration chat into the project chat list immediately.
+  - project creation still provisions an orchestration session, but it is system-owned/hidden and does not render as a user chat row.
   - project creation/rename/delete, bulk move/delete chats, session assignment and move flows.
   - project context menu action to set/clear project working directory; new chats from that project start in that directory.
   - selected chat is persisted by `sessionId` in tab-scoped browser storage across page reloads/HMR so duplicate chat titles do not cause selection drift.
@@ -135,6 +148,7 @@ Use this with:
   - expanded thought panels collapse only from background/plain-thought clicks; clicks inside event/approval bubbles and their controls do not auto-collapse.
   - expanded thought details render reasoning summary/content line rows and inline tool/approval/tool-input context with actions.
   - command and file-change approvals render as compact action-first rows (`Approval required to run …`, `Approval required to create/modify/delete/move file …`) with inline decision actions; decision UX is websocket-authoritative (buttons enter submitting state locally, pending/resolved transitions are applied from runtime events, and a bounded fallback reconcile reloads pending approvals after submit if a resolution event is missed), approval rows are rendered only while pending (resolved/expired approval update rows are intentionally suppressed), pending file-change approvals include an inline dark-theme diff/content preview above decision buttons and suppress duplicate pending file-change item rows until approved, command-execution rows render inline terminal-style dark blocks (no nested wrapper bubble) with prompt lines whose `~` prefix is mapped to inferred user home from runtime cwd paths, and file-change rows render structured dark-theme diffs with add/remove/hunk/context coloring where displayed file paths and absolute home-path text in diff lines are normalized to `~`. Approval/tool-input hydration now merges late REST snapshots with newer websocket-delivered pending items for the active chat so fresh approval/input requests are not dropped by stale in-flight loads.
+  - synthetic explainability transcript entries (`type: fileChange.explainability`) are rendered in thought details as markdown explainability blocks once queued background analysis rows complete.
   - composer uses a single message input; `Suggest Reply` populates that same draft box and `Ctrl+Enter` sends.
 - chat view includes a pinned `Session Controls` panel that defaults to a collapsed summary chip and expands on demand, with explicit Apply/Revert semantics for `Model`, `Approval Policy` (`untrusted` / `on-failure` / `on-request` / `never`), `Network Access` (`restricted` / `enabled`), and `Filesystem Sandbox` (`read-only` / `workspace-write` / `danger-full-access`).
 - approval policy values are canonical protocol literals end-to-end (`untrusted`, `on-failure`, `on-request`, `never`).
@@ -146,7 +160,7 @@ Use this with:
   - each summary segment is hover-descriptive (native tooltip) so users can inspect value semantics inline (`model`, `thinking`, `approval`, `network`, `sandbox`) without leaving the chat view; selector controls and selector options also expose matching tooltips for the currently selected value and available alternatives.
   - when approval policy is `never`, panel displays `Escalation requests disabled for this chat.` and runtime state avoids approval-focused copy.
   - model list hydration is normalized to one entry per model id, and same-session synchronization now preserves a valid local model/effort selection instead of reapplying fallback/session defaults during unrelated state updates.
-  - suggest-reply requests are race-guarded so late responses do not overwrite the draft after session switches or user edits.
+  - suggest-reply interactions are queue-job guarded: duplicate clicks while a suggest job is pending are suppressed, and composer updates apply only when websocket completion events match the active request guard (`sessionId` + draft snapshot + request id + job id).
   - pending approval cards and approval decisions.
   - tool-input request cards with answer submission.
   - active-turn controls (interrupt + steer).
@@ -158,7 +172,7 @@ Use this with:
 
 ### API client and contracts
 
-- OpenAPI/client generation covers core session/settings/account/tool-input APIs, but currently does not yet model the newer session-controls tuple endpoints/fields (`/sessions/:id/session-controls`, and message/create control tuple fields) in generated helper signatures.
+- OpenAPI/client generation covers core session/settings/account/tool-input APIs, but currently does not yet model all newer orchestrator/session-control surfaces in generated helper signatures (for example `/sessions/:id/session-controls`, queue-backed suggested-reply jobs endpoint, and orchestrator job inspection/cancel endpoints).
 - Generated API client includes helpers for:
   - project bulk operations,
   - project creation with optional `orchestrationSession` response payload,
@@ -173,10 +187,10 @@ Use this with:
 
 ### Passing checks
 
+- `pnpm --filter @repo/api typecheck`
+- `pnpm --filter @repo/api test`
 - `pnpm --filter @repo/web typecheck`
-- `pnpm --filter @repo/web test -- --runInBand`
-- `pnpm test:e2e -- tests/e2e/approvals.spec.ts`
-- `pnpm test:e2e -- tests/e2e/streaming-core.spec.ts`
+- `pnpm --filter @repo/web test`
 
 ### Current validation limitations
 

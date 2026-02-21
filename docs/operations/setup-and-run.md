@@ -38,7 +38,10 @@ Key runtime semantics operators should know:
 - Session listing merges persisted threads (`thread/list`) with currently loaded non-materialized threads (`thread/loaded/list`) so newly created chats are visible immediately.
 - Non-materialized chats are in-memory runtime state and are not guaranteed to survive API/Codex restart until a first turn materializes rollout state.
 - Session hard delete is a harness extension (`DELETE /api/sessions/:sessionId`) because app-server has no native `thread/delete`.
-- Suggested-reply (`POST /api/sessions/:sessionId/suggested-reply`) routes through project orchestrator chat when available, falls back to helper-thread strategy, and cleans helper sessions so they do not appear in lists or stream traffic.
+- Suggested-reply is queue-backed: `POST /api/sessions/:sessionId/suggested-reply/jobs` always enqueues `suggest_reply`; legacy `POST /api/sessions/:sessionId/suggested-reply` enqueues the same job then waits briefly for completion before returning either `200` suggestion or `202 queued`.
+- Suggest-reply queueing is single-flight per source chat: duplicate clicks while one suggest job is queued/running do not enqueue a second job.
+- Completed eligible file changes enqueue best-effort background explainability jobs that stream synthetic anchored transcript rows (`type: fileChange.explainability`) without blocking foreground turn streaming.
+- Orchestrator sessions are system-owned worker infrastructure: hidden from user session lists and denied for normal user chat operations (`403 system_session`).
 - Project deletion enforces emptiness against live sessions only; stale assignment metadata is pruned during delete before emptiness is evaluated.
 - In the web UI, the left sidebar and right chat pane scroll independently and the composer remains pinned in the right pane; transcript tail-follow uses hysteresis, `Jump to bottom` is an absolute overlay so approval/event bursts do not shift scroll geometry, and incoming approval requests for the active chat force-focus bottom with a short snap-back window (brief settle delay before the first snap, also re-armed on approve) to preserve anchoring through approval transition jitter.
 
@@ -163,6 +166,21 @@ DEFAULT_APPROVAL_POLICY=untrusted
 # Baseline sandbox mode for new/resumed threads.
 # Recommended default to force explicit approval for writes:
 DEFAULT_SANDBOX_MODE=read-only
+
+# Orchestrator queue controls
+ORCHESTRATOR_QUEUE_ENABLED=true
+ORCHESTRATOR_QUEUE_GLOBAL_CONCURRENCY=2
+ORCHESTRATOR_QUEUE_MAX_PER_PROJECT=100
+ORCHESTRATOR_QUEUE_MAX_GLOBAL=500
+ORCHESTRATOR_QUEUE_MAX_ATTEMPTS=2
+ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS=60000
+ORCHESTRATOR_QUEUE_BACKGROUND_AGING_MS=15000
+ORCHESTRATOR_QUEUE_MAX_INTERACTIVE_BURST=3
+ORCHESTRATOR_SUGGEST_REPLY_ENABLED=true
+ORCHESTRATOR_SUGGEST_REPLY_ALLOW_HELPER_FALLBACK=false
+ORCHESTRATOR_SUGGEST_REPLY_WAIT_MS=12000
+ORCHESTRATOR_DIFF_EXPLAIN_ENABLED=true
+ORCHESTRATOR_DIFF_EXPLAIN_MAX_DIFF_CHARS=50000
 ```
 
 Operational rules:
@@ -172,6 +190,7 @@ Operational rules:
 - If `CODEX_HOME` is set and `CODEX_HOME/auth.json` is missing, the API attempts a one-time bootstrap from `~/.codex/auth.json` on startup.
 - `DEFAULT_APPROVAL_POLICY=untrusted` keeps non-read operations behind approval.
 - `DEFAULT_SANDBOX_MODE=read-only` ensures file writes require explicit approval before execution.
+- Queue-degraded mode is opt-in: set `ORCHESTRATOR_QUEUE_ENABLED=false` only for diagnostics; suggest-reply queue APIs and orchestrator job APIs return `503 job_conflict` while disabled.
 
 ---
 

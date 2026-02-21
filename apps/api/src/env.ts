@@ -26,6 +26,7 @@ const envSchema = z.object({
   ORCHESTRATOR_QUEUE_BACKGROUND_AGING_MS: z.coerce.number().int().min(0).default(15_000),
   ORCHESTRATOR_QUEUE_MAX_INTERACTIVE_BURST: z.coerce.number().int().positive().default(3),
   ORCHESTRATOR_SUGGEST_REPLY_ENABLED: z.enum(["true", "false"]).default("true"),
+  ORCHESTRATOR_SUGGEST_REPLY_ALLOW_HELPER_FALLBACK: z.enum(["true", "false"]).default("false"),
   ORCHESTRATOR_SUGGEST_REPLY_WAIT_MS: z.coerce.number().int().positive().default(12_000),
   ORCHESTRATOR_DIFF_EXPLAIN_ENABLED: z.enum(["true", "false"]).default("true"),
   ORCHESTRATOR_DIFF_EXPLAIN_MAX_DIFF_CHARS: z.coerce.number().int().positive().default(50_000)
@@ -61,6 +62,7 @@ export const env = {
   SESSION_DEFAULTS_LOCKED: parsed.SESSION_DEFAULTS_LOCKED === "true",
   ORCHESTRATOR_QUEUE_ENABLED: parsed.ORCHESTRATOR_QUEUE_ENABLED === "true",
   ORCHESTRATOR_SUGGEST_REPLY_ENABLED: parsed.ORCHESTRATOR_SUGGEST_REPLY_ENABLED === "true",
+  ORCHESTRATOR_SUGGEST_REPLY_ALLOW_HELPER_FALLBACK: parsed.ORCHESTRATOR_SUGGEST_REPLY_ALLOW_HELPER_FALLBACK === "true",
   ORCHESTRATOR_DIFF_EXPLAIN_ENABLED: parsed.ORCHESTRATOR_DIFF_EXPLAIN_ENABLED === "true",
   WORKSPACE_ROOT: workspaceRoot,
   DATA_DIR: resolveFromWorkspaceRoot(parsed.DATA_DIR),

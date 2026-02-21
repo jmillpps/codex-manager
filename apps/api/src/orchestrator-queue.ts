@@ -203,6 +203,46 @@ export class OrchestratorQueue {
     return jobs;
   }
 
+  public stats(): {
+    queued: number;
+    running: number;
+    completed: number;
+    failed: number;
+    canceled: number;
+    projects: number;
+  } {
+    let queued = 0;
+    let running = 0;
+    let completed = 0;
+    let failed = 0;
+    let canceled = 0;
+    const projects = new Set<string>();
+
+    for (const job of this.jobsById.values()) {
+      projects.add(job.projectId);
+      if (job.state === "queued") {
+        queued += 1;
+      } else if (job.state === "running") {
+        running += 1;
+      } else if (job.state === "completed") {
+        completed += 1;
+      } else if (job.state === "failed") {
+        failed += 1;
+      } else if (job.state === "canceled") {
+        canceled += 1;
+      }
+    }
+
+    return {
+      queued,
+      running,
+      completed,
+      failed,
+      canceled,
+      projects: projects.size
+    };
+  }
+
   public async enqueue(input: EnqueueJobInput): Promise<EnqueueJobResult> {
     if (!this.started) {
       throw new OrchestratorQueueError("job_conflict", "orchestrator queue is not running", 409);
@@ -804,6 +844,19 @@ export class OrchestratorQueue {
         ...(extra?.progress ? { progress: extra.progress } : {})
       }
     });
+
+    this.logger?.info(
+      {
+        eventType: type,
+        jobId: job.id,
+        projectId: job.projectId,
+        jobType: job.type,
+        state: job.state,
+        attempt: job.attempts,
+        ...(extra?.error ? { reason: extra.error } : {})
+      },
+      "orchestrator queue state transition"
+    );
   }
 
   private resolveTerminalWaiters(job: OrchestratorJob): void {

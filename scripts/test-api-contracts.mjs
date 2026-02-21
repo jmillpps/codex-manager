@@ -98,7 +98,7 @@ function runNodeScript(scriptPath, env = {}) {
   });
 }
 
-function startApiProcess() {
+function startApiProcess(envOverrides = {}) {
   return spawn("pnpm", ["--filter", "@repo/api", "exec", "tsx", "src/index.ts"], {
     cwd: root,
     env: {
@@ -108,7 +108,8 @@ function startApiProcess() {
       DATA_DIR: dataDir,
       CODEX_HOME: codexHome,
       LOG_LEVEL: "warn",
-      DEFAULT_APPROVAL_POLICY: "on-failure"
+      DEFAULT_APPROVAL_POLICY: "on-failure",
+      ...envOverrides
     },
     stdio: "inherit"
   });
@@ -449,6 +450,38 @@ async function main() {
       "single-flight dedupe should return the existing suggest job"
     );
 
+    const queueHealth = await request("/health");
+    assert.equal(queueHealth.status, 200);
+    assert.equal(queueHealth.body?.orchestratorQueue?.enabled, true);
+    assert.equal(typeof queueHealth.body?.orchestratorQueue?.queued, "number");
+    assert.equal(typeof queueHealth.body?.orchestratorQueue?.running, "number");
+
+    const queueJobDetail = await request(`/orchestrator/jobs/${encodeURIComponent(queuedSuggestReplyOne.body?.jobId ?? "")}`);
+    assert.equal(queueJobDetail.status, 200);
+    assert.equal(queueJobDetail.body?.status, "ok");
+    assert.equal(queueJobDetail.body?.job?.id, queuedSuggestReplyOne.body?.jobId);
+    assert.equal(typeof queueJobDetail.body?.job?.projectId, "string");
+
+    const queueProjectJobs = await request(
+      `/projects/${encodeURIComponent(queueJobDetail.body?.job?.projectId)}/orchestrator/jobs`
+    );
+    assert.equal(queueProjectJobs.status, 200);
+    assert.ok(
+      Array.isArray(queueProjectJobs.body?.data) &&
+        queueProjectJobs.body.data.some((job) => job?.id === queuedSuggestReplyOne.body?.jobId),
+      "project queue listing should include suggest job"
+    );
+
+    const missingQueueJobDetail = await request("/orchestrator/jobs/not-a-real-job");
+    assert.equal(missingQueueJobDetail.status, 404);
+    assert.equal(missingQueueJobDetail.body?.status, "not_found");
+
+    const missingQueueJobCancel = await request("/orchestrator/jobs/not-a-real-job/cancel", {
+      method: "POST"
+    });
+    assert.equal(missingQueueJobCancel.status, 404);
+    assert.equal(missingQueueJobCancel.body?.status, "not_found");
+
     const suggestedReply = await request(`/sessions/${encodeURIComponent(sessionId)}/suggested-reply`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -687,6 +720,55 @@ async function main() {
       API_BASE: apiBase,
       SMOKE_TIMEOUT_MS: "180000"
     });
+
+    await stopApiProcess(apiProcess);
+    apiProcess = startApiProcess({
+      ORCHESTRATOR_QUEUE_ENABLED: "false"
+    });
+    await waitForHealth();
+
+    const degradedHealth = await request("/health");
+    assert.equal(degradedHealth.status, 200);
+    assert.equal(degradedHealth.body?.orchestratorQueue?.enabled, false);
+
+    const degradedSessionCreate = await request("/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    });
+    assert.equal(degradedSessionCreate.status, 200);
+    const degradedSessionId = degradedSessionCreate.body?.session?.sessionId;
+    assert.equal(typeof degradedSessionId, "string");
+
+    const degradedSuggestQueue = await request(`/sessions/${encodeURIComponent(degradedSessionId)}/suggested-reply/jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ draft: "Draft for degraded queue test.", effort: "minimal" })
+    });
+    assert.equal(degradedSuggestQueue.status, 503);
+    assert.equal(degradedSuggestQueue.body?.code, "job_conflict");
+
+    const degradedSuggestLegacy = await request(`/sessions/${encodeURIComponent(degradedSessionId)}/suggested-reply`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ draft: "Draft for degraded queue test.", effort: "minimal" })
+    });
+    assert.equal(degradedSuggestLegacy.status, 503);
+    assert.equal(degradedSuggestLegacy.body?.code, "job_conflict");
+
+    const degradedJobLookup = await request("/orchestrator/jobs/test-job");
+    assert.equal(degradedJobLookup.status, 503);
+    assert.equal(degradedJobLookup.body?.code, "job_conflict");
+
+    const degradedProjectJobList = await request("/projects/test-project/orchestrator/jobs");
+    assert.equal(degradedProjectJobList.status, 503);
+    assert.equal(degradedProjectJobList.body?.code, "job_conflict");
+
+    const degradedJobCancel = await request("/orchestrator/jobs/test-job/cancel", {
+      method: "POST"
+    });
+    assert.equal(degradedJobCancel.status, 503);
+    assert.equal(degradedJobCancel.body?.code, "job_conflict");
 
     console.log("API_CONTRACT_OK");
   } finally {

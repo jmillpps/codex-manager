@@ -145,6 +145,36 @@ Checklist:
 - Or provide draft text in the suggest-reply request payload so fallback suggestion can be returned.
 - Confirm the target session id is not deleted (deleted sessions return HTTP `410`).
 
+#### Suggest-reply or orchestrator job APIs return 503 `job_conflict`
+
+Symptoms:
+
+- `POST /api/sessions/:sessionId/suggested-reply/jobs` returns `503` with `code: "job_conflict"`.
+- `GET /api/orchestrator/jobs/:jobId` / `GET /api/projects/:projectId/orchestrator/jobs` / `POST /api/orchestrator/jobs/:jobId/cancel` return `503`.
+
+Checklist:
+
+- Check `GET /api/health` and confirm `orchestratorQueue.enabled`.
+- Verify `ORCHESTRATOR_QUEUE_ENABLED=true` in API runtime environment.
+- Restart API after env changes.
+- If intentionally running degraded mode (`ORCHESTRATOR_QUEUE_ENABLED=false`), treat these responses as expected.
+
+#### Orchestrator queue returns 429 `queue_full`
+
+Symptoms:
+
+- Suggest/enqueue requests fail with `429` and `code: "queue_full"`.
+
+Checklist:
+
+- Inspect queue depth with:
+  - `GET /api/health` for global queue counters.
+  - `GET /api/projects/:projectId/orchestrator/jobs?state=queued` for per-project backlog.
+- Reduce event volume temporarily (for example by pausing bulk-trigger workflows).
+- Increase queue caps only after validating memory/throughput headroom:
+  - `ORCHESTRATOR_QUEUE_MAX_PER_PROJECT`
+  - `ORCHESTRATOR_QUEUE_MAX_GLOBAL`
+
 #### Project delete returns 409 `project_not_empty`
 
 Symptoms:

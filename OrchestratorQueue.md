@@ -10,7 +10,7 @@ Primary question this document answers:
 
 Status:
 
-- Proposed design (implementation pending).
+- Implemented baseline (Phases 1-5 completed in repository code).
 - Last updated: February 21, 2026.
 
 ---
@@ -525,6 +525,14 @@ Add to `apps/api/src/env.ts`:
 
 ## Implementation Plan
 
+Phase completion status (current repository implementation):
+
+- Phase 1: completed
+- Phase 2: completed
+- Phase 3: completed
+- Phase 4: completed
+- Phase 5: completed
+
 ### Phase 1: Framework Core
 
 1. Implement `JobDefinition` registry and queue manager.
@@ -649,4 +657,3 @@ Add to `apps/api/src/env.ts`:
 - Extensibility via typed JobDefinition registry defined.
 - FileChange enqueue eligibility tightened.
 - Store durability and corruption handling defined.
-

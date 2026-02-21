@@ -310,6 +310,10 @@ const listQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional()
 });
 
+const orchestratorJobsQuerySchema = z.object({
+  state: z.enum(["queued", "running", "completed", "failed", "canceled"]).optional()
+});
+
 const interruptBodySchema = z
   .object({
     turnId: z.string().min(1).optional()
@@ -2490,6 +2494,7 @@ function suggestionQueueProjectId(sessionId: string): string {
 async function generateSuggestedReplyForJob(payload: SuggestReplyJobPayload): Promise<SuggestReplyJobResult> {
   const context = await loadSuggestionContext(payload.sessionId);
   const contextEntries = context.contextEntries;
+  const helperFallbackEnabled = env.ORCHESTRATOR_SUGGEST_REPLY_ALLOW_HELPER_FALLBACK;
 
   if (contextEntries.length === 0) {
     const fallbackSuggestion = buildFallbackSuggestedReply(contextEntries, payload.draft);
@@ -2554,6 +2559,17 @@ async function generateSuggestedReplyForJob(payload: SuggestReplyJobPayload): Pr
           "project orchestrator suggestion turn failed"
         );
       }
+    }
+
+    if (!helperFallbackEnabled) {
+      if (fallbackReason === "unknown") {
+        fallbackReason = targetThreadId ? "project_orchestrator_unavailable" : "project_orchestrator_not_configured";
+      }
+      const fallbackSuggestion = buildFallbackSuggestedReply(contextEntries, payload.draft);
+      return {
+        suggestion: fallbackSuggestion,
+        requestKey: payload.requestKey
+      };
     }
 
     helperThreadId = await ensureSuggestionThread(payload.sessionId, context.sourceThread, payload.model);
@@ -4585,10 +4601,19 @@ app.get("/api/stream", { websocket: true }, (socket, request) => {
 });
 
 app.get("/api/health", async () => {
+  const queueStats = orchestratorQueue ? orchestratorQueue.stats() : null;
   return {
     status: "ok",
     service: "api",
     codex: supervisor.status(),
+    orchestratorQueue: queueStats
+      ? {
+          enabled: true,
+          ...queueStats
+        }
+      : {
+          enabled: false
+        },
     auth: currentAuthStatus(),
     timestamp: new Date().toISOString()
   };
@@ -5009,6 +5034,83 @@ app.get("/api/mcp/servers", async (request) => {
   );
 
   return response;
+});
+
+app.get("/api/orchestrator/jobs/:jobId", async (request, reply) => {
+  const params = z.object({ jobId: z.string().trim().min(1) }).parse(request.params);
+  const queue = ensureOrchestratorQueue(reply);
+  if (!queue) {
+    return {
+      status: "error",
+      code: "job_conflict",
+      message: "orchestrator queue is unavailable"
+    };
+  }
+
+  const job = queue.get(params.jobId);
+  if (!job) {
+    reply.code(404);
+    return {
+      status: "not_found",
+      jobId: params.jobId
+    };
+  }
+
+  return {
+    status: "ok",
+    job
+  };
+});
+
+app.get("/api/projects/:projectId/orchestrator/jobs", async (request, reply) => {
+  const params = z.object({ projectId: z.string().trim().min(1) }).parse(request.params);
+  const query = orchestratorJobsQuerySchema.parse(request.query);
+  const queue = ensureOrchestratorQueue(reply);
+  if (!queue) {
+    return {
+      status: "error",
+      code: "job_conflict",
+      message: "orchestrator queue is unavailable"
+    };
+  }
+
+  return {
+    data: queue.listByProject(params.projectId, query.state)
+  };
+});
+
+app.post("/api/orchestrator/jobs/:jobId/cancel", async (request, reply) => {
+  const params = z.object({ jobId: z.string().trim().min(1) }).parse(request.params);
+  const queue = ensureOrchestratorQueue(reply);
+  if (!queue) {
+    return {
+      status: "error",
+      code: "job_conflict",
+      message: "orchestrator queue is unavailable"
+    };
+  }
+
+  const canceled = await queue.cancel(params.jobId, "api_cancel");
+  if (canceled.status === "not_found") {
+    reply.code(404);
+    return {
+      status: "not_found",
+      jobId: params.jobId
+    };
+  }
+
+  if (canceled.status === "already_terminal") {
+    reply.code(409);
+    return {
+      status: "already_terminal",
+      job: canceled.job
+    };
+  }
+
+  return {
+    status: "ok",
+    job: canceled.job
+  };
 });
 
 app.get("/api/projects", async () => {

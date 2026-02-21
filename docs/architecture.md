@@ -193,14 +193,26 @@ Backend must:
 
 ---
 
-## Suggested Reply Generation (Harness Strategy)
+## Suggested Reply Generation (Queue-Backed Orchestrator Strategy)
 
-`codex app-server` does not expose a dedicated "suggest reply" primitive, so the backend composes this behavior from thread/turn methods:
+`codex app-server` does not expose a dedicated "suggest reply" primitive, so the backend composes this behavior from thread/turn methods and a harness queue:
 
-1. For sessions assigned to a project, the backend targets that project's orchestration session first.
-2. If orchestrator execution is unavailable or the source session is unassigned, the backend creates a temporary helper thread (read-only sandbox, `approvalPolicy: "never"`).
-3. Helper sessions are harness-owned internals: tracked in metadata for cleanup, filtered out of user-visible session lists/events, and hard-deleted after suggestion completion (plus startup cleanup on boot).
-4. If no transcript context exists (for example, non-materialized session with no turns), the API returns deterministic fallback semantics (`status: "fallback"` when draft text exists, otherwise `409 status: "no_context"`).
+1. `POST /api/sessions/:sessionId/suggested-reply/jobs` enqueues a `suggest_reply` orchestrator job and returns `202`.
+2. `POST /api/sessions/:sessionId/suggested-reply` uses the same queue path, waits up to a bounded window, then returns either a completed suggestion (`200`) or queued status (`202`) without duplicating the job.
+3. Suggest jobs are single-flight per source chat; repeated clicks while one suggest job is queued/running return the existing job identity (`dedupe: "already_queued"`).
+4. Job execution runs through system-owned project orchestration sessions that are hidden from user chat lists and blocked from user chat operations (`403 system_session`).
+5. Helper-thread fallback is disabled by default in queue mode; optional fallback can be re-enabled via `ORCHESTRATOR_SUGGEST_REPLY_ALLOW_HELPER_FALLBACK=true`.
+6. If the queue is disabled/unavailable, orchestrator job endpoints and suggest-reply queue endpoints return degraded `503` behavior with structured `job_conflict` errors.
+7. If no usable context is available when a suggest job completes, the endpoint returns `409 status: "no_context"` for that request path.
+
+## File-Change Explainability (Best-Effort Background Queue)
+
+Completed `fileChange` items from runtime notifications can enqueue a `file_change_explain` background job:
+
+1. Eligibility is filtered to successful, project-scoped, non-system-owned session file-change events with usable diff/change detail.
+2. Explainability rows are written as synthetic supplemental transcript entries keyed by stable ids and anchored to the source file-change item.
+3. Transcript merge places explainability entries directly after the anchored file-change item when present in the same turn.
+4. Explainability is best-effort eventual background work; failures/cancelations are recorded as synthetic transcript updates and must not block foreground chat turn streaming.
 
 ---
 

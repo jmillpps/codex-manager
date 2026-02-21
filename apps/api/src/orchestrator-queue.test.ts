@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { z } from "zod";
-import { OrchestratorQueue } from "./orchestrator-queue.js";
+import { OrchestratorQueue, OrchestratorQueueError } from "./orchestrator-queue.js";
 import type {
   JobDefinitionsMap,
   OrchestratorQueueEvent,
@@ -36,6 +36,8 @@ function createQueue(input: {
   store?: InMemoryStore;
   events?: Array<OrchestratorQueueEvent>;
   globalConcurrency?: number;
+  maxPerProject?: number;
+  maxGlobal?: number;
   backgroundAgingMs?: number;
   maxInteractiveBurst?: number;
   interruptTurn?: (threadId: string, turnId: string) => Promise<void>;
@@ -47,6 +49,8 @@ function createQueue(input: {
     definitions: input.definitions,
     store,
     globalConcurrency: input.globalConcurrency ?? 1,
+    maxPerProject: input.maxPerProject,
+    maxGlobal: input.maxGlobal,
     backgroundAgingMs: input.backgroundAgingMs,
     maxInteractiveBurst: input.maxInteractiveBurst,
     hooks: {
@@ -420,4 +424,199 @@ test("startup recovery requeues running jobs and enforces max-attempt failure", 
   assert.equal(completed?.state, "completed");
 
   await queue.stop();
+});
+
+test("queue capacity enforces per-project and global limits", async () => {
+  const definitions: JobDefinitionsMap = {
+    capacity_job: {
+      type: "capacity_job",
+      version: 1,
+      priority: "interactive",
+      payloadSchema: z.object({ key: z.string() }),
+      resultSchema: z.object({ ok: z.boolean() }),
+      dedupe: {
+        key: () => null,
+        mode: "none"
+      },
+      retry: {
+        maxAttempts: 1,
+        classify: () => "fatal",
+        baseDelayMs: 10,
+        maxDelayMs: 20,
+        jitter: false
+      },
+      timeoutMs: 5_000,
+      cancel: {
+        strategy: "mark_canceled",
+        gracefulWaitMs: 0
+      },
+      run: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        return { ok: true };
+      }
+    }
+  };
+
+  const { queue } = createQueue({
+    definitions,
+    globalConcurrency: 1,
+    maxPerProject: 1,
+    maxGlobal: 2
+  });
+  await queue.start();
+
+  await queue.enqueue({
+    type: "capacity_job",
+    projectId: "p1",
+    sourceSessionId: "s1",
+    payload: { key: "first" }
+  });
+
+  await assert.rejects(
+    () =>
+      queue.enqueue({
+        type: "capacity_job",
+        projectId: "p1",
+        sourceSessionId: "s1",
+        payload: { key: "project-over-capacity" }
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof OrchestratorQueueError);
+      assert.equal(error.code, "queue_full");
+      assert.equal(error.statusCode, 429);
+      assert.match(error.message, /project capacity/i);
+      return true;
+    }
+  );
+
+  await queue.enqueue({
+    type: "capacity_job",
+    projectId: "p2",
+    sourceSessionId: "s2",
+    payload: { key: "second" }
+  });
+
+  await assert.rejects(
+    () =>
+      queue.enqueue({
+        type: "capacity_job",
+        projectId: "p3",
+        sourceSessionId: "s3",
+        payload: { key: "global-over-capacity" }
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof OrchestratorQueueError);
+      assert.equal(error.code, "queue_full");
+      assert.equal(error.statusCode, 429);
+      assert.match(error.message, /global capacity/i);
+      return true;
+    }
+  );
+
+  await queue.stop({ drainMs: 500 });
+});
+
+test("stop drains running work when drain window is sufficient", async () => {
+  const definitions: JobDefinitionsMap = {
+    drainable: {
+      type: "drainable",
+      version: 1,
+      priority: "interactive",
+      payloadSchema: z.object({ key: z.string() }),
+      resultSchema: z.object({ ok: z.boolean() }),
+      dedupe: {
+        key: () => null,
+        mode: "none"
+      },
+      retry: {
+        maxAttempts: 1,
+        classify: () => "fatal",
+        baseDelayMs: 10,
+        maxDelayMs: 20,
+        jitter: false
+      },
+      timeoutMs: 5_000,
+      cancel: {
+        strategy: "mark_canceled",
+        gracefulWaitMs: 0
+      },
+      run: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        return { ok: true };
+      }
+    }
+  };
+
+  const { queue } = createQueue({
+    definitions,
+    globalConcurrency: 1
+  });
+  await queue.start();
+
+  const enqueued = await queue.enqueue({
+    type: "drainable",
+    projectId: "p1",
+    sourceSessionId: "s1",
+    payload: { key: "drain" }
+  });
+
+  await waitForState(queue, enqueued.job.id, "running", 1_000);
+  await queue.stop({ drainMs: 500 });
+
+  const terminal = queue.get(enqueued.job.id);
+  assert.equal(terminal?.state, "completed");
+});
+
+test("stop cancels running work when drain window is exhausted", async () => {
+  const definitions: JobDefinitionsMap = {
+    long_running: {
+      type: "long_running",
+      version: 1,
+      priority: "interactive",
+      payloadSchema: z.object({ key: z.string() }),
+      resultSchema: z.object({ ok: z.boolean() }),
+      dedupe: {
+        key: () => null,
+        mode: "none"
+      },
+      retry: {
+        maxAttempts: 1,
+        classify: () => "fatal",
+        baseDelayMs: 10,
+        maxDelayMs: 20,
+        jitter: false
+      },
+      timeoutMs: 10_000,
+      cancel: {
+        strategy: "mark_canceled",
+        gracefulWaitMs: 0
+      },
+      run: async (ctx) => {
+        await new Promise<void>((resolve) => {
+          ctx.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return { ok: true };
+      }
+    }
+  };
+
+  const { queue } = createQueue({
+    definitions,
+    globalConcurrency: 1
+  });
+  await queue.start();
+
+  const enqueued = await queue.enqueue({
+    type: "long_running",
+    projectId: "p1",
+    sourceSessionId: "s1",
+    payload: { key: "cancel-on-stop" }
+  });
+
+  await waitForState(queue, enqueued.job.id, "running", 1_000);
+  await queue.stop({ drainMs: 10 });
+
+  const terminal = queue.get(enqueued.job.id);
+  assert.equal(terminal?.state, "canceled");
+  assert.equal(terminal?.error, "shutdown");
 });
