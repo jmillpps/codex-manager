@@ -16,7 +16,19 @@ const envSchema = z.object({
   DEFAULT_APPROVAL_POLICY: z.enum(["untrusted", "on-failure", "on-request", "never"]).default("untrusted"),
   DEFAULT_SANDBOX_MODE: z.enum(["read-only", "workspace-write", "danger-full-access"]).default("read-only"),
   DEFAULT_NETWORK_ACCESS: z.enum(["restricted", "enabled"]).default("restricted"),
-  SESSION_DEFAULTS_LOCKED: z.enum(["true", "false"]).default("false")
+  SESSION_DEFAULTS_LOCKED: z.enum(["true", "false"]).default("false"),
+  ORCHESTRATOR_QUEUE_ENABLED: z.enum(["true", "false"]).default("true"),
+  ORCHESTRATOR_QUEUE_GLOBAL_CONCURRENCY: z.coerce.number().int().positive().default(2),
+  ORCHESTRATOR_QUEUE_MAX_PER_PROJECT: z.coerce.number().int().positive().default(100),
+  ORCHESTRATOR_QUEUE_MAX_GLOBAL: z.coerce.number().int().positive().default(500),
+  ORCHESTRATOR_QUEUE_MAX_ATTEMPTS: z.coerce.number().int().positive().default(2),
+  ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+  ORCHESTRATOR_QUEUE_BACKGROUND_AGING_MS: z.coerce.number().int().min(0).default(15_000),
+  ORCHESTRATOR_QUEUE_MAX_INTERACTIVE_BURST: z.coerce.number().int().positive().default(3),
+  ORCHESTRATOR_SUGGEST_REPLY_ENABLED: z.enum(["true", "false"]).default("true"),
+  ORCHESTRATOR_SUGGEST_REPLY_WAIT_MS: z.coerce.number().int().positive().default(12_000),
+  ORCHESTRATOR_DIFF_EXPLAIN_ENABLED: z.enum(["true", "false"]).default("true"),
+  ORCHESTRATOR_DIFF_EXPLAIN_MAX_DIFF_CHARS: z.coerce.number().int().positive().default(50_000)
 });
 
 const parsed = envSchema.parse(process.env);
@@ -47,6 +59,9 @@ function resolveFromWorkspaceRoot(value: string): string {
 export const env = {
   ...parsed,
   SESSION_DEFAULTS_LOCKED: parsed.SESSION_DEFAULTS_LOCKED === "true",
+  ORCHESTRATOR_QUEUE_ENABLED: parsed.ORCHESTRATOR_QUEUE_ENABLED === "true",
+  ORCHESTRATOR_SUGGEST_REPLY_ENABLED: parsed.ORCHESTRATOR_SUGGEST_REPLY_ENABLED === "true",
+  ORCHESTRATOR_DIFF_EXPLAIN_ENABLED: parsed.ORCHESTRATOR_DIFF_EXPLAIN_ENABLED === "true",
   WORKSPACE_ROOT: workspaceRoot,
   DATA_DIR: resolveFromWorkspaceRoot(parsed.DATA_DIR),
   CODEX_HOME: parsed.CODEX_HOME ? resolveFromWorkspaceRoot(parsed.CODEX_HOME) : undefined

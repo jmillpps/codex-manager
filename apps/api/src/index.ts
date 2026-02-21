@@ -8,6 +8,16 @@ import websocket from "@fastify/websocket";
 import { z } from "zod";
 import { env } from "./env.js";
 import { CodexSupervisor } from "./codex-supervisor.js";
+import { OrchestratorQueue, OrchestratorQueueError } from "./orchestrator-queue.js";
+import { FileOrchestratorQueueStore } from "./orchestrator-store.js";
+import { createJobDefinitionsRegistry } from "./orchestrator-job-definitions.js";
+import {
+  suggestReplyJobPayloadSchema,
+  suggestReplyJobResultSchema,
+  type SuggestReplyJobPayload,
+  type SuggestReplyJobResult
+} from "./orchestrator-processors.js";
+import type { JobDefinitionsMap } from "./orchestrator-types.js";
 
 type JsonRpcNotification = {
   method: string;
@@ -537,6 +547,7 @@ const socketThreadFilter = new Map<WebSocketLike, string | null>();
 const codexHomeAuthFilePath = env.CODEX_HOME ? path.join(env.CODEX_HOME, "auth.json") : null;
 const sessionMetadataPath = path.join(env.DATA_DIR, "session-metadata.json");
 const supplementalTranscriptPath = path.join(env.DATA_DIR, "supplemental-transcript.json");
+const orchestratorJobsPath = path.join(env.DATA_DIR, "orchestrator-jobs.json");
 const syntheticTranscriptMessageIdPattern = /^item-\d+$/i;
 const sessionMetadata = await loadSessionMetadata();
 await loadSupplementalTranscriptStore();
@@ -548,6 +559,33 @@ let capabilitiesRefreshInFlight: Promise<void> | null = null;
 let experimentalRawEventsCapability: "unknown" | "supported" | "unsupported" = "unknown";
 let projectOrchestratorsEnsureInFlight: Promise<void> | null = null;
 let suggestionHelpersCleanupInFlight: Promise<void> | null = null;
+let orchestratorQueue: OrchestratorQueue | null = null;
+
+if (env.ORCHESTRATOR_QUEUE_ENABLED) {
+  orchestratorQueue = new OrchestratorQueue({
+    definitions: buildOrchestratorJobDefinitions(),
+    store: new FileOrchestratorQueueStore(orchestratorJobsPath, app.log),
+    hooks: {
+      emitEvent: (event) => {
+        publishToSockets(event.type, event.payload, event.threadId ?? undefined);
+      },
+      interruptTurn: async (threadId: string, turnId: string) => {
+        await supervisor.call("turn/interrupt", {
+          threadId,
+          turnId
+        });
+      }
+    },
+    logger: app.log,
+    globalConcurrency: env.ORCHESTRATOR_QUEUE_GLOBAL_CONCURRENCY,
+    maxPerProject: env.ORCHESTRATOR_QUEUE_MAX_PER_PROJECT,
+    maxGlobal: env.ORCHESTRATOR_QUEUE_MAX_GLOBAL,
+    defaultMaxAttempts: env.ORCHESTRATOR_QUEUE_MAX_ATTEMPTS,
+    defaultTimeoutMs: env.ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS,
+    backgroundAgingMs: env.ORCHESTRATOR_QUEUE_BACKGROUND_AGING_MS,
+    maxInteractiveBurst: env.ORCHESTRATOR_QUEUE_MAX_INTERACTIVE_BURST
+  });
+}
 
 const capabilityMethodProbes: Array<CapabilityMethodProbe> = [
   { method: "thread/fork", probeParams: {} },
@@ -1974,7 +2012,6 @@ function setSuggestionHelperSession(sessionId: string, enabled: boolean): boolea
     changed = true;
   }
 
-  changed = setSystemOwnedSession(sessionId, false) || changed;
   return changed;
 }
 
@@ -2367,6 +2404,165 @@ function buildFallbackSuggestedReply(contextEntries: Array<TranscriptEntry>, dra
   }
 
   return "Please continue with the next concrete step and include exact commands or code changes.";
+}
+
+function suggestionContextEntriesFromTranscript(transcript: Array<TranscriptEntry>): Array<TranscriptEntry> {
+  return transcript
+    .filter((entry) => (entry.role === "user" || entry.role === "assistant") && entry.content.trim().length > 0)
+    .slice(-12);
+}
+
+async function loadSuggestionContext(sessionId: string): Promise<{
+  sourceThread: CodexThread;
+  transcript: Array<TranscriptEntry>;
+  contextEntries: Array<TranscriptEntry>;
+}> {
+  let sourceThread: CodexThread;
+  let transcript: Array<TranscriptEntry>;
+
+  try {
+    const source = await supervisor.call<{ thread: CodexThread }>("thread/read", {
+      threadId: sessionId,
+      includeTurns: true
+    });
+    sourceThread = source.thread;
+    transcript = turnsToTranscript(sessionId, Array.isArray(source.thread.turns) ? source.thread.turns : []);
+  } catch (error) {
+    if (!isIncludeTurnsUnavailableError(error)) {
+      throw error;
+    }
+
+    const source = await supervisor.call<{ thread: CodexThread }>("thread/read", {
+      threadId: sessionId,
+      includeTurns: false
+    });
+    sourceThread = source.thread;
+    transcript = [];
+  }
+
+  transcript = mergeTranscriptWithSupplemental(sessionId, transcript);
+  return {
+    sourceThread,
+    transcript,
+    contextEntries: suggestionContextEntriesFromTranscript(transcript)
+  };
+}
+
+function suggestionQueueProjectId(sessionId: string): string {
+  const projectId = resolveSessionProjectId(sessionId);
+  if (projectId) {
+    return projectId;
+  }
+  return `session:${sessionId}`;
+}
+
+async function generateSuggestedReplyForJob(payload: SuggestReplyJobPayload): Promise<SuggestReplyJobResult> {
+  const context = await loadSuggestionContext(payload.sessionId);
+  const contextEntries = context.contextEntries;
+
+  if (contextEntries.length === 0) {
+    const fallbackSuggestion = buildFallbackSuggestedReply(contextEntries, payload.draft);
+    if (fallbackSuggestion.trim().length > 0 && typeof payload.draft === "string" && payload.draft.trim().length > 0) {
+      return {
+        suggestion: fallbackSuggestion,
+        requestKey: payload.requestKey
+      };
+    }
+    throw new Error("no_context");
+  }
+
+  let helperThreadId: string | null = null;
+  let targetThreadId: string | null = null;
+  let fallbackReason = "unknown";
+  const suggestionPrompt = buildSuggestionPrompt(contextEntries, payload.draft);
+  const runSuggestionTurn = async (threadId: string): Promise<string> => {
+    const turn = await supervisor.call<{ turn: { id: string } }>("turn/start", {
+      threadId,
+      model: payload.model,
+      effort: payload.effort as ReasoningEffort | undefined,
+      sandboxPolicy: toTurnSandboxPolicy("read-only"),
+      approvalPolicy: "never",
+      input: [
+        {
+          type: "text",
+          text: suggestionPrompt,
+          text_elements: []
+        }
+      ]
+    });
+
+    const rawSuggestion = await waitForSuggestedReply(threadId, turn.turn.id);
+    const suggestion = stripSuggestionScaffolding(rawSuggestion);
+    if (!suggestion) {
+      throw new Error("suggestion output contained only orchestration scaffolding");
+    }
+    return suggestion;
+  };
+
+  try {
+    const projectId = resolveSessionProjectId(payload.sessionId);
+    if (projectId) {
+      await ensureProjectOrchestrationSessions();
+      const orchestrationSessionId = sessionMetadata.projectOrchestratorSessionById[projectId];
+      if (typeof orchestrationSessionId === "string" && orchestrationSessionId.trim().length > 0) {
+        targetThreadId = orchestrationSessionId;
+      }
+    }
+
+    if (targetThreadId) {
+      try {
+        const suggestion = await runSuggestionTurn(targetThreadId);
+        return {
+          suggestion,
+          requestKey: payload.requestKey
+        };
+      } catch (orchestratorError) {
+        fallbackReason = "project_orchestrator_failed";
+        app.log.warn(
+          { error: orchestratorError, sessionId: payload.sessionId, targetThreadId },
+          "project orchestrator suggestion turn failed"
+        );
+      }
+    }
+
+    helperThreadId = await ensureSuggestionThread(payload.sessionId, context.sourceThread, payload.model);
+    targetThreadId = helperThreadId;
+    try {
+      const suggestion = await runSuggestionTurn(targetThreadId);
+      return {
+        suggestion,
+        requestKey: payload.requestKey
+      };
+    } catch (helperError) {
+      fallbackReason = targetThreadId === helperThreadId ? "helper_first_attempt_failed" : fallbackReason;
+      app.log.warn(
+        { error: helperError, sessionId: payload.sessionId, helperThreadId },
+        "helper suggestion turn failed; retrying with fresh helper thread"
+      );
+    }
+
+    helperThreadId = await ensureSuggestionThread(payload.sessionId, context.sourceThread, payload.model);
+    targetThreadId = helperThreadId;
+    const suggestion = await runSuggestionTurn(targetThreadId);
+    return {
+      suggestion,
+      requestKey: payload.requestKey
+    };
+  } catch (error) {
+    if (fallbackReason === "unknown") {
+      fallbackReason = "unexpected_error";
+    }
+    app.log.warn({ error, sessionId: payload.sessionId, fallbackReason }, "failed to generate suggested reply");
+    const fallbackSuggestion = buildFallbackSuggestedReply(contextEntries, payload.draft);
+    return {
+      suggestion: fallbackSuggestion,
+      requestKey: payload.requestKey
+    };
+  } finally {
+    if (helperThreadId) {
+      await cleanupSuggestionThread(payload.sessionId, helperThreadId);
+    }
+  }
 }
 
 async function ensureSuggestionThread(sessionId: string, sourceThread: CodexThread, model?: string): Promise<string> {
@@ -3372,31 +3568,6 @@ async function pruneStaleSessionControlMetadata(): Promise<number> {
   return classification.staleSessionIds.length;
 }
 
-async function pruneStaleSystemOwnedSessions(): Promise<number> {
-  const sessionIds = Object.keys(sessionMetadata.systemOwnedSessionIds);
-  if (sessionIds.length === 0) {
-    return 0;
-  }
-
-  const classification = await classifyProjectSessionAssignments(sessionIds);
-  if (classification.staleSessionIds.length === 0) {
-    return 0;
-  }
-
-  let changed = false;
-  for (const sessionId of classification.staleSessionIds) {
-    if (setSystemOwnedSession(sessionId, false)) {
-      changed = true;
-    }
-  }
-
-  if (changed) {
-    await persistSessionMetadata();
-  }
-
-  return classification.staleSessionIds.length;
-}
-
 async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOutcome> {
   if (isSessionPurged(sessionId)) {
     const helperMetadataChanged = setSuggestionHelperSession(sessionId, false);
@@ -3460,7 +3631,6 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
     const projectMetadataChanged = setSessionProjectAssignment(sessionId, null);
     const orchestratorMetadataChanged = clearProjectOrchestratorSessionForSession(sessionId);
     const helperMetadataChanged = setSuggestionHelperSession(sessionId, false);
-    const systemMetadataChanged = setSystemOwnedSession(sessionId, false);
     const policyMetadataChanged = setSessionApprovalPolicy(sessionId, null);
     const turnTimingMetadataChanged = clearSessionTurnTimings(sessionId);
     clearSupplementalTranscriptEntries(sessionId);
@@ -3469,7 +3639,6 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
       projectMetadataChanged ||
       orchestratorMetadataChanged ||
       helperMetadataChanged ||
-      systemMetadataChanged ||
       policyMetadataChanged ||
       turnTimingMetadataChanged
     ) {
@@ -3576,6 +3745,83 @@ function publishToSockets(type: string, payload: unknown, threadId?: string, opt
       app.log.warn({ error }, "failed to publish websocket message");
     }
   }
+}
+
+function buildOrchestratorJobDefinitions(): JobDefinitionsMap {
+  const definitions: Array<any> = [];
+
+  if (env.ORCHESTRATOR_SUGGEST_REPLY_ENABLED) {
+    definitions.push({
+      type: "suggest_reply",
+      version: 1,
+      priority: "interactive",
+      payloadSchema: suggestReplyJobPayloadSchema,
+      resultSchema: suggestReplyJobResultSchema,
+      dedupe: {
+        key: (payload: SuggestReplyJobPayload) => `${payload.projectId}:${payload.sessionId}:suggest_reply`,
+        mode: "single_flight"
+      },
+      retry: {
+        maxAttempts: env.ORCHESTRATOR_QUEUE_MAX_ATTEMPTS,
+        classify: (error: unknown) => {
+          const message =
+            error instanceof Error
+              ? error.message.toLowerCase()
+              : typeof error === "string"
+                ? error.toLowerCase()
+                : "";
+          if (message.includes("timed out") || message.includes("timeout")) {
+            return "retryable";
+          }
+          return "fatal";
+        },
+        baseDelayMs: 500,
+        maxDelayMs: 5_000,
+        jitter: true
+      },
+      timeoutMs: env.ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS,
+      cancel: {
+        strategy: "interrupt_turn",
+        gracefulWaitMs: 1_500
+      },
+      run: async (_ctx: unknown, payload: SuggestReplyJobPayload) => generateSuggestedReplyForJob(payload)
+    });
+  }
+
+  return createJobDefinitionsRegistry(definitions);
+}
+
+function ensureOrchestratorQueue(reply: { code: (statusCode: number) => void }): OrchestratorQueue | null {
+  if (!orchestratorQueue) {
+    reply.code(503);
+    return null;
+  }
+  return orchestratorQueue;
+}
+
+function sendOrchestratorQueueError(
+  reply: { code: (statusCode: number) => void },
+  error: unknown,
+  sessionId: string
+): {
+  status: "error";
+  code: "queue_full" | "job_conflict" | "invalid_payload";
+  sessionId: string;
+  message: string;
+} {
+  if (error instanceof OrchestratorQueueError) {
+    if (error.code === "queue_full" || error.code === "job_conflict" || error.code === "invalid_payload") {
+      reply.code(error.statusCode);
+      return {
+        status: "error",
+        code: error.code,
+        sessionId,
+        message: error.message
+      };
+    }
+  }
+
+  throw error;
 }
 
 function toPublicApproval(record: PendingApprovalRecord): PendingApproval {
@@ -5616,6 +5862,69 @@ app.post("/api/sessions/:sessionId/approval-policy", async (request, reply) => {
   };
 });
 
+app.post("/api/sessions/:sessionId/suggested-reply/jobs", async (request, reply) => {
+  const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
+  if (isSessionPurged(params.sessionId)) {
+    reply.code(410);
+    return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
+  }
+
+  const exists = await sessionExistsForProjectAssignment(params.sessionId);
+  if (!exists) {
+    reply.code(404);
+    return {
+      status: "not_found",
+      sessionId: params.sessionId
+    };
+  }
+
+  const queue = ensureOrchestratorQueue(reply);
+  if (!queue) {
+    return {
+      status: "error",
+      code: "job_conflict",
+      sessionId: params.sessionId,
+      message: "orchestrator queue is unavailable"
+    };
+  }
+
+  const body = suggestedReplyBodySchema.parse(request.body);
+  const projectId = suggestionQueueProjectId(params.sessionId);
+  const requestKey = randomUUID();
+
+  try {
+    const queued = await queue.enqueue({
+      type: "suggest_reply",
+      projectId,
+      sourceSessionId: params.sessionId,
+      payload: {
+        sessionId: params.sessionId,
+        projectId,
+        requestKey,
+        model: body?.model,
+        effort: body?.effort,
+        draft: body?.draft
+      }
+    });
+
+    reply.code(202);
+    return {
+      status: "queued",
+      jobId: queued.job.id,
+      sessionId: params.sessionId,
+      projectId,
+      dedupe: queued.status === "already_queued" ? "already_queued" : "enqueued"
+    };
+  } catch (error) {
+    return sendOrchestratorQueueError(reply, error, params.sessionId);
+  }
+});
+
 app.post("/api/sessions/:sessionId/suggested-reply", async (request, reply) => {
   const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
   if (isSessionPurged(params.sessionId)) {
@@ -5627,49 +5936,73 @@ app.post("/api/sessions/:sessionId/suggested-reply", async (request, reply) => {
     reply.code(403);
     return systemSessionPayload(params.sessionId);
   }
-  const body = suggestedReplyBodySchema.parse(request.body);
 
-  let sourceThread: CodexThread;
-  let transcript: Array<TranscriptEntry>;
-  try {
-    const source = await supervisor.call<{ thread: CodexThread }>("thread/read", {
-      threadId: params.sessionId,
-      includeTurns: true
-    });
-    sourceThread = source.thread;
-    transcript = turnsToTranscript(params.sessionId, Array.isArray(source.thread.turns) ? source.thread.turns : []);
-  } catch (error) {
-    if (!isIncludeTurnsUnavailableError(error)) {
-      return sendMappedCodexError(reply, error, "failed to load suggestion context", {
-        method: "thread/read",
-        sessionId: params.sessionId
-      });
-    }
-
-    const source = await supervisor.call<{ thread: CodexThread }>("thread/read", {
-      threadId: params.sessionId,
-      includeTurns: false
-    });
-    sourceThread = source.thread;
-    transcript = [];
+  const exists = await sessionExistsForProjectAssignment(params.sessionId);
+  if (!exists) {
+    reply.code(404);
+    return {
+      status: "not_found",
+      sessionId: params.sessionId
+    };
   }
 
-  transcript = mergeTranscriptWithSupplemental(params.sessionId, transcript);
+  const queue = ensureOrchestratorQueue(reply);
+  if (!queue) {
+    return {
+      status: "error",
+      code: "job_conflict",
+      sessionId: params.sessionId,
+      message: "orchestrator queue is unavailable"
+    };
+  }
 
-  const contextEntries = transcript
-    .filter((entry) => (entry.role === "user" || entry.role === "assistant") && entry.content.trim().length > 0)
-    .slice(-12);
+  const body = suggestedReplyBodySchema.parse(request.body);
+  const projectId = suggestionQueueProjectId(params.sessionId);
+  const requestKey = randomUUID();
 
-  if (contextEntries.length === 0) {
-    const fallbackSuggestion = buildFallbackSuggestedReply(contextEntries, body?.draft);
-    if (fallbackSuggestion.trim().length > 0 && typeof body?.draft === "string" && body.draft.trim().length > 0) {
-      return {
-        status: "fallback",
+  let queued;
+  try {
+    queued = await queue.enqueue({
+      type: "suggest_reply",
+      projectId,
+      sourceSessionId: params.sessionId,
+      payload: {
         sessionId: params.sessionId,
-        suggestion: fallbackSuggestion
+        projectId,
+        requestKey,
+        model: body?.model,
+        effort: body?.effort,
+        draft: body?.draft
+      }
+    });
+  } catch (error) {
+    return sendOrchestratorQueueError(reply, error, params.sessionId);
+  }
+
+  const terminal = await queue.waitForTerminal(queued.job.id, env.ORCHESTRATOR_SUGGEST_REPLY_WAIT_MS);
+  if (!terminal) {
+    reply.code(202);
+    return {
+      status: "queued",
+      jobId: queued.job.id,
+      sessionId: params.sessionId,
+      projectId,
+      dedupe: queued.status === "already_queued" ? "already_queued" : "enqueued"
+    };
+  }
+
+  if (terminal.state === "completed") {
+    const suggestion = typeof terminal.result?.suggestion === "string" ? terminal.result.suggestion.trim() : "";
+    if (suggestion.length > 0) {
+      return {
+        status: "ok",
+        sessionId: params.sessionId,
+        suggestion
       };
     }
+  }
 
+  if (terminal.state === "failed" && typeof terminal.error === "string" && terminal.error.includes("no_context")) {
     reply.code(409);
     return {
       status: "no_context",
@@ -5678,97 +6011,12 @@ app.post("/api/sessions/:sessionId/suggested-reply", async (request, reply) => {
     };
   }
 
-  let helperThreadId: string | null = null;
-  let targetThreadId: string | null = null;
-  let fallbackReason = "unknown";
-  const suggestionPrompt = buildSuggestionPrompt(contextEntries, body?.draft);
-  const runSuggestionTurn = async (threadId: string): Promise<string> => {
-    const turn = await supervisor.call<{ turn: { id: string } }>("turn/start", {
-      threadId,
-      model: body?.model,
-      effort: body?.effort as ReasoningEffort | undefined,
-      sandboxPolicy: toTurnSandboxPolicy("read-only"),
-      approvalPolicy: "never",
-      input: [
-        {
-          type: "text",
-          text: suggestionPrompt,
-          text_elements: []
-        }
-      ]
-    });
-
-    const rawSuggestion = await waitForSuggestedReply(threadId, turn.turn.id);
-    const suggestion = stripSuggestionScaffolding(rawSuggestion);
-    if (!suggestion) {
-      throw new Error("suggestion output contained only orchestration scaffolding");
-    }
-    return suggestion;
+  const fallbackSuggestion = buildFallbackSuggestedReply([], body?.draft);
+  return {
+    status: "fallback",
+    sessionId: params.sessionId,
+    suggestion: fallbackSuggestion
   };
-
-  try {
-    const projectId = resolveSessionProjectId(params.sessionId);
-    if (projectId) {
-      await ensureProjectOrchestrationSessions();
-      const orchestrationSessionId = sessionMetadata.projectOrchestratorSessionById[projectId];
-      if (typeof orchestrationSessionId === "string" && orchestrationSessionId.trim().length > 0) {
-        targetThreadId = orchestrationSessionId;
-      }
-    }
-
-    if (targetThreadId) {
-      try {
-        const suggestion = await runSuggestionTurn(targetThreadId);
-        return {
-          status: "ok",
-          sessionId: params.sessionId,
-          suggestion
-        };
-      } catch (orchestratorError) {
-        fallbackReason = "project_orchestrator_failed";
-        app.log.warn({ error: orchestratorError, sessionId: params.sessionId, targetThreadId }, "project orchestrator suggestion turn failed");
-      }
-    }
-
-    helperThreadId = await ensureSuggestionThread(params.sessionId, sourceThread, body?.model);
-    targetThreadId = helperThreadId;
-    try {
-      const suggestion = await runSuggestionTurn(targetThreadId);
-      return {
-        status: "ok",
-        sessionId: params.sessionId,
-        suggestion
-      };
-    } catch (helperError) {
-      fallbackReason = targetThreadId === helperThreadId ? "helper_first_attempt_failed" : fallbackReason;
-      app.log.warn({ error: helperError, sessionId: params.sessionId, helperThreadId }, "helper suggestion turn failed; retrying with fresh helper thread");
-    }
-
-    // One additional helper attempt handles transient thread/read races without immediately degrading to fallback text.
-    helperThreadId = await ensureSuggestionThread(params.sessionId, sourceThread, body?.model);
-    targetThreadId = helperThreadId;
-    const suggestion = await runSuggestionTurn(targetThreadId);
-    return {
-      status: "ok",
-      sessionId: params.sessionId,
-      suggestion
-    };
-  } catch (error) {
-    if (fallbackReason === "unknown") {
-      fallbackReason = "unexpected_error";
-    }
-    app.log.warn({ error, sessionId: params.sessionId, fallbackReason }, "failed to generate suggested reply");
-    const fallbackSuggestion = buildFallbackSuggestedReply(contextEntries, body?.draft);
-    return {
-      status: "fallback",
-      sessionId: params.sessionId,
-      suggestion: fallbackSuggestion
-    };
-  } finally {
-    if (helperThreadId) {
-      await cleanupSuggestionThread(params.sessionId, helperThreadId);
-    }
-  }
 });
 
 app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
@@ -6027,6 +6275,9 @@ app.addHook("onClose", async () => {
   suggestionThreadIds.clear();
   pendingApprovals.clear();
   pendingToolUserInputs.clear();
+  if (orchestratorQueue) {
+    await orchestratorQueue.stop({ drainMs: 2_000 });
+  }
   await supervisor.stop();
 });
 
@@ -6062,12 +6313,11 @@ try {
   if (prunedControlEntries > 0) {
     app.log.info({ prunedControlEntries }, "pruned stale session-control metadata entries");
   }
-  const prunedSystemOwnedSessions = await pruneStaleSystemOwnedSessions();
-  if (prunedSystemOwnedSessions > 0) {
-    app.log.info({ prunedSystemOwnedSessions }, "pruned stale system-owned session metadata entries");
-  }
   await cleanupSuggestionHelperSessions();
   await ensureProjectOrchestrationSessions();
+  if (orchestratorQueue) {
+    await orchestratorQueue.start();
+  }
   await refreshCapabilities();
 } catch (error) {
   app.log.warn({ error }, "failed to initialize capability snapshot");

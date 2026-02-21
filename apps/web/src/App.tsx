@@ -168,6 +168,12 @@ type NotificationEnvelope = {
     | "account_updated"
     | "account_login_completed"
     | "account_rate_limits_updated"
+    | "orchestrator_job_queued"
+    | "orchestrator_job_started"
+    | "orchestrator_job_progress"
+    | "orchestrator_job_completed"
+    | "orchestrator_job_failed"
+    | "orchestrator_job_canceled"
     | "ready"
     | "error"
     | "pong";
@@ -223,6 +229,13 @@ type SessionControlsSummaryParts = {
   approval: SessionControlsSummaryPart;
   network: SessionControlsSummaryPart;
   filesystem: SessionControlsSummaryPart;
+};
+
+type PendingSuggestReplyJob = {
+  jobId: string;
+  sessionId: string;
+  draftAtStart: string;
+  requestId: number;
 };
 type SessionControlsSnapshotResponse = {
   status: string;
@@ -1990,7 +2003,8 @@ export function App() {
   const [toolInputDraftById, setToolInputDraftById] = useState<Record<string, Record<string, string>>>({});
   const [toolInputActionRequestId, setToolInputActionRequestId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
-  const [loadingSuggestedReply, setLoadingSuggestedReply] = useState(false);
+  const [enqueueingSuggestedReply, setEnqueueingSuggestedReply] = useState(false);
+  const [pendingSuggestReplyJob, setPendingSuggestReplyJob] = useState<PendingSuggestReplyJob | null>(null);
   const [steerDraft, setSteerDraft] = useState("");
   const [submittingSteer, setSubmittingSteer] = useState(false);
   const [activeTurnIdBySession, setActiveTurnIdBySession] = useState<Record<string, string>>({});
@@ -2079,6 +2093,7 @@ export function App() {
   const threadMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const suggestedReplyAbortRef = useRef<AbortController | null>(null);
   const suggestedReplyRequestIdRef = useRef(0);
+  const pendingSuggestReplyJobRef = useRef<PendingSuggestReplyJob | null>(null);
   const transcriptLoadRequestIdRef = useRef(0);
   const approvalsLoadRequestIdRef = useRef(0);
   const toolInputsLoadRequestIdRef = useRef(0);
@@ -2096,6 +2111,7 @@ export function App() {
   approvalActionByIdRef.current = approvalActionById;
   localSendStateByMessageIdRef.current = localSendStateByMessageId;
   draftRef.current = draft;
+  pendingSuggestReplyJobRef.current = pendingSuggestReplyJob;
   useEffect(() => {
     persistSelectedSessionId(selectedSessionId);
   }, [selectedSessionId]);
@@ -2113,6 +2129,7 @@ export function App() {
     () => sessions.find((session) => session.sessionId === selectedSessionId) ?? null,
     [sessions, selectedSessionId]
   );
+  const loadingSuggestedReply = enqueueingSuggestedReply || Boolean(pendingSuggestReplyJob && pendingSuggestReplyJob.sessionId === selectedSessionId);
   const sessionsByProjectId = useMemo(() => {
     const byProjectId = new Map<string, Array<SessionSummary>>();
     for (const project of projects) {
@@ -4266,6 +4283,11 @@ export function App() {
       return;
     }
 
+    const existingPending = pendingSuggestReplyJobRef.current;
+    if (existingPending && existingPending.sessionId === selectedSessionId) {
+      return;
+    }
+
     const sessionIdAtStart = selectedSessionId;
     const draftAtStart = draft.trim();
     suggestedReplyAbortRef.current?.abort();
@@ -4275,9 +4297,9 @@ export function App() {
     suggestedReplyRequestIdRef.current = requestId;
 
     setError(null);
-    setLoadingSuggestedReply(true);
+    setEnqueueingSuggestedReply(true);
     try {
-      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(sessionIdAtStart)}/suggested-reply`, {
+      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(sessionIdAtStart)}/suggested-reply/jobs`, {
         method: "POST",
         headers: {
           "content-type": "application/json"
@@ -4297,20 +4319,21 @@ export function App() {
         throw new Error(`failed to load suggested reply (${response.status})`);
       }
 
-      const payload = (await response.json()) as { suggestion?: string };
-      const suggestion = typeof payload.suggestion === "string" ? payload.suggestion.trim() : "";
-      if (suggestion) {
-        if (controller.signal.aborted || suggestedReplyRequestIdRef.current !== requestId) {
-          return;
-        }
-        if (selectedSessionIdRef.current !== sessionIdAtStart) {
-          return;
-        }
-        if (draftRef.current.trim() !== draftAtStart) {
-          return;
-        }
-        setDraft(suggestion);
+      const payload = (await response.json()) as { jobId?: string };
+      if (typeof payload.jobId !== "string" || payload.jobId.trim().length === 0) {
+        throw new Error("suggested reply queue request did not return a job id");
       }
+
+      if (controller.signal.aborted || suggestedReplyRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      setPendingSuggestReplyJob({
+        jobId: payload.jobId,
+        sessionId: sessionIdAtStart,
+        draftAtStart,
+        requestId
+      });
     } catch (err) {
       if (controller.signal.aborted) {
         return;
@@ -4318,7 +4341,7 @@ export function App() {
       setError(err instanceof Error ? err.message : "failed to load suggested reply");
     } finally {
       if (suggestedReplyRequestIdRef.current === requestId) {
-        setLoadingSuggestedReply(false);
+        setEnqueueingSuggestedReply(false);
         suggestedReplyAbortRef.current = null;
       }
     }
@@ -5314,7 +5337,7 @@ export function App() {
       setFollowTranscriptTail(true);
       setShowJumpToBottom(false);
       setRetryPrompt(null);
-      setLoadingSuggestedReply(false);
+      setEnqueueingSuggestedReply(false);
       setSteerDraft("");
       setSessionControlsSnapshot(null);
       setSessionControlsDraft(null);
@@ -5334,7 +5357,7 @@ export function App() {
     optimisticMessageIdByTurnIdRef.current = {};
     setApprovalActionById({});
     setRetryPrompt(null);
-    setLoadingSuggestedReply(false);
+    setEnqueueingSuggestedReply(false);
     setSessionControlsSnapshot(null);
     setSessionControlsDraft(null);
     setSessionControlsError(null);
@@ -5826,6 +5849,57 @@ export function App() {
           envelope.type === "account_rate_limits_updated"
         ) {
           void loadSettingsData();
+          return;
+        }
+
+        if (
+          envelope.type === "orchestrator_job_queued" ||
+          envelope.type === "orchestrator_job_started" ||
+          envelope.type === "orchestrator_job_progress" ||
+          envelope.type === "orchestrator_job_completed" ||
+          envelope.type === "orchestrator_job_failed" ||
+          envelope.type === "orchestrator_job_canceled"
+        ) {
+          const payload = asRecord(envelope.payload);
+          const jobId = payload && typeof payload.jobId === "string" ? payload.jobId : null;
+          const jobType = payload && typeof payload.jobType === "string" ? payload.jobType : null;
+          const pending = pendingSuggestReplyJobRef.current;
+
+          if (!jobId || !pending || pending.jobId !== jobId || jobType !== "suggest_reply") {
+            return;
+          }
+
+          if (envelope.type === "orchestrator_job_completed") {
+            const result = asRecord(payload?.result);
+            const suggestion = result && typeof result.suggestion === "string" ? result.suggestion.trim() : "";
+
+            if (
+              suggestion.length > 0 &&
+              selectedSessionIdRef.current === pending.sessionId &&
+              suggestedReplyRequestIdRef.current === pending.requestId &&
+              draftRef.current.trim() === pending.draftAtStart
+            ) {
+              setDraft(suggestion);
+            }
+
+            setPendingSuggestReplyJob((current) => (current && current.jobId === jobId ? null : current));
+            setEnqueueingSuggestedReply(false);
+            return;
+          }
+
+          if (envelope.type === "orchestrator_job_failed" || envelope.type === "orchestrator_job_canceled") {
+            const errorMessage =
+              payload && typeof payload.error === "string" && payload.error.trim().length > 0
+                ? payload.error.trim()
+                : "suggested reply job failed";
+            if (selectedSessionIdRef.current === pending.sessionId) {
+              setError(errorMessage);
+            }
+            setPendingSuggestReplyJob((current) => (current && current.jobId === jobId ? null : current));
+            setEnqueueingSuggestedReply(false);
+            return;
+          }
+
           return;
         }
 
