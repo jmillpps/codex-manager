@@ -787,10 +787,10 @@ const openApiDocument = {
         ])
       }
     },
-    "/api/sessions/{sessionId}/suggested-reply": {
+    "/api/sessions/{sessionId}/suggested-request": {
       post: {
-        summary: "Generate a suggested user reply for a session",
-        operationId: "suggestSessionReply",
+        summary: "Generate a suggested user request for a session",
+        operationId: "suggestSessionRequest",
         parameters: [pathParam("sessionId", "Session id")],
         requestBody: requestBody(
           {
@@ -804,7 +804,7 @@ const openApiDocument = {
           false
         ),
         responses: responses([
-          [200, "Suggested reply generated"],
+          [200, "Suggested request generated"],
           [409, "No available context for suggestion"],
           [410, "Session deleted"]
         ])

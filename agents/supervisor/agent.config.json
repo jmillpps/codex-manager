@@ -1,0 +1,9 @@
+{
+  "model": "gpt-5.3-codex-spark",
+  "turnPolicy": {
+    "sandbox": "workspace-write",
+    "networkAccess": "enabled",
+    "approvalPolicy": "never",
+    "effort": "medium"
+  }
+}

@@ -750,19 +750,19 @@ export async function resumeSession(sessionId: string, baseUrl = "/api"): Promis
   );
 }
 
-export async function suggestSessionReply(
+export async function suggestSessionRequest(
   sessionId: string,
   body: { model?: string; effort?: ReasoningEffort; draft?: string } = {},
   baseUrl = "/api"
 ): Promise<{ status: string; sessionId: string; suggestion: string }> {
   return requestJson<{ status: string; sessionId: string; suggestion: string }>(
-    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/suggested-reply",
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/suggested-request",
     {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body)
     },
-    "suggest session reply failed",
+    "suggest session request failed",
     [200, 409, 410]
   );
 }

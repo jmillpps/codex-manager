@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("suggested reply response does not overwrite draft after switching sessions", async ({ page, request }) => {
+test("suggested request response does not overwrite draft after switching sessions", async ({ page, request }) => {
   const apiBase = "http://127.0.0.1:3001/api";
   const suffix = Date.now();
   const firstTitle = `race-a-${suffix}`;
@@ -34,20 +34,22 @@ test("suggested reply response does not overwrite draft after switching sessions
   const textarea = page.locator(".composer textarea");
   await textarea.fill("draft for session A");
 
-  await page.route("**/api/sessions/*/suggested-reply", async (route) => {
+  await page.route("**/api/sessions/*/suggested-request/jobs", async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 800));
     await route.fulfill({
-      status: 200,
+      status: 202,
       contentType: "application/json",
       body: JSON.stringify({
-        status: "ok",
+        status: "queued",
+        jobId: "race-job-1",
         sessionId: firstSessionId,
-        suggestion: "SUGGESTED REPLY SHOULD NOT OVERWRITE SESSION B"
+        projectId: `session:${firstSessionId ?? "unknown"}`,
+        dedupe: "enqueued"
       })
     });
   });
 
-  await page.getByRole("button", { name: "Suggest Reply" }).click();
+  await page.getByRole("button", { name: "Suggest Request" }).click();
   await page.getByRole("button", { name: secondTitle, exact: true }).click();
   await textarea.fill("draft for session B");
 

@@ -16,6 +16,12 @@ The operations manual was split into focused documents to keep setup, validation
   - OpenAPI/client generation, protocol schema generation, typecheck/build/test commands, and pre-PR gates.
 - `docs/operations/troubleshooting.md`
   - Logs, failure modes, and concrete recovery playbooks.
+- `docs/operations/agent-queue-troubleshooting.md`
+  - Queue-worker troubleshooting for system-owned agents (job states, retries, stuck/timeout recovery, tuning).
+- `docs/operations/agent-extension-authoring.md`
+  - Implementation runbook for `agents/*/events.(ts|js|mjs)` subscriptions, queue enqueue patterns, and instruction contracts.
+- `docs/operations/agent-queue-framework.md`
+  - End-to-end queue framework contract (invariants, runtime model, event payloads, job schemas, transcript contracts, retry/recovery).
 - `docs/operations/maintenance.md`
   - Safe reset flows, git workflow rules, CI expectations, and operational invariants.
 - `docs/implementation-status.md`

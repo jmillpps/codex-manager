@@ -2,6 +2,10 @@
 
 ## Debugging and logs
 
+Queue-worker specific playbooks are documented in:
+
+- `docs/operations/agent-queue-troubleshooting.md`
+
 ### Where logs live
 
 The canonical local data/log directory is `DATA_DIR` (default `.data`).
@@ -132,24 +136,24 @@ Checklist:
 - Confirm credentials are visible to the API process (not only your shell profile).
 - Restart the API after changing credentials.
 
-#### Suggested reply returns 409 `no_context`
+#### Suggested request returns 409 `no_context`
 
 Symptoms:
 
-- `POST /api/sessions/:sessionId/suggested-reply` returns HTTP `409` with `status: "no_context"`.
+- `POST /api/sessions/:sessionId/suggested-request` returns HTTP `409` with `status: "no_context"`.
 - This usually happens for non-materialized chats with no prior turns and no draft text.
 
 Checklist:
 
 - Send the first user message in that chat so transcript context exists.
-- Or provide draft text in the suggest-reply request payload so fallback suggestion can be returned.
+- Or provide draft text in the suggest-request request payload so fallback suggestion can be returned.
 - Confirm the target session id is not deleted (deleted sessions return HTTP `410`).
 
-#### Suggest-reply or orchestrator job APIs return 503 `job_conflict`
+#### Suggest-request or orchestrator job APIs return 503 `job_conflict`
 
 Symptoms:
 
-- `POST /api/sessions/:sessionId/suggested-reply/jobs` returns `503` with `code: "job_conflict"`.
+- `POST /api/sessions/:sessionId/suggested-request/jobs` returns `503` with `code: "job_conflict"`.
 - `GET /api/orchestrator/jobs/:jobId` / `GET /api/projects/:projectId/orchestrator/jobs` / `POST /api/orchestrator/jobs/:jobId/cancel` return `503`.
 
 Checklist:

@@ -38,12 +38,64 @@ Key runtime semantics operators should know:
 - Session listing merges persisted threads (`thread/list`) with currently loaded non-materialized threads (`thread/loaded/list`) so newly created chats are visible immediately.
 - Non-materialized chats are in-memory runtime state and are not guaranteed to survive API/Codex restart until a first turn materializes rollout state.
 - Session hard delete is a harness extension (`DELETE /api/sessions/:sessionId`) because app-server has no native `thread/delete`.
-- Suggested-reply is queue-backed: `POST /api/sessions/:sessionId/suggested-reply/jobs` always enqueues `suggest_reply`; legacy `POST /api/sessions/:sessionId/suggested-reply` enqueues the same job then waits briefly for completion before returning either `200` suggestion or `202 queued`.
-- Suggest-reply queueing is single-flight per source chat: duplicate clicks while one suggest job is queued/running do not enqueue a second job.
-- Completed eligible file changes enqueue best-effort background explainability jobs that stream synthetic anchored transcript rows (`type: fileChange.explainability`) without blocking foreground turn streaming.
-- Orchestrator sessions are system-owned worker infrastructure: hidden from user session lists and denied for normal user chat operations (`403 system_session`).
+- Suggested-request is queue-backed: `POST /api/sessions/:sessionId/suggested-request/jobs` always enqueues `suggest_request`; `POST /api/sessions/:sessionId/suggested-request` enqueues the same job then waits briefly for completion before returning either `200` suggested request text or `202 queued`.
+- Suggest-request queueing is single-flight per source chat: duplicate clicks while one suggest job is queued/running do not enqueue a second job.
+- Unassigned-chat suggest-request uses a session-scoped queue owner id (`session:<sessionId>`), so suggest-request jobs do not require explicit project assignment.
+- File-change approval events emit agent runtime work; supervisor handlers enqueue one instruction job that writes diff explainability (`type: fileChange.explainability`) and supervisor insight (`type: fileChange.supervisorInsight`) to transcript without blocking foreground turn streaming.
+- Queue terminal reconciliation for agent instruction jobs is payload-driven via `supplementalTargets`; extension handlers define message ids/types/placeholders/fallbacks and core reconciles explicit terminal states.
+- System-owned supervisor worker turns settle from runtime notification streams first (`turn/*`, `item/*`, agent-message deltas); `thread/read(includeTurns)` is a bounded fallback only.
+- Include-turns fallback materialization waits are capped by `ORCHESTRATOR_AGENT_INCLUDE_TURNS_GRACE_MS` and then retried via queue retry policy, avoiding routine full-turn timeout stalls on first-turn materialization gaps.
+- System-owned agent sessions are worker infrastructure: hidden from user session lists and denied for normal user chat operations (`403 system_session`).
+- Agent turn permissions are agent-owned via `agents/<agent>/agent.config.json`; when no config is present, the API falls back to global defaults.
 - Project deletion enforces emptiness against live sessions only; stale assignment metadata is pruned during delete before emptiness is evaluated.
 - In the web UI, the left sidebar and right chat pane scroll independently and the composer remains pinned in the right pane; transcript tail-follow uses hysteresis, `Jump to bottom` is an absolute overlay so approval/event bursts do not shift scroll geometry, and incoming approval requests for the active chat force-focus bottom with a short snap-back window (brief settle delay before the first snap, also re-armed on approve) to preserve anchoring through approval transition jitter.
+
+Agent runtime policy file format:
+
+```json
+{
+  "model": "gpt-5.3-codex-spark",
+  "turnPolicy": {
+    "sandbox": "read-only|workspace-write|danger-full-access",
+    "networkAccess": "restricted|enabled",
+    "approvalPolicy": "untrusted|on-failure|on-request|never",
+    "effort": "none|minimal|low|medium|high|xhigh"
+  },
+  "orientationTurnPolicy": {
+    "sandbox": "...",
+    "effort": "..."
+  },
+  "instructionTurnPolicy": {
+    "sandbox": "...",
+    "effort": "..."
+  },
+  "threadStartPolicy": {
+    "sandbox": "...",
+    "approvalPolicy": "..."
+  }
+}
+```
+
+Only `turnPolicy` is typically needed; the other policy blocks are optional overrides.
+
+Agent extension layout contract:
+
+- `agents/<agent>/events.ts|events.js|events.mjs` registers event subscriptions and enqueues queue jobs.
+- `agents/<agent>/orientation.md` is optional; when present, API runs it once per agent session before the first queued job turn.
+- `agents/<agent>/agent.config.json` is optional; when present, it controls model/thread/turn policy for that agent's worker turns.
+- `agents/<agent>/AGENTS.md` and `agents/<agent>/playbooks/*` are consumed by the worker through queued instruction turns.
+- `agents/runtime/*` contains shared helper types/utilities for extension modules and is not treated as an event module directory.
+
+Supervisor extension behavior in this repository:
+
+- `agents/supervisor/events.ts` subscribes to:
+  - `file_change.approval_requested`
+  - `turn.completed`
+  - `suggest_request.requested`
+- Those handlers enqueue:
+  - `agent_instruction` for file-change supervision and turn-end review
+  - `suggest_request` for composer suggestion generation
+- All workflow instructions are human-readable markdown job text; API core only executes queued turns and runtime plumbing.
 
 ---
 
@@ -166,6 +218,8 @@ DEFAULT_APPROVAL_POLICY=untrusted
 # Baseline sandbox mode for new/resumed threads.
 # Recommended default to force explicit approval for writes:
 DEFAULT_SANDBOX_MODE=read-only
+DEFAULT_NETWORK_ACCESS=restricted
+SESSION_DEFAULTS_LOCKED=false
 
 # Orchestrator queue controls
 ORCHESTRATOR_QUEUE_ENABLED=true
@@ -176,11 +230,19 @@ ORCHESTRATOR_QUEUE_MAX_ATTEMPTS=2
 ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS=60000
 ORCHESTRATOR_QUEUE_BACKGROUND_AGING_MS=15000
 ORCHESTRATOR_QUEUE_MAX_INTERACTIVE_BURST=3
-ORCHESTRATOR_SUGGEST_REPLY_ENABLED=true
-ORCHESTRATOR_SUGGEST_REPLY_ALLOW_HELPER_FALLBACK=false
-ORCHESTRATOR_SUGGEST_REPLY_WAIT_MS=12000
-ORCHESTRATOR_DIFF_EXPLAIN_ENABLED=true
-ORCHESTRATOR_DIFF_EXPLAIN_MAX_DIFF_CHARS=50000
+ORCHESTRATOR_SUGGEST_REQUEST_ENABLED=true
+ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS=12000
+ORCHESTRATOR_AGENT_TURN_TIMEOUT_MS=60000
+ORCHESTRATOR_AGENT_POLL_INTERVAL_MS=350
+ORCHESTRATOR_AGENT_INCLUDE_TURNS_GRACE_MS=3000
+
+# Supervisor auto-actions defaults (can be overridden per deployment)
+SUPERVISOR_AUTO_APPROVE_ENABLED=true
+SUPERVISOR_AUTO_APPROVE_THRESHOLD=high
+SUPERVISOR_AUTO_REJECT_ENABLED=false
+SUPERVISOR_AUTO_REJECT_THRESHOLD=high
+SUPERVISOR_AUTO_STEER_ENABLED=true
+SUPERVISOR_AUTO_STEER_THRESHOLD=med
 ```
 
 Operational rules:
@@ -190,7 +252,10 @@ Operational rules:
 - If `CODEX_HOME` is set and `CODEX_HOME/auth.json` is missing, the API attempts a one-time bootstrap from `~/.codex/auth.json` on startup.
 - `DEFAULT_APPROVAL_POLICY=untrusted` keeps non-read operations behind approval.
 - `DEFAULT_SANDBOX_MODE=read-only` ensures file writes require explicit approval before execution.
-- Queue-degraded mode is opt-in: set `ORCHESTRATOR_QUEUE_ENABLED=false` only for diagnostics; suggest-reply queue APIs and orchestrator job APIs return `503 job_conflict` while disabled.
+- Queue-degraded mode is opt-in: set `ORCHESTRATOR_QUEUE_ENABLED=false` only for diagnostics; suggest-request queue APIs and orchestrator job APIs return `503 job_conflict` while disabled.
+- Agent turn timeout and queue timeout are independent controls:
+  - `ORCHESTRATOR_AGENT_TURN_TIMEOUT_MS` bounds worker turn observation loops.
+  - queue job timeout is controlled by `ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS` (with `agent_instruction` enforcing a minimum 180s job timeout in code).
 
 ---
 

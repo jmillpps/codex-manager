@@ -67,6 +67,7 @@ export type JobDefinition<TPayload, TResult extends Record<string, unknown>> = {
     baseDelayMs: number;
     maxDelayMs: number;
     jitter: boolean;
+    delayForAttempt?: (attempt: number) => number;
   };
   timeoutMs: number | null;
   cancel: {

@@ -762,6 +762,13 @@ export class OrchestratorQueue {
   }
 
   private computeRetryDelayMs(definition: JobDefinition<unknown, Record<string, unknown>>, attempt: number): number {
+    if (typeof definition.retry.delayForAttempt === "function") {
+      const customDelay = definition.retry.delayForAttempt(attempt);
+      if (Number.isFinite(customDelay)) {
+        return Math.max(0, Math.floor(customDelay));
+      }
+    }
+
     const baseDelayMs = Math.max(100, definition.retry.baseDelayMs);
     const maxDelayMs = Math.max(baseDelayMs, definition.retry.maxDelayMs);
     const exponential = Math.min(maxDelayMs, baseDelayMs * 2 ** Math.max(0, attempt - 1));

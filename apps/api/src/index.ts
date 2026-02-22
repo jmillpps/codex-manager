@@ -7,36 +7,22 @@ import Fastify from "fastify";
 import websocket from "@fastify/websocket";
 import { z } from "zod";
 import { env } from "./env.js";
-import { CodexSupervisor } from "./codex-supervisor.js";
+import { CodexRuntimeClient } from "./codex-runtime-client.js";
 import { OrchestratorQueue, OrchestratorQueueError } from "./orchestrator-queue.js";
 import { FileOrchestratorQueueStore } from "./orchestrator-store.js";
 import { createJobDefinitionsRegistry } from "./orchestrator-job-definitions.js";
+import { AgentEventsRuntime } from "./agent-events-runtime.js";
 import {
-  fileChangeExplainJobPayloadSchema,
-  fileChangeExplainJobResultSchema,
-  fileChangeSupervisorInsightJobPayloadSchema,
-  fileChangeSupervisorInsightJobResultSchema,
-  riskRecheckBatchJobPayloadSchema,
-  riskRecheckBatchJobResultSchema,
-  supervisorCheckStatusSchema,
-  supervisorConfidenceSchema,
-  supervisorRiskLevelSchema,
-  turnSupervisorReviewJobPayloadSchema,
-  turnSupervisorReviewJobResultSchema,
-  type FileChangeExplainJobPayload,
-  type FileChangeExplainJobResult,
-  type FileChangeSupervisorInsightJobPayload,
-  type FileChangeSupervisorInsightJobResult,
-  type RiskRecheckBatchJobPayload,
-  type RiskRecheckBatchJobResult,
-  suggestReplyJobPayloadSchema,
-  suggestReplyJobResultSchema,
-  type TurnSupervisorReviewJobPayload,
-  type TurnSupervisorReviewJobResult,
-  type SuggestReplyJobPayload,
-  type SuggestReplyJobResult
+  agentInstructionJobPayloadSchema,
+  agentInstructionJobResultSchema,
+  type AgentInstructionJobPayload,
+  type AgentInstructionJobResult,
+  suggestRequestJobPayloadSchema,
+  suggestRequestJobResultSchema,
+  type SuggestRequestJobPayload,
+  type SuggestRequestJobResult
 } from "./orchestrator-processors.js";
-import type { JobDefinitionsMap, JobRunContext } from "./orchestrator-types.js";
+import type { EnqueueJobInput, EnqueueJobResult, JobDefinitionsMap, JobRunContext } from "./orchestrator-types.js";
 
 type JsonRpcNotification = {
   method: string;
@@ -214,6 +200,27 @@ type SessionControlsTuple = {
   networkAccess: NetworkAccess;
   filesystemSandbox: DefaultSandboxMode;
 };
+type AgentTurnPolicy = {
+  sandbox: DefaultSandboxMode;
+  networkAccess: NetworkAccess;
+  approvalPolicy: ApprovalPolicy;
+  effort: ReasoningEffort | null;
+};
+type AgentRuntimePolicyConfig = {
+  orientationTurnPolicy: AgentTurnPolicy;
+  instructionTurnPolicy: AgentTurnPolicy;
+  threadStartSandbox: DefaultSandboxMode;
+  threadStartApprovalPolicy: ApprovalPolicy;
+  model: string | null;
+};
+type RuntimeObservedTurnStatus = "running" | "completed" | "failed";
+type RuntimeObservedTurnState = {
+  threadId: string;
+  turnId: string;
+  status: RuntimeObservedTurnStatus;
+  assistantText: string;
+  updatedAt: number;
+};
 type SessionControlScope = "session" | "default";
 type AuthStatus = {
   hasOpenAiApiKey: boolean;
@@ -228,8 +235,7 @@ type SessionMetadataStore = {
   sessionApprovalPolicyById: Record<string, ApprovalPolicy>;
   sessionControlsById: Record<string, SessionControlsTuple>;
   defaultSessionControls: SessionControlsTuple;
-  projectOrchestratorSessionById: Record<string, string>;
-  suggestionHelperSessionIds: Record<string, true>;
+  projectAgentSessionByKey: Record<string, string>;
   systemOwnedSessionIds: Record<string, true>;
   turnTimingBySessionId: Record<string, Record<string, TurnTimingRecord>>;
 };
@@ -238,39 +244,6 @@ type SupplementalTranscriptStore = {
   version: 1;
   sequence: number;
   byThreadId: Record<string, Array<SupplementalTranscriptEntry>>;
-};
-
-type SupervisorRiskLevel = z.infer<typeof supervisorRiskLevelSchema>;
-type SupervisorConfidence = z.infer<typeof supervisorConfidenceSchema>;
-type SupervisorCheckStatus = z.infer<typeof supervisorCheckStatusSchema>;
-
-type SupervisorInsightRecord = {
-  threadId: string;
-  approvalId: string | null;
-  applied: boolean;
-  change: string;
-  impact: string;
-  riskLevel: SupervisorRiskLevel;
-  riskReason: string;
-  checkInstruction: string;
-  checkExpected: string;
-  confidence: SupervisorConfidence;
-  updatedAt: string;
-};
-
-type SupervisorTurnRecord = {
-  insights: Record<string, SupervisorInsightRecord>;
-  riskBatchJobId: string | null;
-  reviewJobId: string | null;
-};
-
-type SupervisorProjectLedger = {
-  byTurnId: Record<string, SupervisorTurnRecord>;
-};
-
-type SupervisorLedgerStore = {
-  version: 1;
-  byProjectId: Record<string, SupervisorProjectLedger>;
 };
 
 type DeletedSessionPayload = {
@@ -325,6 +298,29 @@ const applySessionControlsBodySchema = z.object({
   actor: z.string().trim().min(1).max(120).optional(),
   source: z.string().trim().min(1).max(64).optional()
 });
+const agentTurnPolicyOverrideSchema = z
+  .object({
+    sandbox: filesystemSandboxSchema.optional(),
+    networkAccess: networkAccessSchema.optional(),
+    approvalPolicy: approvalPolicySchema.optional(),
+    effort: reasoningEffortSchema.optional()
+  })
+  .strict();
+const agentRuntimePolicyFileSchema = z
+  .object({
+    model: z.string().trim().min(1).optional(),
+    turnPolicy: agentTurnPolicyOverrideSchema.optional(),
+    orientationTurnPolicy: agentTurnPolicyOverrideSchema.optional(),
+    instructionTurnPolicy: agentTurnPolicyOverrideSchema.optional(),
+    threadStartPolicy: z
+      .object({
+        sandbox: filesystemSandboxSchema.optional(),
+        approvalPolicy: approvalPolicySchema.optional()
+      })
+      .strict()
+      .optional()
+  })
+  .strict();
 
 const sendMessageBodySchema = z.object({
   text: z.string().trim().min(1),
@@ -413,6 +409,18 @@ const rollbackBodySchema = z
 
 const steerBodySchema = z.object({
   input: z.string().trim().min(1)
+});
+
+const transcriptUpsertBodySchema = z.object({
+  messageId: z.string().trim().min(1),
+  turnId: z.string().trim().min(1),
+  role: z.enum(["user", "assistant", "system"]),
+  type: z.string().trim().min(1),
+  content: z.string(),
+  details: z.string().optional().nullable(),
+  status: z.enum(["streaming", "complete", "canceled", "error"]),
+  startedAt: z.number().int().nonnegative().optional(),
+  completedAt: z.number().int().nonnegative().optional()
 });
 
 const reviewBodySchema = z.object({
@@ -579,7 +587,7 @@ async function bootstrapCodexHomeAuth(): Promise<void> {
 
 await bootstrapCodexHomeAuth();
 
-const supervisor = new CodexSupervisor({
+const codexRuntime = new CodexRuntimeClient({
   bin: env.CODEX_BIN,
   codeHome: env.CODEX_HOME,
   dataDir: env.DATA_DIR,
@@ -588,12 +596,14 @@ const supervisor = new CodexSupervisor({
 });
 
 const activeTurnByThread = new Map<string, string>();
-const suggestionThreadBySession = new Map<string, string>();
-const suggestionThreadIds = new Set<string>();
 const pendingApprovals = new Map<string, PendingApprovalRecord>();
 const pendingToolUserInputs = new Map<string, PendingToolUserInputRecord>();
 const purgedSessionIds = new Set<string>();
 const supplementalTranscriptByThread = new Map<string, Map<string, SupplementalTranscriptEntry>>();
+const fileChangeEventCountByTurn = new Map<string, number>();
+const agentOrientationCompletedBySession = new Set<string>();
+const runtimeObservedTurnsByKey = new Map<string, RuntimeObservedTurnState>();
+const runtimeTurnSignalWaitersByKey = new Map<string, Set<() => void>>();
 let supplementalTranscriptSequence = 1;
 let supplementalTranscriptPersistTimer: NodeJS.Timeout | null = null;
 let supplementalTranscriptPersistQueued = false;
@@ -603,8 +613,8 @@ const socketThreadFilter = new Map<WebSocketLike, string | null>();
 const codexHomeAuthFilePath = env.CODEX_HOME ? path.join(env.CODEX_HOME, "auth.json") : null;
 const sessionMetadataPath = path.join(env.DATA_DIR, "session-metadata.json");
 const supplementalTranscriptPath = path.join(env.DATA_DIR, "supplemental-transcript.json");
-const supervisorLedgerPath = path.join(env.DATA_DIR, "supervisor-ledger.json");
 const orchestratorJobsPath = path.join(env.DATA_DIR, "orchestrator-jobs.json");
+const agentsRootPath = path.join(env.WORKSPACE_ROOT, "agents");
 const syntheticTranscriptMessageIdPattern = /^item-\d+$/i;
 const sessionMetadata = await loadSessionMetadata();
 await loadSupplementalTranscriptStore();
@@ -614,14 +624,8 @@ let capabilitiesLastUpdatedAt: string | null = null;
 let capabilitiesInitialized = false;
 let capabilitiesRefreshInFlight: Promise<void> | null = null;
 let experimentalRawEventsCapability: "unknown" | "supported" | "unsupported" = "unknown";
-let projectOrchestratorsEnsureInFlight: Promise<void> | null = null;
-let suggestionHelpersCleanupInFlight: Promise<void> | null = null;
+const projectAgentSessionEnsureInFlightByKey = new Map<string, Promise<string>>();
 let orchestratorQueue: OrchestratorQueue | null = null;
-const supervisorLedgerByProject = new Map<string, Map<string, SupervisorTurnRecord>>();
-let supervisorLedgerPersistTimer: NodeJS.Timeout | null = null;
-let supervisorLedgerPersistQueued = false;
-let supervisorLedgerPersistInFlight: Promise<void> | null = null;
-await loadSupervisorLedgerStore();
 
 if (env.ORCHESTRATOR_QUEUE_ENABLED) {
   orchestratorQueue = new OrchestratorQueue({
@@ -632,7 +636,7 @@ if (env.ORCHESTRATOR_QUEUE_ENABLED) {
         publishToSockets(event.type, event.payload, event.threadId ?? undefined);
       },
       interruptTurn: async (threadId: string, turnId: string) => {
-        await supervisor.call("turn/interrupt", {
+        await codexRuntime.call("turn/interrupt", {
           threadId,
           turnId
         });
@@ -648,6 +652,14 @@ if (env.ORCHESTRATOR_QUEUE_ENABLED) {
     maxInteractiveBurst: env.ORCHESTRATOR_QUEUE_MAX_INTERACTIVE_BURST
   });
 }
+
+const agentEventsRuntime = new AgentEventsRuntime({
+  agentsRoot: agentsRootPath,
+  logger: app.log
+});
+await agentEventsRuntime.load().catch((error) => {
+  app.log.warn({ error, agentsRootPath }, "failed to load agent events runtime modules");
+});
 
 const capabilityMethodProbes: Array<CapabilityMethodProbe> = [
   { method: "thread/fork", probeParams: {} },
@@ -827,6 +839,10 @@ function latestTimestamp(left: number | undefined, right: number | undefined): n
   return typeof left === "number" ? left : right;
 }
 
+function isTerminalTranscriptStatus(status: TranscriptEntry["status"]): boolean {
+  return status === "complete" || status === "error" || status === "canceled";
+}
+
 function upsertSupplementalTranscriptEntry(threadId: string, entry: TranscriptEntry): void {
   let entryMap = supplementalTranscriptByThread.get(threadId);
   if (!entryMap) {
@@ -843,9 +859,19 @@ function upsertSupplementalTranscriptEntry(threadId: string, entry: TranscriptEn
         ? mergedStartedAt
         : mergedCompletedAt;
 
+    const preventStatusRegression = isTerminalTranscriptStatus(existing.entry.status) && entry.status === "streaming";
+    const incoming = preventStatusRegression
+      ? {
+          ...entry,
+          status: existing.entry.status,
+          content: existing.entry.content,
+          ...(typeof existing.entry.details === "string" ? { details: existing.entry.details } : {})
+        }
+      : entry;
+
     const mergedEntry: TranscriptEntry = {
       ...existing.entry,
-      ...entry,
+      ...incoming,
       ...(typeof mergedStartedAt === "number" ? { startedAt: mergedStartedAt } : {}),
       ...(typeof normalizedCompletedAt === "number" ? { completedAt: normalizedCompletedAt } : {})
     };
@@ -1444,328 +1470,6 @@ async function flushSupplementalTranscriptPersistence(): Promise<void> {
   }
 }
 
-function normalizeSupervisorRiskLevel(value: unknown): SupervisorRiskLevel {
-  return value === "none" || value === "low" || value === "med" || value === "high" ? value : "none";
-}
-
-function normalizeSupervisorConfidence(value: unknown): SupervisorConfidence {
-  return value === "low" || value === "med" || value === "high" ? value : "low";
-}
-
-function getOrCreateSupervisorProjectLedger(projectId: string): Map<string, SupervisorTurnRecord> {
-  const existing = supervisorLedgerByProject.get(projectId);
-  if (existing) {
-    return existing;
-  }
-
-  const next = new Map<string, SupervisorTurnRecord>();
-  supervisorLedgerByProject.set(projectId, next);
-  return next;
-}
-
-function getOrCreateSupervisorTurnRecord(projectId: string, turnId: string): SupervisorTurnRecord {
-  const projectLedger = getOrCreateSupervisorProjectLedger(projectId);
-  const existing = projectLedger.get(turnId);
-  if (existing) {
-    return existing;
-  }
-
-  const next: SupervisorTurnRecord = {
-    insights: {},
-    riskBatchJobId: null,
-    reviewJobId: null
-  };
-  projectLedger.set(turnId, next);
-  return next;
-}
-
-function getSupervisorTurnRecord(projectId: string, turnId: string): SupervisorTurnRecord | null {
-  const projectLedger = supervisorLedgerByProject.get(projectId);
-  if (!projectLedger) {
-    return null;
-  }
-  return projectLedger.get(turnId) ?? null;
-}
-
-function listSupervisorInsightsForTurn(projectId: string, turnId: string): Array<{ itemId: string; insight: SupervisorInsightRecord }> {
-  const turnRecord = getSupervisorTurnRecord(projectId, turnId);
-  if (!turnRecord) {
-    return [];
-  }
-
-  return Object.entries(turnRecord.insights)
-    .map(([itemId, insight]) => ({ itemId, insight }))
-    .sort((left, right) => left.itemId.localeCompare(right.itemId));
-}
-
-function upsertSupervisorInsightLedger(input: {
-  projectId: string;
-  turnId: string;
-  itemId: string;
-  threadId: string;
-  approvalId: string | null;
-  applied: boolean;
-  insight: {
-    change: string;
-    impact: string;
-    riskLevel: SupervisorRiskLevel;
-    riskReason: string;
-    checkInstruction: string;
-    checkExpected: string;
-    confidence: SupervisorConfidence;
-  };
-}): void {
-  const turnRecord = getOrCreateSupervisorTurnRecord(input.projectId, input.turnId);
-  const nowIso = new Date().toISOString();
-  const existing = turnRecord.insights[input.itemId];
-  turnRecord.insights[input.itemId] = {
-    threadId: input.threadId,
-    approvalId: input.approvalId,
-    applied: input.applied || existing?.applied === true,
-    change: input.insight.change,
-    impact: input.insight.impact,
-    riskLevel: input.insight.riskLevel,
-    riskReason: input.insight.riskReason,
-    checkInstruction: input.insight.checkInstruction,
-    checkExpected: input.insight.checkExpected,
-    confidence: input.insight.confidence,
-    updatedAt: nowIso
-  };
-  requestSupervisorLedgerPersistence();
-}
-
-function markSupervisorInsightApplied(input: {
-  projectId: string;
-  turnId: string;
-  itemId: string;
-  threadId: string;
-}): void {
-  const turnRecord = getOrCreateSupervisorTurnRecord(input.projectId, input.turnId);
-  const existing = turnRecord.insights[input.itemId];
-  if (!existing) {
-    turnRecord.insights[input.itemId] = {
-      threadId: input.threadId,
-      approvalId: null,
-      applied: true,
-      change: "File change applied.",
-      impact: "Applied in current turn.",
-      riskLevel: "none",
-      riskReason: "No supervisor insight recorded yet.",
-      checkInstruction: "No additional check required.",
-      checkExpected: "No risk flagged.",
-      confidence: "low",
-      updatedAt: new Date().toISOString()
-    };
-    requestSupervisorLedgerPersistence();
-    return;
-  }
-
-  if (!existing.applied) {
-    existing.applied = true;
-    existing.updatedAt = new Date().toISOString();
-    requestSupervisorLedgerPersistence();
-  }
-}
-
-function setSupervisorRiskBatchJobId(projectId: string, turnId: string, jobId: string | null): void {
-  const turnRecord = getOrCreateSupervisorTurnRecord(projectId, turnId);
-  if (turnRecord.riskBatchJobId === jobId) {
-    return;
-  }
-  turnRecord.riskBatchJobId = jobId;
-  requestSupervisorLedgerPersistence();
-}
-
-function setSupervisorReviewJobId(projectId: string, turnId: string, jobId: string | null): void {
-  const turnRecord = getOrCreateSupervisorTurnRecord(projectId, turnId);
-  if (turnRecord.reviewJobId === jobId) {
-    return;
-  }
-  turnRecord.reviewJobId = jobId;
-  requestSupervisorLedgerPersistence();
-}
-
-function buildRiskRecheckCandidates(projectId: string, turnId: string): Array<{
-  itemId: string;
-  approvalId?: string;
-  riskLevel: "low" | "med" | "high";
-  riskReason: string;
-  instruction: string;
-  expected: string;
-}> {
-  return listSupervisorInsightsForTurn(projectId, turnId)
-    .filter(
-      ({ insight }) =>
-        insight.applied &&
-        (insight.riskLevel === "low" || insight.riskLevel === "med" || insight.riskLevel === "high") &&
-        insight.checkInstruction.trim().length > 0 &&
-        insight.checkExpected.trim().length > 0
-    )
-    .map(({ itemId, insight }) => ({
-      itemId,
-      ...(insight.approvalId ? { approvalId: insight.approvalId } : {}),
-      riskLevel: insight.riskLevel as "low" | "med" | "high",
-      riskReason: insight.riskReason,
-      instruction: insight.checkInstruction,
-      expected: insight.checkExpected
-    }));
-}
-
-async function loadSupervisorLedgerStore(): Promise<void> {
-  try {
-    const raw = await readFile(supervisorLedgerPath, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!isObjectRecord(parsed) || !isObjectRecord(parsed.byProjectId)) {
-      return;
-    }
-
-    supervisorLedgerByProject.clear();
-    for (const [projectId, rawProjectLedger] of Object.entries(parsed.byProjectId)) {
-      if (!isObjectRecord(rawProjectLedger) || !isObjectRecord(rawProjectLedger.byTurnId)) {
-        continue;
-      }
-
-      const byTurn = new Map<string, SupervisorTurnRecord>();
-      for (const [turnId, rawTurnRecord] of Object.entries(rawProjectLedger.byTurnId)) {
-        if (!isObjectRecord(rawTurnRecord)) {
-          continue;
-        }
-
-        const insights: Record<string, SupervisorInsightRecord> = {};
-        if (isObjectRecord(rawTurnRecord.insights)) {
-          for (const [itemId, rawInsight] of Object.entries(rawTurnRecord.insights)) {
-            if (!isObjectRecord(rawInsight)) {
-              continue;
-            }
-            if (typeof rawInsight.threadId !== "string" || rawInsight.threadId.trim().length === 0) {
-              continue;
-            }
-
-            const updatedAt =
-              typeof rawInsight.updatedAt === "string" && rawInsight.updatedAt.trim().length > 0
-                ? rawInsight.updatedAt
-                : new Date().toISOString();
-            const change = typeof rawInsight.change === "string" && rawInsight.change.trim().length > 0 ? rawInsight.change : "n/a";
-            const impact = typeof rawInsight.impact === "string" && rawInsight.impact.trim().length > 0 ? rawInsight.impact : "n/a";
-            const riskReason =
-              typeof rawInsight.riskReason === "string" && rawInsight.riskReason.trim().length > 0
-                ? rawInsight.riskReason
-                : "n/a";
-            const checkInstruction =
-              typeof rawInsight.checkInstruction === "string" && rawInsight.checkInstruction.trim().length > 0
-                ? rawInsight.checkInstruction
-                : "No additional check required.";
-            const checkExpected =
-              typeof rawInsight.checkExpected === "string" && rawInsight.checkExpected.trim().length > 0
-                ? rawInsight.checkExpected
-                : "No risk flagged.";
-            insights[itemId] = {
-              threadId: rawInsight.threadId.trim(),
-              approvalId: typeof rawInsight.approvalId === "string" && rawInsight.approvalId.trim().length > 0 ? rawInsight.approvalId : null,
-              applied: rawInsight.applied === true,
-              change,
-              impact,
-              riskLevel: normalizeSupervisorRiskLevel(rawInsight.riskLevel),
-              riskReason,
-              checkInstruction,
-              checkExpected,
-              confidence: normalizeSupervisorConfidence(rawInsight.confidence),
-              updatedAt
-            };
-          }
-        }
-
-        byTurn.set(turnId, {
-          insights,
-          riskBatchJobId:
-            typeof rawTurnRecord.riskBatchJobId === "string" && rawTurnRecord.riskBatchJobId.trim().length > 0
-              ? rawTurnRecord.riskBatchJobId
-              : null,
-          reviewJobId:
-            typeof rawTurnRecord.reviewJobId === "string" && rawTurnRecord.reviewJobId.trim().length > 0
-              ? rawTurnRecord.reviewJobId
-              : null
-        });
-      }
-
-      if (byTurn.size > 0) {
-        supervisorLedgerByProject.set(projectId, byTurn);
-      }
-    }
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT") {
-      app.log.warn({ error }, "failed to load supervisor ledger store");
-    }
-  }
-}
-
-function scheduleSupervisorLedgerPersistence(delayMs: number): void {
-  if (supervisorLedgerPersistTimer !== null) {
-    return;
-  }
-
-  supervisorLedgerPersistTimer = setTimeout(() => {
-    supervisorLedgerPersistTimer = null;
-    void flushSupervisorLedgerPersistence();
-  }, delayMs);
-}
-
-function requestSupervisorLedgerPersistence(): void {
-  supervisorLedgerPersistQueued = true;
-  void flushSupervisorLedgerPersistence();
-}
-
-async function persistSupervisorLedgerStore(): Promise<void> {
-  const byProjectId: Record<string, SupervisorProjectLedger> = {};
-  for (const [projectId, byTurnMap] of supervisorLedgerByProject.entries()) {
-    const byTurnId: Record<string, SupervisorTurnRecord> = {};
-    for (const [turnId, turnRecord] of byTurnMap.entries()) {
-      byTurnId[turnId] = {
-        insights: turnRecord.insights,
-        riskBatchJobId: turnRecord.riskBatchJobId,
-        reviewJobId: turnRecord.reviewJobId
-      };
-    }
-    byProjectId[projectId] = {
-      byTurnId
-    };
-  }
-
-  const payload: SupervisorLedgerStore = {
-    version: 1,
-    byProjectId
-  };
-  await writeFile(supervisorLedgerPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-}
-
-async function flushSupervisorLedgerPersistence(): Promise<void> {
-  if (supervisorLedgerPersistInFlight) {
-    await supervisorLedgerPersistInFlight;
-    return;
-  }
-
-  supervisorLedgerPersistInFlight = (async () => {
-    while (supervisorLedgerPersistQueued) {
-      supervisorLedgerPersistQueued = false;
-      try {
-        await persistSupervisorLedgerStore();
-      } catch (error) {
-        app.log.warn({ error }, "failed to persist supervisor ledger store");
-        supervisorLedgerPersistQueued = true;
-        scheduleSupervisorLedgerPersistence(1000);
-        break;
-      }
-    }
-  })();
-
-  try {
-    await supervisorLedgerPersistInFlight;
-  } finally {
-    supervisorLedgerPersistInFlight = null;
-  }
-}
-
 function isApprovalPolicy(value: unknown): value is ApprovalPolicy {
   return value === "untrusted" || value === "on-failure" || value === "on-request" || value === "never";
 }
@@ -1796,6 +1500,28 @@ function defaultSessionControlsFromEnv(): SessionControlsTuple {
     approvalPolicy: env.DEFAULT_APPROVAL_POLICY,
     networkAccess: env.DEFAULT_NETWORK_ACCESS,
     filesystemSandbox: env.DEFAULT_SANDBOX_MODE
+  };
+}
+
+function defaultAgentTurnPolicyFromEnv(): AgentTurnPolicy {
+  return {
+    sandbox: env.DEFAULT_SANDBOX_MODE,
+    networkAccess: env.DEFAULT_NETWORK_ACCESS,
+    approvalPolicy: env.DEFAULT_APPROVAL_POLICY,
+    effort: null
+  };
+}
+
+function mergeAgentTurnPolicy(base: AgentTurnPolicy, override?: Partial<AgentTurnPolicy>): AgentTurnPolicy {
+  if (!override) {
+    return base;
+  }
+
+  return {
+    sandbox: override.sandbox ?? base.sandbox,
+    networkAccess: override.networkAccess ?? base.networkAccess,
+    approvalPolicy: override.approvalPolicy ?? base.approvalPolicy,
+    effort: override.effort ?? base.effort
   };
 }
 
@@ -1835,8 +1561,7 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
     const sessionApprovalPolicyById: Record<string, ApprovalPolicy> = {};
     const sessionControlsById: Record<string, SessionControlsTuple> = {};
     const defaultSessionControls = defaultSessionControlsFromEnv();
-    const projectOrchestratorSessionById: Record<string, string> = {};
-    const suggestionHelperSessionIds: Record<string, true> = {};
+    const projectAgentSessionByKey: Record<string, string> = {};
     const systemOwnedSessionIds: Record<string, true> = {};
     const turnTimingBySessionId: Record<string, Record<string, TurnTimingRecord>> = {};
     const now = new Date().toISOString();
@@ -1927,22 +1652,24 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
       };
     }
 
-    if (isObjectRecord(parsed) && isObjectRecord(parsed.projectOrchestratorSessionById)) {
-      for (const [projectId, sessionId] of Object.entries(parsed.projectOrchestratorSessionById)) {
-        if (typeof sessionId !== "string" || sessionId.trim().length === 0 || !(projectId in projects)) {
+    if (isObjectRecord(parsed) && isObjectRecord(parsed.projectAgentSessionByKey)) {
+      for (const [key, sessionId] of Object.entries(parsed.projectAgentSessionByKey)) {
+        if (typeof key !== "string" || key.trim().length === 0) {
           continue;
         }
-        projectOrchestratorSessionById[projectId] = sessionId;
-        systemOwnedSessionIds[sessionId] = true;
-      }
-    }
-
-    if (isObjectRecord(parsed) && isObjectRecord(parsed.suggestionHelperSessionIds)) {
-      for (const [sessionId, enabled] of Object.entries(parsed.suggestionHelperSessionIds)) {
-        if (enabled === true) {
-          suggestionHelperSessionIds[sessionId] = true;
-          systemOwnedSessionIds[sessionId] = true;
+        if (typeof sessionId !== "string" || sessionId.trim().length === 0) {
+          continue;
         }
+        const parsedKey = parseProjectAgentSessionKey(key);
+        if (!parsedKey) {
+          continue;
+        }
+        const sessionScopedOwner = parseSessionScopedAgentOwnerId(parsedKey.projectId);
+        if (!sessionScopedOwner && !(parsedKey.projectId in projects)) {
+          continue;
+        }
+        projectAgentSessionByKey[key] = sessionId;
+        systemOwnedSessionIds[sessionId] = true;
       }
     }
 
@@ -2005,8 +1732,7 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
       sessionApprovalPolicyById,
       sessionControlsById,
       defaultSessionControls,
-      projectOrchestratorSessionById,
-      suggestionHelperSessionIds,
+      projectAgentSessionByKey,
       systemOwnedSessionIds,
       turnTimingBySessionId
     };
@@ -2022,8 +1748,7 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
       sessionApprovalPolicyById: {},
       sessionControlsById: {},
       defaultSessionControls: defaultSessionControlsFromEnv(),
-      projectOrchestratorSessionById: {},
-      suggestionHelperSessionIds: {},
+      projectAgentSessionByKey: {},
       systemOwnedSessionIds: {},
       turnTimingBySessionId: {}
     };
@@ -2060,6 +1785,22 @@ function normalizeProjectWorkingDirectory(input: string | null | undefined): str
 
   const normalized = input.trim();
   return normalized.length > 0 ? normalized : null;
+}
+
+function sessionScopedAgentOwnerId(sessionId: string): string {
+  return `session:${sessionId}`;
+}
+
+function parseSessionScopedAgentOwnerId(ownerId: string): string | null {
+  if (typeof ownerId !== "string") {
+    return null;
+  }
+  const trimmed = ownerId.trim();
+  if (!trimmed.startsWith("session:")) {
+    return null;
+  }
+  const sessionId = trimmed.slice("session:".length).trim();
+  return sessionId.length > 0 ? sessionId : null;
 }
 
 function toProjectSummary(projectId: string, project: ProjectRecord): ProjectSummary {
@@ -2262,28 +2003,19 @@ function sessionControlsResponse(sessionId: string): {
 
 function setSessionProjectAssignment(sessionId: string, nextProjectId: string | null): boolean {
   const currentProjectId = resolveSessionProjectId(sessionId);
-  let orchestratorMappingChanged = false;
-  for (const [projectId, mappedSessionId] of Object.entries(sessionMetadata.projectOrchestratorSessionById)) {
-    if (mappedSessionId !== sessionId) {
-      continue;
-    }
-    if (nextProjectId === projectId) {
-      continue;
-    }
-    delete sessionMetadata.projectOrchestratorSessionById[projectId];
-    orchestratorMappingChanged = true;
-  }
+  const agentMappingChanged = clearProjectAgentSessionMappingsForSession(sessionId, nextProjectId);
+  const sessionScopedAgentMappingChanged = clearSessionScopedAgentSessionMappingsForSourceSession(sessionId);
 
   if (nextProjectId === null) {
     if (sessionId in sessionMetadata.sessionProjectById) {
       delete sessionMetadata.sessionProjectById[sessionId];
       return true;
     }
-    return orchestratorMappingChanged;
+    return agentMappingChanged || sessionScopedAgentMappingChanged;
   }
 
   if (currentProjectId === nextProjectId) {
-    return orchestratorMappingChanged;
+    return agentMappingChanged || sessionScopedAgentMappingChanged;
   }
 
   sessionMetadata.sessionProjectById[sessionId] = nextProjectId;
@@ -2294,14 +2026,146 @@ function defaultSessionTitle(): string {
   return "New chat";
 }
 
-function buildProjectOrchestratorTitle(projectName: string): string {
+function buildProjectAgentTitle(projectName: string, agent: string): string {
   const trimmed = projectName.trim();
+  const normalizedAgent = agent.trim().length > 0 ? agent.trim() : "agent";
   if (!trimmed) {
-    return "Project Orchestrator";
+    return `Project ${normalizedAgent}`;
   }
 
   const cappedName = trimmed.length > 140 ? `${trimmed.slice(0, 140).trim()}...` : trimmed;
-  return `${cappedName} Orchestrator`;
+  return `${cappedName} ${normalizedAgent}`;
+}
+
+function projectAgentSessionKey(projectId: string, agent: string): string {
+  return `${projectId}::${agent}`;
+}
+
+function parseProjectAgentSessionKey(key: string): { projectId: string; agent: string } | null {
+  const separatorIndex = key.indexOf("::");
+  if (separatorIndex <= 0 || separatorIndex >= key.length - 2) {
+    return null;
+  }
+  const projectId = key.slice(0, separatorIndex).trim();
+  const agent = key.slice(separatorIndex + 2).trim();
+  if (!projectId || !agent) {
+    return null;
+  }
+  return { projectId, agent };
+}
+
+function listProjectAgentSessionIds(projectId: string): Array<string> {
+  const sessionIds = new Set<string>();
+  for (const [key, sessionId] of Object.entries(sessionMetadata.projectAgentSessionByKey)) {
+    if (!key.startsWith(`${projectId}::`)) {
+      continue;
+    }
+    if (typeof sessionId === "string" && sessionId.trim().length > 0) {
+      sessionIds.add(sessionId);
+    }
+  }
+  return Array.from(sessionIds);
+}
+
+function clearProjectAgentSessionMappingsForProject(projectId: string): boolean {
+  let changed = false;
+  for (const key of Object.keys(sessionMetadata.projectAgentSessionByKey)) {
+    const parsed = parseProjectAgentSessionKey(key);
+    if (!parsed || parsed.projectId !== projectId) {
+      continue;
+    }
+    delete sessionMetadata.projectAgentSessionByKey[key];
+    changed = true;
+  }
+  return changed;
+}
+
+function clearSessionScopedAgentSessionMappingsForSourceSession(sourceSessionId: string): boolean {
+  const prefix = `${sessionScopedAgentOwnerId(sourceSessionId)}::`;
+  let changed = false;
+  for (const key of Object.keys(sessionMetadata.projectAgentSessionByKey)) {
+    if (!key.startsWith(prefix)) {
+      continue;
+    }
+    delete sessionMetadata.projectAgentSessionByKey[key];
+    changed = true;
+  }
+  return changed;
+}
+
+function clearProjectAgentSessionMappingsForSession(sessionId: string, keepProjectId?: string | null): boolean {
+  let changed = false;
+  for (const [key, mappedSessionId] of Object.entries(sessionMetadata.projectAgentSessionByKey)) {
+    if (mappedSessionId !== sessionId) {
+      continue;
+    }
+    const parsed = parseProjectAgentSessionKey(key);
+    if (parsed && keepProjectId && parsed.projectId === keepProjectId) {
+      continue;
+    }
+    delete sessionMetadata.projectAgentSessionByKey[key];
+    changed = true;
+  }
+  return changed;
+}
+
+function agentRootPath(agent: string): string {
+  return path.join(agentsRootPath, agent);
+}
+
+function agentOrientationPath(agent: string): string {
+  return path.join(agentRootPath(agent), "orientation.md");
+}
+
+function agentConfigPath(agent: string): string {
+  return path.join(agentRootPath(agent), "agent.config.json");
+}
+
+async function resolveAgentRuntimePolicyConfig(agent: string): Promise<AgentRuntimePolicyConfig> {
+  const defaultPolicy = defaultAgentTurnPolicyFromEnv();
+  const configPath = agentConfigPath(agent);
+
+  if (!existsSync(configPath)) {
+    return {
+      orientationTurnPolicy: defaultPolicy,
+      instructionTurnPolicy: defaultPolicy,
+      threadStartSandbox: defaultPolicy.sandbox,
+      threadStartApprovalPolicy: defaultPolicy.approvalPolicy,
+      model: null
+    };
+  }
+
+  let parsedConfigRaw: unknown;
+  try {
+    const configContent = await readFile(configPath, "utf8");
+    parsedConfigRaw = JSON.parse(configContent);
+  } catch (error) {
+    throw new Error(`failed to parse ${configPath}: ${serializeError(error)}`);
+  }
+
+  const parsed = agentRuntimePolicyFileSchema.safeParse(parsedConfigRaw);
+  if (!parsed.success) {
+    const issueSummary = parsed.error.issues
+      .map((issue) => `${issue.path.length > 0 ? issue.path.join(".") : "(root)"}: ${issue.message}`)
+      .join("; ");
+    throw new Error(`invalid ${configPath}: ${issueSummary}`);
+  }
+
+  const sharedPolicy = mergeAgentTurnPolicy(defaultPolicy, parsed.data.turnPolicy);
+  const orientationTurnPolicy = mergeAgentTurnPolicy(sharedPolicy, parsed.data.orientationTurnPolicy);
+  const instructionTurnPolicy = mergeAgentTurnPolicy(sharedPolicy, parsed.data.instructionTurnPolicy);
+
+  return {
+    orientationTurnPolicy,
+    instructionTurnPolicy,
+    threadStartSandbox: parsed.data.threadStartPolicy?.sandbox ?? instructionTurnPolicy.sandbox,
+    threadStartApprovalPolicy: parsed.data.threadStartPolicy?.approvalPolicy ?? instructionTurnPolicy.approvalPolicy,
+    model: parsed.data.model?.trim() ? parsed.data.model.trim() : null
+  };
+}
+
+function isKnownAgent(agent: string): boolean {
+  return existsSync(agentRootPath(agent));
 }
 
 async function setSessionTitle(threadId: string, title: string): Promise<void> {
@@ -2311,7 +2175,7 @@ async function setSessionTitle(threadId: string, title: string): Promise<void> {
   }
 
   try {
-    await supervisor.call("thread/name/set", {
+    await codexRuntime.call("thread/name/set", {
       threadId,
       name: normalized
     });
@@ -2324,50 +2188,117 @@ async function setSessionTitle(threadId: string, title: string): Promise<void> {
   }
 }
 
-async function createProjectOrchestrationSession(
-  projectId: string,
-  projectName: string,
-  workingDirectory: string | null
-): Promise<CodexThread> {
-  const startResponse = await callThreadMethodWithRawEventsFallback<{ thread: CodexThread }>("thread/start", {
-    cwd: workingDirectory ?? env.WORKSPACE_ROOT,
-    sandbox: env.DEFAULT_SANDBOX_MODE,
-    approvalPolicy: env.DEFAULT_APPROVAL_POLICY
-  });
-  const orchestrationThread = startResponse.thread;
-  sessionMetadata.sessionProjectById[orchestrationThread.id] = projectId;
-  sessionMetadata.projectOrchestratorSessionById[projectId] = orchestrationThread.id;
-  setSystemOwnedSession(orchestrationThread.id, true);
-  await setSessionTitle(orchestrationThread.id, buildProjectOrchestratorTitle(projectName));
-  await persistSessionMetadata();
-  return orchestrationThread;
-}
+type AgentSessionStartContext = {
+  cwd: string;
+  titleSeed: string;
+  assignedProjectId: string | null;
+};
 
-async function ensureProjectOrchestrationSessions(): Promise<void> {
-  if (projectOrchestratorsEnsureInFlight) {
-    await projectOrchestratorsEnsureInFlight;
-    return;
+async function resolveAgentSessionStartContext(
+  projectId: string,
+  sourceSessionId?: string
+): Promise<AgentSessionStartContext> {
+  const project = sessionMetadata.projects[projectId];
+  if (project) {
+    return {
+      cwd: project.workingDirectory ?? env.WORKSPACE_ROOT,
+      titleSeed: project.name,
+      assignedProjectId: projectId
+    };
   }
 
-  projectOrchestratorsEnsureInFlight = (async () => {
-    for (const [projectId, project] of Object.entries(sessionMetadata.projects)) {
-      const mappedSessionId = sessionMetadata.projectOrchestratorSessionById[projectId];
-      if (typeof mappedSessionId === "string" && mappedSessionId.trim().length > 0) {
-        const systemOwnedChanged = setSystemOwnedSession(mappedSessionId, true);
-        const exists = await sessionExistsForProjectAssignment(mappedSessionId);
-        if (exists) {
-          if (systemOwnedChanged) {
-            await persistSessionMetadata();
-          }
-          continue;
-        }
+  const scopedSessionId = parseSessionScopedAgentOwnerId(projectId);
+  if (!scopedSessionId) {
+    throw new Error(`project not found: ${projectId}`);
+  }
 
-        setSessionProjectAssignment(mappedSessionId, null);
-        setSessionTitleOverride(mappedSessionId, null);
-        delete sessionMetadata.projectOrchestratorSessionById[projectId];
+  const sourceSession = sourceSessionId && sourceSessionId.trim().length > 0 ? sourceSessionId : scopedSessionId;
+  let cwd = env.WORKSPACE_ROOT;
+  try {
+    const read = await codexRuntime.call<{ thread: CodexThread }>("thread/read", {
+      threadId: sourceSession,
+      includeTurns: false
+    });
+    if (typeof read.thread.cwd === "string" && read.thread.cwd.trim().length > 0) {
+      cwd = read.thread.cwd.trim();
+    }
+  } catch (error) {
+    app.log.warn(
+      {
+        error,
+        ownerProjectId: projectId,
+        sourceSessionId: sourceSession
+      },
+      "failed to resolve source session cwd for session-scoped agent owner; falling back to workspace root"
+    );
+  }
+
+  const titleSeed = sessionMetadata.titles[sourceSession] ?? `Session ${sourceSession.slice(0, 8)}`;
+  return {
+    cwd,
+    titleSeed,
+    assignedProjectId: null
+  };
+}
+
+async function createProjectAgentSession(
+  projectId: string,
+  agent: string,
+  runtimePolicy: AgentRuntimePolicyConfig,
+  sourceSessionId?: string
+): Promise<CodexThread> {
+  const startContext = await resolveAgentSessionStartContext(projectId, sourceSessionId);
+  const agentSessionKey = projectAgentSessionKey(projectId, agent);
+
+  const startResponse = await callThreadMethodWithRawEventsFallback<{ thread: CodexThread }>("thread/start", {
+    cwd: startContext.cwd,
+    model: runtimePolicy.model ?? undefined,
+    sandbox: runtimePolicy.threadStartSandbox,
+    approvalPolicy: runtimePolicy.threadStartApprovalPolicy
+  });
+  const agentThread = startResponse.thread;
+  if (startContext.assignedProjectId) {
+    sessionMetadata.sessionProjectById[agentThread.id] = startContext.assignedProjectId;
+  }
+  sessionMetadata.projectAgentSessionByKey[agentSessionKey] = agentThread.id;
+  setSystemOwnedSession(agentThread.id, true);
+  await setSessionTitle(agentThread.id, buildProjectAgentTitle(startContext.titleSeed, agent));
+  await persistSessionMetadata();
+  return agentThread;
+}
+
+async function ensureProjectAgentSession(
+  projectId: string,
+  agent: string,
+  runtimePolicy: AgentRuntimePolicyConfig,
+  sourceSessionId?: string
+): Promise<string> {
+  const key = projectAgentSessionKey(projectId, agent);
+  const inFlight = projectAgentSessionEnsureInFlightByKey.get(key);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const ensurePromise = (async () => {
+    const mappedSessionId = sessionMetadata.projectAgentSessionByKey[key];
+    if (typeof mappedSessionId === "string" && mappedSessionId.trim().length > 0) {
+      const systemOwnedChanged = setSystemOwnedSession(mappedSessionId, true);
+      const exists = await sessionExistsForProjectAssignment(mappedSessionId);
+      if (exists) {
+        if (systemOwnedChanged) {
+          await persistSessionMetadata();
+        }
+        return mappedSessionId;
       }
 
-      const created = await createProjectOrchestrationSession(projectId, project.name, project.workingDirectory);
+      setSessionProjectAssignment(mappedSessionId, null);
+      setSessionTitleOverride(mappedSessionId, null);
+      delete sessionMetadata.projectAgentSessionByKey[key];
+      await persistSessionMetadata();
+    }
+
+    const created = await createProjectAgentSession(projectId, agent, runtimePolicy, sourceSessionId);
+    if (projectId in sessionMetadata.projects) {
       publishToSockets(
         "session_project_updated",
         {
@@ -2378,25 +2309,33 @@ async function ensureProjectOrchestrationSessions(): Promise<void> {
         { broadcastToAll: true }
       );
     }
+    return created.id;
   })();
 
+  projectAgentSessionEnsureInFlightByKey.set(key, ensurePromise);
   try {
-    await projectOrchestratorsEnsureInFlight;
+    return await ensurePromise;
   } finally {
-    projectOrchestratorsEnsureInFlight = null;
+    projectAgentSessionEnsureInFlightByKey.delete(key);
   }
 }
 
-function clearProjectOrchestratorSessionForSession(sessionId: string): boolean {
-  let changed = false;
-  for (const [projectId, mappedSessionId] of Object.entries(sessionMetadata.projectOrchestratorSessionById)) {
-    if (mappedSessionId !== sessionId) {
-      continue;
-    }
-    delete sessionMetadata.projectOrchestratorSessionById[projectId];
-    changed = true;
+async function clearProjectAgentSessionMapping(projectId: string, agent: string, expectedSessionId: string): Promise<void> {
+  const key = projectAgentSessionKey(projectId, agent);
+  let metadataChanged = false;
+
+  if (sessionMetadata.projectAgentSessionByKey[key] === expectedSessionId) {
+    delete sessionMetadata.projectAgentSessionByKey[key];
+    metadataChanged = true;
   }
-  return changed;
+
+  if (agentOrientationCompletedBySession.delete(expectedSessionId)) {
+    // In-memory cache only; no metadata persistence needed.
+  }
+
+  if (metadataChanged) {
+    await persistSessionMetadata();
+  }
 }
 
 function setSystemOwnedSession(sessionId: string, enabled: boolean): boolean {
@@ -2418,61 +2357,6 @@ function setSystemOwnedSession(sessionId: string, enabled: boolean): boolean {
 
 function isSystemOwnedSession(sessionId: string): boolean {
   return sessionMetadata.systemOwnedSessionIds[sessionId] === true;
-}
-
-function isSuggestionHelperSession(sessionId: string): boolean {
-  return sessionMetadata.suggestionHelperSessionIds[sessionId] === true;
-}
-
-function setSuggestionHelperSession(sessionId: string, enabled: boolean): boolean {
-  let changed = false;
-  if (enabled) {
-    if (sessionMetadata.suggestionHelperSessionIds[sessionId] === true) {
-      return setSystemOwnedSession(sessionId, true);
-    }
-    sessionMetadata.suggestionHelperSessionIds[sessionId] = true;
-    changed = true;
-    changed = setSystemOwnedSession(sessionId, true) || changed;
-    return changed;
-  }
-
-  if (sessionId in sessionMetadata.suggestionHelperSessionIds) {
-    delete sessionMetadata.suggestionHelperSessionIds[sessionId];
-    changed = true;
-  }
-
-  return changed;
-}
-
-async function cleanupSuggestionHelperSessions(): Promise<void> {
-  if (suggestionHelpersCleanupInFlight) {
-    await suggestionHelpersCleanupInFlight;
-    return;
-  }
-
-  const helperSessionIds = Object.keys(sessionMetadata.suggestionHelperSessionIds);
-  if (helperSessionIds.length === 0) {
-    return;
-  }
-
-  suggestionHelpersCleanupInFlight = (async () => {
-    for (const sessionId of helperSessionIds) {
-      if (suggestionThreadIds.has(sessionId)) {
-        continue;
-      }
-      try {
-        await hardDeleteSession(sessionId);
-      } catch (error) {
-        app.log.warn({ error, sessionId }, "failed to clean up suggestion helper session");
-      }
-    }
-  })();
-
-  try {
-    await suggestionHelpersCleanupInFlight;
-  } finally {
-    suggestionHelpersCleanupInFlight = null;
-  }
 }
 
 function listSessionIdsForProject(projectId: string, options?: { includeSystemOwned?: boolean }): Array<string> {
@@ -2791,452 +2675,63 @@ function latestAgentMessageFromTurn(turn: CodexTurn): string | null {
   return null;
 }
 
-function latestSupervisorContextForSuggestion(threadId: string): string | null {
-  const entries = listSupplementalTranscriptEntries(threadId);
-  let latestReview: TurnSupervisorReviewJobResult["review"] | null = null;
-  let latestRiskBatch: {
-    summary: RiskRecheckBatchJobResult["summary"];
-    checks: RiskRecheckBatchJobResult["checks"];
-  } | null = null;
+type FileChangeEventPayload = {
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  projectId: string;
+  sourceSessionId: string;
+  approvalId?: string;
+  summary: string;
+  details: string;
+  anchorItemId: string;
+};
 
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index]?.entry;
-    if (!entry) {
-      continue;
-    }
-
-    if (!latestReview && entry.type === "turn.supervisorReview" && entry.status === "complete") {
-      const parsed = parseDetailsObject(entry.details);
-      const candidate = parsed?.review;
-      if (candidate) {
-        try {
-          latestReview = turnSupervisorReviewJobResultSchema.shape.review.parse(candidate);
-        } catch {
-          // Ignore malformed supplemental details.
-        }
-      }
-      continue;
-    }
-
-    if (!latestRiskBatch && entry.type === "riskRecheck.batch" && entry.status === "complete") {
-      const parsed = parseDetailsObject(entry.details);
-      const summaryCandidate = parsed?.summary;
-      const checksCandidate = parsed?.checks;
-      if (summaryCandidate && checksCandidate) {
-        try {
-          latestRiskBatch = {
-            summary: riskRecheckBatchJobResultSchema.shape.summary.parse(summaryCandidate),
-            checks: riskRecheckBatchJobResultSchema.shape.checks.parse(checksCandidate)
-          };
-        } catch {
-          // Ignore malformed supplemental details.
-        }
-      }
-    }
-
-    if (latestReview && latestRiskBatch) {
-      break;
-    }
-  }
-
-  const lines: Array<string> = [];
-  if (latestReview) {
-    lines.push(`Supervisor overall change: ${latestReview.overallChange}`);
-    lines.push(`Supervisor next best action: ${latestReview.nextBestAction}`);
-    lines.push(`Supervisor guidance: ${latestReview.suggestReplyGuidance}`);
-  }
-
-  if (latestRiskBatch) {
-    const unresolvedChecks = latestRiskBatch.checks.filter((check) => check.status !== "passed");
-    if (unresolvedChecks.length > 0) {
-      const topChecks = unresolvedChecks
-        .slice(0, 4)
-        .map((check) => `${check.itemId} [${check.status}]`)
-        .join(", ");
-      lines.push(
-        `Risk recheck unresolved: ${latestRiskBatch.summary.failed} failed, ${latestRiskBatch.summary.error} error, ${latestRiskBatch.summary.timeout} timeout, ${latestRiskBatch.summary.skipped} skipped (${topChecks})`
-      );
-    }
-  }
-
-  return lines.length > 0 ? lines.join("\n") : null;
+function turnEventKey(threadId: string, turnId: string): string {
+  return `${threadId}::${turnId}`;
 }
 
-function buildSuggestionPrompt(contextEntries: Array<TranscriptEntry>, draft?: string, supervisorContext?: string | null): string {
-  const lines = contextEntries
-    .map((entry) => {
-      const cleaned = entry.content
-        .replace(/\s+/g, " ")
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0 && !line.startsWith("Documentation Impact Assessment:"))
-        .filter((line) => !line.includes("You are preparing a suggested next user reply for a chat conversation."))
-        .filter((line) => !line.includes("Conversation excerpt:"))
-        .filter((line) => !line.includes("Suggested reply:"))
-        .join(" ");
-      return cleaned.length > 0 ? `${entry.role.toUpperCase()}: ${cleaned}` : "";
-    })
-    .filter((line) => line.length > 0);
-  const cleanedDraft = typeof draft === "string" ? draft.trim() : "";
-
-  return [
-    "You are preparing a suggested next user reply for a chat conversation.",
-    "Return only the suggested message text that the user should send next.",
-    "Do not include role labels, markdown code fences, or any explanation.",
-    "Keep it concise, practical, and aligned with the latest user intent.",
-    supervisorContext ? `Supervisor context:\n${supervisorContext}\n` : "",
-    "",
-    "Conversation excerpt:",
-    lines.join("\n"),
-    "",
-    cleanedDraft ? `Current user draft to refine:\n${cleanedDraft}\n` : "",
-    "Suggested reply:"
-  ]
-    .filter((part) => part.length > 0)
-    .join("\n");
+function incrementFileChangeEventCount(threadId: string, turnId: string): void {
+  const key = turnEventKey(threadId, turnId);
+  const current = fileChangeEventCountByTurn.get(key) ?? 0;
+  fileChangeEventCountByTurn.set(key, current + 1);
 }
 
-function stripSuggestionScaffolding(text: string): string {
-  let next = text.trim();
-  if (!next) {
-    return "";
-  }
-
-  const suggestedReplyMarker = "Suggested reply:";
-  const markerIndex = next.lastIndexOf(suggestedReplyMarker);
-  if (markerIndex !== -1) {
-    next = next.slice(markerIndex + suggestedReplyMarker.length).trim();
-  }
-
-  if (next.startsWith("You are preparing a suggested next user reply")) {
-    return "";
-  }
-
-  next = next
-    .replace(/You are preparing a suggested next user reply for a chat conversation\./gi, "")
-    .replace(/Return only the suggested message text that the user should send next\./gi, "")
-    .replace(/Do not include role labels, markdown code fences, or any explanation\./gi, "")
-    .replace(/Keep it concise, practical, and aligned with the latest user intent\./gi, "")
-    .replace(/Conversation excerpt:/gi, "")
-    .replace(/Current user draft to refine:/gi, "")
-    .replace(/Suggested reply:/gi, "")
-    .replace(/\b(USER|ASSISTANT):/g, "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .filter((line) => !line.startsWith("Conversation excerpt:"))
-    .filter((line) => !line.startsWith("Current user draft to refine:"))
-    .filter((line) => !line.startsWith("USER:"))
-    .filter((line) => !line.startsWith("ASSISTANT:"))
-    .join("\n")
-    .trim();
-
-  return next;
+function getFileChangeEventCount(threadId: string, turnId: string): number {
+  return fileChangeEventCountByTurn.get(turnEventKey(threadId, turnId)) ?? 0;
 }
 
-function buildFallbackSuggestedReply(contextEntries: Array<TranscriptEntry>, draft?: string): string {
-  const cleanedDraft = typeof draft === "string" ? draft.trim() : "";
-  if (cleanedDraft.length > 0) {
-    return cleanedDraft;
-  }
-
-  const lastUser = [...contextEntries].reverse().find((entry) => entry.role === "user" && entry.content.trim().length > 0);
-  if (lastUser) {
-    const request = lastUser.content.replace(/\s+/g, " ").trim().slice(0, 220);
-    return `Please continue from your last response and focus on this request: ${request}`;
-  }
-
-  const lastAssistant = [...contextEntries].reverse().find((entry) => entry.role === "assistant" && entry.content.trim().length > 0);
-  if (lastAssistant) {
-    const summarized = lastAssistant.content.replace(/\s+/g, " ").trim().slice(0, 260);
-    return `Please continue from your last response and focus on the concrete next step. (${summarized})`;
-  }
-
-  return "Please continue with the next concrete step and include exact commands or code changes.";
+function clearFileChangeEventCount(threadId: string, turnId: string): void {
+  fileChangeEventCountByTurn.delete(turnEventKey(threadId, turnId));
 }
 
-function suggestionContextEntriesFromTranscript(transcript: Array<TranscriptEntry>): Array<TranscriptEntry> {
-  return transcript
-    .filter((entry) => (entry.role === "user" || entry.role === "assistant") && entry.content.trim().length > 0)
-    .slice(-12);
+function transcriptLineForEventContext(entry: TranscriptEntry): string {
+  const roleLabel = entry.role.toUpperCase();
+  const content = entry.content.replace(/\s+/g, " ").trim();
+  return content.length > 0 ? `${roleLabel} [${entry.type}]: ${content}` : `${roleLabel} [${entry.type}]`;
 }
 
-async function loadSuggestionContext(sessionId: string): Promise<{
-  sourceThread: CodexThread;
-  transcript: Array<TranscriptEntry>;
-  contextEntries: Array<TranscriptEntry>;
-}> {
-  let sourceThread: CodexThread;
-  let transcript: Array<TranscriptEntry>;
-
-  try {
-    const source = await supervisor.call<{ thread: CodexThread }>("thread/read", {
-      threadId: sessionId,
-      includeTurns: true
-    });
-    sourceThread = source.thread;
-    transcript = turnsToTranscript(sessionId, Array.isArray(source.thread.turns) ? source.thread.turns : []);
-  } catch (error) {
-    if (!isIncludeTurnsUnavailableError(error)) {
-      throw error;
-    }
-
-    const source = await supervisor.call<{ thread: CodexThread }>("thread/read", {
-      threadId: sessionId,
-      includeTurns: false
-    });
-    sourceThread = source.thread;
-    transcript = [];
+function sliceEntriesThroughMessage(entries: Array<TranscriptEntry>, messageId: string): Array<TranscriptEntry> {
+  const normalized = messageId.trim();
+  if (!normalized) {
+    return entries;
   }
-
-  transcript = mergeTranscriptWithSupplemental(sessionId, transcript);
-  return {
-    sourceThread,
-    transcript,
-    contextEntries: suggestionContextEntriesFromTranscript(transcript)
-  };
+  const index = entries.findIndex((entry) => entry.messageId === normalized);
+  return index >= 0 ? entries.slice(0, index + 1) : entries;
 }
 
-function suggestionQueueProjectId(sessionId: string): string {
-  const projectId = resolveSessionProjectId(sessionId);
-  if (projectId) {
-    return projectId;
-  }
-  return `session:${sessionId}`;
+function truncateForEvent(value: string, maxChars: number): string {
+  return value.length <= maxChars ? value : `${value.slice(0, maxChars)}\n... (truncated)`;
 }
 
-async function generateSuggestedReplyForJob(
-  payload: SuggestReplyJobPayload,
-  options?: {
-    signal?: AbortSignal;
-    onTurnStarted?: (threadId: string, turnId: string) => void;
-  }
-): Promise<SuggestReplyJobResult> {
-  throwIfAborted(options?.signal);
-  const context = await loadSuggestionContext(payload.sessionId);
-  const contextEntries = context.contextEntries;
-  const helperFallbackEnabled = env.ORCHESTRATOR_SUGGEST_REPLY_ALLOW_HELPER_FALLBACK;
-
-  if (contextEntries.length === 0) {
-    const fallbackSuggestion = buildFallbackSuggestedReply(contextEntries, payload.draft);
-    if (fallbackSuggestion.trim().length > 0 && typeof payload.draft === "string" && payload.draft.trim().length > 0) {
-      return {
-        suggestion: fallbackSuggestion,
-        requestKey: payload.requestKey
-      };
-    }
-    throw new Error("no_context");
-  }
-
-  let helperThreadId: string | null = null;
-  let targetThreadId: string | null = null;
-  let fallbackReason = "unknown";
-  const supervisorContext = latestSupervisorContextForSuggestion(payload.sessionId);
-  const suggestionPrompt = buildSuggestionPrompt(contextEntries, payload.draft, supervisorContext);
-  const runSuggestionTurn = async (threadId: string): Promise<string> => {
-    throwIfAborted(options?.signal);
-    const turn = await supervisor.call<{ turn: { id: string } }>("turn/start", {
-      threadId,
-      model: payload.model,
-      effort: payload.effort as ReasoningEffort | undefined,
-      sandboxPolicy: toTurnSandboxPolicy("read-only"),
-      approvalPolicy: "never",
-      input: [
-        {
-          type: "text",
-          text: suggestionPrompt,
-          text_elements: []
-        }
-      ]
-    });
-    options?.onTurnStarted?.(threadId, turn.turn.id);
-    throwIfAborted(options?.signal);
-
-    const rawSuggestion = await waitForSuggestedReply(threadId, turn.turn.id, options?.signal);
-    const suggestion = stripSuggestionScaffolding(rawSuggestion);
-    if (!suggestion) {
-      throw new Error("suggestion output contained only orchestration scaffolding");
-    }
-    return suggestion;
-  };
-
-  try {
-    const projectId = resolveSessionProjectId(payload.sessionId);
-    if (projectId) {
-      await ensureProjectOrchestrationSessions();
-      const orchestrationSessionId = sessionMetadata.projectOrchestratorSessionById[projectId];
-      if (typeof orchestrationSessionId === "string" && orchestrationSessionId.trim().length > 0) {
-        targetThreadId = orchestrationSessionId;
-      }
-    }
-
-    if (targetThreadId) {
-      try {
-        const suggestion = await runSuggestionTurn(targetThreadId);
-        return {
-          suggestion,
-          requestKey: payload.requestKey
-        };
-      } catch (orchestratorError) {
-        fallbackReason = "project_orchestrator_failed";
-        app.log.warn(
-          { error: orchestratorError, sessionId: payload.sessionId, targetThreadId },
-          "project orchestrator suggestion turn failed"
-        );
-      }
-    }
-
-    if (!helperFallbackEnabled) {
-      if (fallbackReason === "unknown") {
-        fallbackReason = targetThreadId ? "project_orchestrator_unavailable" : "project_orchestrator_not_configured";
-      }
-      const fallbackSuggestion = buildFallbackSuggestedReply(contextEntries, payload.draft);
-      return {
-        suggestion: fallbackSuggestion,
-        requestKey: payload.requestKey
-      };
-    }
-
-    helperThreadId = await ensureSuggestionThread(payload.sessionId, context.sourceThread, payload.model);
-    targetThreadId = helperThreadId;
-    try {
-      const suggestion = await runSuggestionTurn(targetThreadId);
-      return {
-        suggestion,
-        requestKey: payload.requestKey
-      };
-    } catch (helperError) {
-      fallbackReason = targetThreadId === helperThreadId ? "helper_first_attempt_failed" : fallbackReason;
-      app.log.warn(
-        { error: helperError, sessionId: payload.sessionId, helperThreadId },
-        "helper suggestion turn failed; retrying with fresh helper thread"
-      );
-    }
-
-    helperThreadId = await ensureSuggestionThread(payload.sessionId, context.sourceThread, payload.model);
-    targetThreadId = helperThreadId;
-    const suggestion = await runSuggestionTurn(targetThreadId);
-    return {
-      suggestion,
-      requestKey: payload.requestKey
-    };
-  } catch (error) {
-    if (isAbortError(error) || options?.signal?.aborted) {
-      throw error;
-    }
-    if (fallbackReason === "unknown") {
-      fallbackReason = "unexpected_error";
-    }
-    app.log.warn({ error, sessionId: payload.sessionId, fallbackReason }, "failed to generate suggested reply");
-    const fallbackSuggestion = buildFallbackSuggestedReply(contextEntries, payload.draft);
-    return {
-      suggestion: fallbackSuggestion,
-      requestKey: payload.requestKey
-    };
-  } finally {
-    if (helperThreadId) {
-      await cleanupSuggestionThread(payload.sessionId, helperThreadId);
-    }
-  }
-}
-
-function fileChangeExplainMessageId(payload: { threadId: string; turnId: string; itemId: string }): string {
-  return `file-change-explain-${payload.threadId}-${payload.turnId}-${payload.itemId}`;
-}
-
-function fileChangeExplainDetails(anchorItemId: string, metadata?: Record<string, unknown>): string {
-  return JSON.stringify(
-    {
-      anchorItemId,
-      ...(metadata ?? {})
-    },
-    null,
-    2
-  );
-}
-
-function upsertFileChangeExplainabilityEntry(
-  payload: FileChangeExplainJobPayload,
-  input: {
-    status: TranscriptEntry["status"];
-    content: string;
-    completedAt?: number;
-  }
-): void {
-  const now = Date.now();
-  const messageId = fileChangeExplainMessageId(payload);
-  upsertSupplementalTranscriptEntry(payload.threadId, {
-    messageId,
-    turnId: payload.turnId,
-    role: "system",
-    type: "fileChange.explainability",
-    content: input.content,
-    details: fileChangeExplainDetails(
-      payload.anchorItemId,
-      payload.approvalId
-        ? {
-            approvalId: payload.approvalId
-          }
-        : undefined
-    ),
-    startedAt: now,
-    ...(typeof input.completedAt === "number" ? { completedAt: input.completedAt } : {}),
-    status: input.status
-  });
-}
-
-function buildFileChangeExplainPrompt(payload: FileChangeExplainJobPayload): string {
-  return [
-    "You are summarizing a completed code diff for a developer.",
-    "Output only a concise markdown section titled exactly: What changed",
-    "Use short bullet points focused strictly on concrete file/content changes.",
-    "Do not include why it changed, risk analysis, recommendations, or follow-up tasks.",
-    "",
-    `Diff summary: ${payload.summary}`,
-    "",
-    "Diff details JSON:",
-    payload.details
-  ].join("\n");
-}
-
-function fallbackFileChangeExplanation(payload: FileChangeExplainJobPayload): string {
-  let detailsRecord: Record<string, unknown> | null = null;
-  try {
-    const parsed = JSON.parse(payload.details) as unknown;
-    if (isObjectRecord(parsed)) {
-      detailsRecord = parsed;
-    }
-  } catch {
-    detailsRecord = null;
-  }
-
-  const changes = Array.isArray(detailsRecord?.changes) ? detailsRecord.changes : [];
-  const bullets: Array<string> = [];
-  for (const change of changes) {
-    if (!isObjectRecord(change)) {
-      continue;
-    }
-
-    const path = typeof change.path === "string" && change.path.trim().length > 0 ? change.path.trim() : "file";
-    const kind = typeof change.kind === "string" && change.kind.trim().length > 0 ? change.kind.trim() : "update";
-    bullets.push(`- ${kind}: ${path}`);
-  }
-
-  if (bullets.length === 0) {
-    bullets.push(`- ${payload.summary}`);
-  }
-
-  return ["### What changed", ...bullets].join("\n");
-}
-
-function normalizeExplainableFileChanges(changes: unknown): {
+function normalizeChangeRecords(input: unknown): {
   normalizedChanges: Array<Record<string, unknown>>;
   hasAnyDiff: boolean;
 } {
-  const inputChanges = Array.isArray(changes) ? changes : [];
+  const changes = Array.isArray(input) ? input : [];
   const normalizedChanges: Array<Record<string, unknown>> = [];
   let hasAnyDiff = false;
-  for (const change of inputChanges) {
+  for (const change of changes) {
     if (!isObjectRecord(change)) {
       continue;
     }
@@ -3253,7 +2748,6 @@ function normalizeExplainableFileChanges(changes: unknown): {
     }
     normalizedChanges.push(normalized);
   }
-
   return {
     normalizedChanges,
     hasAnyDiff
@@ -3264,36 +2758,27 @@ function parseDetailsObject(details: string | undefined): Record<string, unknown
   if (typeof details !== "string" || details.trim().length === 0) {
     return null;
   }
-
   try {
     const parsed = JSON.parse(details) as unknown;
-    if (isObjectRecord(parsed)) {
-      return parsed;
-    }
+    return isObjectRecord(parsed) ? parsed : null;
   } catch {
     return null;
   }
-
-  return null;
 }
 
-function extractExplainableChangesCandidate(details: Record<string, unknown> | null): unknown {
+function extractChangeCandidate(details: Record<string, unknown> | null): unknown {
   if (!details) {
     return undefined;
   }
-
   if (Array.isArray(details.changes)) {
     return details.changes;
   }
-
   if (isObjectRecord(details.item) && Array.isArray(details.item.changes)) {
     return details.item.changes;
   }
-
   if (isObjectRecord(details.fileChange) && Array.isArray(details.fileChange.changes)) {
     return details.fileChange.changes;
   }
-
   return undefined;
 }
 
@@ -3301,26 +2786,17 @@ function normalizeNonEmptyString(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;
   }
-
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function resolveExplainableChangesFromApproval(approval: PendingApprovalRecord): {
+function resolveFileChangeRecordsFromApproval(approval: PendingApprovalRecord): {
   normalizedChanges: Array<Record<string, unknown>>;
   itemId: string | null;
   turnId: string | null;
 } | null {
-  const resolveCandidate = (input: {
-    changes: unknown;
-    itemId: string | null;
-    turnId: string | null;
-  }): {
-    normalizedChanges: Array<Record<string, unknown>>;
-    itemId: string | null;
-    turnId: string | null;
-  } | null => {
-    const { normalizedChanges, hasAnyDiff } = normalizeExplainableFileChanges(input.changes);
+  const resolveCandidate = (input: { changes: unknown; itemId: string | null; turnId: string | null }) => {
+    const { normalizedChanges, hasAnyDiff } = normalizeChangeRecords(input.changes);
     if (normalizedChanges.length === 0 || !hasAnyDiff) {
       return null;
     }
@@ -3333,7 +2809,7 @@ function resolveExplainableChangesFromApproval(approval: PendingApprovalRecord):
 
   const approvalDetails = isObjectRecord(approval.details) ? approval.details : null;
   const directCandidate = resolveCandidate({
-    changes: extractExplainableChangesCandidate(approvalDetails),
+    changes: extractChangeCandidate(approvalDetails),
     itemId: normalizeNonEmptyString(approval.itemId) ?? normalizeNonEmptyString(extractItemId(approval.details)),
     turnId: normalizeNonEmptyString(approval.turnId) ?? normalizeNonEmptyString(extractTurnId(approval.details))
   });
@@ -3353,18 +2829,16 @@ function resolveExplainableChangesFromApproval(approval: PendingApprovalRecord):
     if (!entry || entry.type !== "fileChange") {
       continue;
     }
-
     if (targetItemId && entry.messageId !== targetItemId) {
       continue;
     }
-
     if (!targetItemId && targetTurnId && entry.turnId !== targetTurnId) {
       continue;
     }
 
-    const parsedDetails = parseDetailsObject(entry.details);
+    const parsed = parseDetailsObject(entry.details);
     const candidate = resolveCandidate({
-      changes: extractExplainableChangesCandidate(parsedDetails),
+      changes: extractChangeCandidate(parsed),
       itemId: normalizeNonEmptyString(entry.messageId),
       turnId: normalizeNonEmptyString(entry.turnId)
     });
@@ -3376,185 +2850,8 @@ function resolveExplainableChangesFromApproval(approval: PendingApprovalRecord):
   return null;
 }
 
-async function generateFileChangeExplainabilityForJob(
-  payload: FileChangeExplainJobPayload,
-  options?: {
-    signal?: AbortSignal;
-    onTurnStarted?: (threadId: string, turnId: string) => void;
-  }
-): Promise<FileChangeExplainJobResult> {
-  const runExplainabilityTurn = async (orchestrationSessionId: string): Promise<string> => {
-    const turn = await supervisor.call<{ turn: { id: string } }>("turn/start", {
-      threadId: orchestrationSessionId,
-      sandboxPolicy: toTurnSandboxPolicy("read-only"),
-      approvalPolicy: "never",
-      input: [
-        {
-          type: "text",
-          text: buildFileChangeExplainPrompt(payload),
-          text_elements: []
-        }
-      ]
-    });
-    options?.onTurnStarted?.(orchestrationSessionId, turn.turn.id);
-    throwIfAborted(options?.signal);
-    return waitForSuggestedReply(orchestrationSessionId, turn.turn.id, options?.signal);
-  };
-
-  const recreateProjectOrchestrationSession = async (): Promise<string | null> => {
-    const project = sessionMetadata.projects[payload.projectId];
-    if (!project) {
-      return null;
-    }
-
-    const mappedSessionId = sessionMetadata.projectOrchestratorSessionById[payload.projectId];
-    let metadataChanged = false;
-    if (mappedSessionId) {
-      metadataChanged = setSessionProjectAssignment(mappedSessionId, null) || metadataChanged;
-      metadataChanged = setSessionTitleOverride(mappedSessionId, null) || metadataChanged;
-      if (payload.projectId in sessionMetadata.projectOrchestratorSessionById) {
-        delete sessionMetadata.projectOrchestratorSessionById[payload.projectId];
-        metadataChanged = true;
-      }
-    }
-
-    if (metadataChanged) {
-      await persistSessionMetadata();
-    }
-
-    await ensureProjectOrchestrationSessions();
-    const nextSessionId = sessionMetadata.projectOrchestratorSessionById[payload.projectId];
-    return typeof nextSessionId === "string" && nextSessionId.trim().length > 0 ? nextSessionId : null;
-  };
-
-  const shouldRecoverSession = (error: unknown): boolean => {
-    if (isNoRolloutFoundError(error) || isInvalidThreadIdError(error)) {
-      return true;
-    }
-    if (!(error instanceof Error)) {
-      return false;
-    }
-    return error.message.toLowerCase().includes("missing project orchestrator session");
-  };
-
-  throwIfAborted(options?.signal);
-  try {
-    await ensureProjectOrchestrationSessions();
-    const orchestrationSessionId = sessionMetadata.projectOrchestratorSessionById[payload.projectId];
-    if (!orchestrationSessionId) {
-      throw new Error(`missing project orchestrator session for ${payload.projectId}`);
-    }
-
-    const rawExplanation = await runExplainabilityTurn(orchestrationSessionId);
-    const explanation = rawExplanation.trim().length > 0 ? rawExplanation.trim() : fallbackFileChangeExplanation(payload);
-    return {
-      messageId: fileChangeExplainMessageId(payload),
-      explanation,
-      anchorItemId: payload.anchorItemId
-    };
-  } catch (error) {
-    if (isAbortError(error) || options?.signal?.aborted) {
-      throw error;
-    }
-
-    if (shouldRecoverSession(error)) {
-      app.log.warn(
-        { error, projectId: payload.projectId, sourceSessionId: payload.sourceSessionId },
-        "file-change explainability turn failed due stale/missing orchestration session; recreating session"
-      );
-
-      try {
-        const recoveredSessionId = await recreateProjectOrchestrationSession();
-        if (recoveredSessionId) {
-          const rawExplanation = await runExplainabilityTurn(recoveredSessionId);
-          const explanation = rawExplanation.trim().length > 0 ? rawExplanation.trim() : fallbackFileChangeExplanation(payload);
-          return {
-            messageId: fileChangeExplainMessageId(payload),
-            explanation,
-            anchorItemId: payload.anchorItemId
-          };
-        }
-      } catch (recoveryError) {
-        if (isAbortError(recoveryError) || options?.signal?.aborted) {
-          throw recoveryError;
-        }
-        app.log.warn(
-          { error: recoveryError, projectId: payload.projectId, sourceSessionId: payload.sourceSessionId },
-          "file-change explainability session recovery failed; using fallback explanation"
-        );
-      }
-    } else {
-      app.log.warn(
-        { error, projectId: payload.projectId, sourceSessionId: payload.sourceSessionId },
-        "file-change explainability generation failed; using fallback explanation"
-      );
-    }
-  }
-
-  return {
-    messageId: fileChangeExplainMessageId(payload),
-    explanation: fallbackFileChangeExplanation(payload),
-    anchorItemId: payload.anchorItemId
-  };
-}
-
-function buildFileChangeExplainJobPayload(input: {
-  threadId: string;
-  turnId: string;
-  itemId: string;
-  item: CodexThreadItem;
-}): FileChangeExplainJobPayload | null {
-  const projectId = resolveSessionProjectId(input.threadId);
-  if (!projectId) {
-    return null;
-  }
-  if (isSystemOwnedSession(input.threadId)) {
-    return null;
-  }
-
-  const status = typeof input.item.status === "string" ? input.item.status.toLowerCase() : "";
-  if (status.includes("fail") || status.includes("error") || status.includes("cancel")) {
-    return null;
-  }
-
-  const changes = Array.isArray(input.item.changes) ? input.item.changes : [];
-  if (changes.length === 0) {
-    return null;
-  }
-
-  const { normalizedChanges, hasAnyDiff } = normalizeExplainableFileChanges(changes);
-
-  if (normalizedChanges.length === 0 || !hasAnyDiff) {
-    return null;
-  }
-
-  const summary = `File change completed: ${normalizedChanges.length} change${normalizedChanges.length === 1 ? "" : "s"}`;
-  const detailsRecord = {
-    status: typeof input.item.status === "string" ? input.item.status : "completed",
-    changes: normalizedChanges
-  };
-  let details = JSON.stringify(detailsRecord, null, 2);
-  if (details.length > env.ORCHESTRATOR_DIFF_EXPLAIN_MAX_DIFF_CHARS) {
-    details = `${details.slice(0, env.ORCHESTRATOR_DIFF_EXPLAIN_MAX_DIFF_CHARS)}\n... (truncated)`;
-  }
-
-  return {
-    threadId: input.threadId,
-    turnId: input.turnId,
-    itemId: input.itemId,
-    projectId,
-    sourceSessionId: input.threadId,
-    summary,
-    details,
-    anchorItemId: input.itemId
-  };
-}
-
-function buildFileChangeExplainJobPayloadFromApproval(approval: PendingApprovalRecord): FileChangeExplainJobPayload | null {
-  if (approval.method !== "item/fileChange/requestApproval") {
-    return null;
-  }
-  if (isSystemOwnedSession(approval.threadId)) {
+function buildFileChangeEventPayloadFromApproval(approval: PendingApprovalRecord): FileChangeEventPayload | null {
+  if (approval.method !== "item/fileChange/requestApproval" || isSystemOwnedSession(approval.threadId)) {
     return null;
   }
 
@@ -3563,7 +2860,7 @@ function buildFileChangeExplainJobPayloadFromApproval(approval: PendingApprovalR
     return null;
   }
 
-  const resolved = resolveExplainableChangesFromApproval(approval);
+  const resolved = resolveFileChangeRecordsFromApproval(approval);
   if (!resolved) {
     return null;
   }
@@ -3572,16 +2869,18 @@ function buildFileChangeExplainJobPayloadFromApproval(approval: PendingApprovalR
   const itemId = normalizeNonEmptyString(approval.itemId) ?? resolved.itemId ?? fallbackItemId;
   const turnId = normalizeNonEmptyString(approval.turnId) ?? resolved.turnId ?? "approval";
 
-  const normalizedChanges = resolved.normalizedChanges;
-  const summary = `File change awaiting approval: ${normalizedChanges.length} change${normalizedChanges.length === 1 ? "" : "s"}`;
-  const detailsRecord = {
-    status: "pending_approval",
-    changes: normalizedChanges
-  };
-  let serializedDetails = JSON.stringify(detailsRecord, null, 2);
-  if (serializedDetails.length > env.ORCHESTRATOR_DIFF_EXPLAIN_MAX_DIFF_CHARS) {
-    serializedDetails = `${serializedDetails.slice(0, env.ORCHESTRATOR_DIFF_EXPLAIN_MAX_DIFF_CHARS)}\n... (truncated)`;
-  }
+  const summary = `File change awaiting approval: ${resolved.normalizedChanges.length} change${resolved.normalizedChanges.length === 1 ? "" : "s"}`;
+  const details = truncateForEvent(
+    JSON.stringify(
+      {
+        status: "pending_approval",
+        changes: resolved.normalizedChanges
+      },
+      null,
+      2
+    ),
+    50_000
+  );
 
   return {
     threadId: approval.threadId,
@@ -3591,22 +2890,101 @@ function buildFileChangeExplainJobPayloadFromApproval(approval: PendingApprovalR
     sourceSessionId: approval.threadId,
     approvalId: approval.approvalId,
     summary,
-    details: serializedDetails,
+    details,
     anchorItemId: itemId
   };
 }
 
-function enqueueFileChangeExplainabilityFromApproval(
+async function loadTurnContextForFileChangeEvent(
+  payload: FileChangeEventPayload,
+  signal?: AbortSignal
+): Promise<{ userRequest: string; turnTranscript: string }> {
+  const supplementalEntries = sliceEntriesThroughMessage(
+    listSupplementalTranscriptEntries(payload.threadId)
+      .filter((entry) => entry.entry.turnId === payload.turnId)
+      .map((entry) => entry.entry),
+    payload.itemId
+  );
+  const supplementalUser = supplementalEntries.find((entry) => entry.role === "user" && entry.content.trim().length > 0);
+  let userRequest = supplementalUser?.content.trim() ?? "User request unavailable for this turn.";
+  let turnTranscript =
+    supplementalEntries.length > 0
+      ? supplementalEntries.map((entry) => transcriptLineForEventContext(entry)).join("\n")
+      : "Turn transcript unavailable for this turn.";
+
+  try {
+    throwIfAborted(signal);
+    const response = await codexRuntime.call<{ thread: CodexThread }>("thread/read", {
+      threadId: payload.threadId,
+      includeTurns: true
+    });
+    throwIfAborted(signal);
+    const turn = response.thread.turns.find((entry) => entry.id === payload.turnId);
+    if (turn) {
+      const merged = sliceEntriesThroughMessage(
+        mergeTranscriptWithSupplemental(payload.threadId, turnsToTranscript(payload.threadId, [turn])).filter(
+          (entry) => entry.turnId === payload.turnId
+        ),
+        payload.itemId
+      );
+      if (merged.length > 0) {
+        const userEntry = merged.find((entry) => entry.role === "user" && entry.content.trim().length > 0);
+        if (userEntry) {
+          userRequest = userEntry.content.trim();
+        }
+        turnTranscript = merged.map((entry) => transcriptLineForEventContext(entry)).join("\n");
+      }
+    }
+  } catch (error) {
+    if (isAbortError(error) || signal?.aborted) {
+      throw error;
+    }
+  }
+
+  return {
+    userRequest: truncateForEvent(userRequest, 8_000),
+    turnTranscript: truncateForEvent(turnTranscript, 24_000)
+  };
+}
+
+async function enqueueFileChangeReviewEventFromApproval(
   approval: PendingApprovalRecord,
   source: "approval_request" | "approvals_reconcile"
-): void {
-  if (approval.method !== "item/fileChange/requestApproval" || !orchestratorQueue) {
+): Promise<void> {
+  if (!orchestratorQueue || approval.method !== "item/fileChange/requestApproval") {
     return;
   }
 
-  const explainPayload = buildFileChangeExplainJobPayloadFromApproval(approval);
-  if (!explainPayload) {
-    app.log.debug(
+  const payload = buildFileChangeEventPayloadFromApproval(approval);
+  if (!payload) {
+    return;
+  }
+
+  const context = await loadTurnContextForFileChangeEvent(payload).catch(() => ({
+    userRequest: "User request unavailable for this turn.",
+    turnTranscript: "Turn transcript unavailable for this turn."
+  }));
+
+  const results = await emitAgentEvent("file_change.approval_requested", {
+    context: {
+      projectId: payload.projectId,
+      sourceSessionId: payload.sourceSessionId,
+      threadId: payload.threadId,
+      turnId: payload.turnId,
+      itemId: payload.itemId,
+      approvalId: payload.approvalId ?? null,
+      anchorItemId: payload.anchorItemId,
+      userRequest: context.userRequest,
+      turnTranscript: context.turnTranscript
+    },
+    summary: payload.summary,
+    details: payload.details,
+    sourceEvent: source,
+    fileChangeStatus: "pending_approval"
+  });
+
+  if (!firstEnqueueResultFromAgentEvent(results)) {
+    app.log.warn(
       {
         threadId: approval.threadId,
         turnId: approval.turnId,
@@ -3614,899 +2992,838 @@ function enqueueFileChangeExplainabilityFromApproval(
         approvalId: approval.approvalId,
         source
       },
-      "skipping file-change explainability enqueue; no explainable file-change diff metadata was found"
+      "file-change review event emitted but no queue enqueue result was returned"
     );
-    return;
+  } else {
+    incrementFileChangeEventCount(payload.threadId, payload.turnId);
   }
-
-  void orchestratorQueue
-    .enqueue({
-      type: "file_change_explain",
-      projectId: explainPayload.projectId,
-      sourceSessionId: approval.threadId,
-      payload: explainPayload
-    })
-    .catch((error) => {
-      app.log.warn(
-        {
-          error,
-          threadId: approval.threadId,
-          turnId: approval.turnId,
-          itemId: approval.itemId,
-          approvalId: approval.approvalId,
-          source
-        },
-        "failed to enqueue file-change explainability job from approval request"
-      );
-    });
 }
 
-function fileChangeSupervisorInsightMessageId(payload: {
-  threadId: string;
-  turnId: string;
-  itemId: string;
-}): string {
-  return `file-change-supervisor-insight-${payload.threadId}-${payload.turnId}-${payload.itemId}`;
-}
-
-function fileChangeSupervisorInsightDetails(payload: {
-  anchorItemId: string;
-  approvalId?: string;
-  insight?: FileChangeSupervisorInsightJobResult["insight"];
-}): string {
-  return JSON.stringify(
-    {
-      anchorItemId: payload.anchorItemId,
-      ...(payload.approvalId ? { approvalId: payload.approvalId } : {}),
-      ...(payload.insight ? { insight: payload.insight } : {})
-    },
-    null,
-    2
-  );
-}
-
-function formatSupervisorInsightMarkdown(insight: FileChangeSupervisorInsightJobResult["insight"]): string {
-  return [
-    "### Supervisor Insight",
-    `- Change: ${insight.change}`,
-    `- Impact: ${insight.impact}`,
-    `- Risk: ${insight.risk.level} - ${insight.risk.reason}`,
-    `- Check: ${insight.check.instruction} (expect: ${insight.check.expected})`,
-    `- Confidence: ${insight.confidence}`
-  ].join("\n");
-}
-
-function upsertFileChangeSupervisorInsightEntry(
-  payload: FileChangeSupervisorInsightJobPayload,
-  input: {
-    status: TranscriptEntry["status"];
-    content: string;
-    insight?: FileChangeSupervisorInsightJobResult["insight"];
-    completedAt?: number;
-  }
-): void {
-  const now = Date.now();
-  upsertSupplementalTranscriptEntry(payload.threadId, {
-    messageId: fileChangeSupervisorInsightMessageId(payload),
-    turnId: payload.turnId,
-    role: "system",
-    type: "fileChange.supervisorInsight",
-    content: input.content,
-    details: fileChangeSupervisorInsightDetails({
-      anchorItemId: payload.anchorItemId,
-      approvalId: payload.approvalId,
-      insight: input.insight
-    }),
-    startedAt: now,
-    ...(typeof input.completedAt === "number" ? { completedAt: input.completedAt } : {}),
-    status: input.status
-  });
-}
-
-function safeModelJsonSlice(text: string): string {
-  const trimmed = text.trim();
-  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-    return trimmed;
-  }
-
-  const firstBrace = trimmed.indexOf("{");
-  const lastBrace = trimmed.lastIndexOf("}");
-  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-    return trimmed.slice(firstBrace, lastBrace + 1);
-  }
-  return trimmed;
-}
-
-function buildFileChangeSupervisorInsightPrompt(payload: FileChangeSupervisorInsightJobPayload): string {
-  return [
-    "You are a coding supervisor generating compact diff insight for transcript display.",
-    "Return JSON only with this exact schema:",
-    '{ "change": string, "impact": string, "risk": { "level": "none|low|med|high", "reason": string }, "check": { "instruction": string, "expected": string }, "confidence": "low|med|high" }',
-    "Rules:",
-    "- concise, concrete, no markdown",
-    "- one file-change event only",
-    "- check.instruction must be executable as a shell command",
-    "- do not include destructive commands",
-    "",
-    `Event status: ${payload.fileChangeStatus}`,
-    `Event summary: ${payload.summary}`,
-    "",
-    "Diff details JSON:",
-    payload.details
-  ].join("\n");
-}
-
-function firstNonEmptyPathFromDiffDetails(payload: { details: string }): string | null {
-  try {
-    const parsed = JSON.parse(payload.details) as unknown;
-    if (!isObjectRecord(parsed) || !Array.isArray(parsed.changes)) {
-      return null;
-    }
-    for (const change of parsed.changes) {
-      if (isObjectRecord(change) && typeof change.path === "string" && change.path.trim().length > 0) {
-        return change.path.trim();
-      }
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
-}
-
-function fallbackSupervisorInsight(payload: FileChangeSupervisorInsightJobPayload): FileChangeSupervisorInsightJobResult["insight"] {
-  const firstPath = firstNonEmptyPathFromDiffDetails(payload);
-  const pathLabel = firstPath ?? "the edited file";
-  const defaultCheckInstruction = firstPath ? `sed -n '1,220p' ${JSON.stringify(firstPath)}` : "git status --short";
+function collectTurnTranscriptSnapshot(threadId: string, turnId: string): { userRequest: string; transcript: string } {
+  const turnEntries = listSupplementalTranscriptEntries(threadId)
+    .map((entry) => entry.entry)
+    .filter((entry) => entry.turnId === turnId);
+  const userRequestEntry = turnEntries.find((entry) => entry.role === "user" && entry.content.trim().length > 0);
+  const transcript = turnEntries.map((entry) => `${entry.role}:${entry.type}:${entry.content}`).join("\n").slice(-40_000);
   return {
-    change: payload.summary,
-    impact: payload.fileChangeStatus === "pending_approval" ? "Change is pending approval." : "Change is applied to the workspace.",
-    risk: {
-      level: "low",
-      reason: `Review ${pathLabel} to confirm expected behavior.`
-    },
-    check: {
-      instruction: defaultCheckInstruction,
-      expected: firstPath ? pathLabel : "M "
-    },
-    confidence: "low"
+    userRequest: userRequestEntry?.content ?? "User request unavailable for this turn.",
+    transcript: transcript.length > 0 ? transcript : "No transcript snapshot available."
   };
 }
 
-function parseSupervisorInsightFromText(rawText: string): FileChangeSupervisorInsightJobResult["insight"] | null {
-  const slice = safeModelJsonSlice(rawText);
-  if (!slice) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(slice);
-    const schema = fileChangeSupervisorInsightJobResultSchema.shape.insight;
-    return schema.parse(parsed);
-  } catch {
-    return null;
-  }
-}
-
-function sanitizeSupervisorInsight(
-  payload: FileChangeSupervisorInsightJobPayload,
-  insight: FileChangeSupervisorInsightJobResult["insight"]
-): FileChangeSupervisorInsightJobResult["insight"] {
-  const fallback = fallbackSupervisorInsight(payload);
-  const instruction = insight.check.instruction.trim();
-  const expected = insight.check.expected.trim();
-  const normalizedInstruction = instruction.length > 0 ? instruction : fallback.check.instruction;
-  const normalizedExpected = expected.length > 0 ? expected : fallback.check.expected;
-  return {
-    change: insight.change.trim().length > 0 ? insight.change.trim() : fallback.change,
-    impact: insight.impact.trim().length > 0 ? insight.impact.trim() : fallback.impact,
-    risk: {
-      level: insight.risk.level,
-      reason: insight.risk.reason.trim().length > 0 ? insight.risk.reason.trim() : fallback.risk.reason
-    },
-    check: {
-      instruction: normalizedInstruction,
-      expected: normalizedExpected
-    },
-    confidence: insight.confidence
-  };
-}
-
-async function generateFileChangeSupervisorInsightForJob(
-  payload: FileChangeSupervisorInsightJobPayload,
-  options?: {
-    signal?: AbortSignal;
-    onTurnStarted?: (threadId: string, turnId: string) => void;
-  }
-): Promise<FileChangeSupervisorInsightJobResult> {
-  const fallback = fallbackSupervisorInsight(payload);
-  try {
-    throwIfAborted(options?.signal);
-    await ensureProjectOrchestrationSessions();
-    const orchestrationSessionId = sessionMetadata.projectOrchestratorSessionById[payload.projectId];
-    if (!orchestrationSessionId) {
-      throw new Error(`missing project orchestrator session for ${payload.projectId}`);
-    }
-
-    const turn = await supervisor.call<{ turn: { id: string } }>("turn/start", {
-      threadId: orchestrationSessionId,
-      sandboxPolicy: toTurnSandboxPolicy("read-only"),
-      approvalPolicy: "never",
-      input: [
-        {
-          type: "text",
-          text: buildFileChangeSupervisorInsightPrompt(payload),
-          text_elements: []
-        }
-      ]
-    });
-    options?.onTurnStarted?.(orchestrationSessionId, turn.turn.id);
-    throwIfAborted(options?.signal);
-
-    const raw = await waitForSuggestedReply(orchestrationSessionId, turn.turn.id, options?.signal);
-    const parsed = parseSupervisorInsightFromText(raw);
-    const insight = parsed ? sanitizeSupervisorInsight(payload, parsed) : fallback;
-    return {
-      messageId: fileChangeSupervisorInsightMessageId(payload),
-      anchorItemId: payload.anchorItemId,
-      ...(payload.approvalId ? { approvalId: payload.approvalId } : {}),
-      insight
-    };
-  } catch (error) {
-    if (isAbortError(error) || options?.signal?.aborted) {
-      throw error;
-    }
-
-    app.log.warn(
-      { error, projectId: payload.projectId, sourceSessionId: payload.sourceSessionId, itemId: payload.itemId },
-      "file-change supervisor insight generation failed; using fallback insight"
-    );
-    return {
-      messageId: fileChangeSupervisorInsightMessageId(payload),
-      anchorItemId: payload.anchorItemId,
-      ...(payload.approvalId ? { approvalId: payload.approvalId } : {}),
-      insight: fallback
-    };
-  }
-}
-
-function buildFileChangeSupervisorInsightJobPayload(input: {
-  threadId: string;
-  turnId: string;
-  itemId: string;
-  item: CodexThreadItem;
-  sourceEvent: "item_completed";
-}): FileChangeSupervisorInsightJobPayload | null {
-  const explainPayload = buildFileChangeExplainJobPayload({
-    threadId: input.threadId,
-    turnId: input.turnId,
-    itemId: input.itemId,
-    item: input.item
-  });
-  if (!explainPayload) {
-    return null;
-  }
-
-  return {
-    ...explainPayload,
-    sourceEvent: input.sourceEvent,
-    fileChangeStatus: "completed"
-  };
-}
-
-function buildFileChangeSupervisorInsightJobPayloadFromApproval(
-  approval: PendingApprovalRecord,
-  sourceEvent: "approval_request" | "approvals_reconcile"
-): FileChangeSupervisorInsightJobPayload | null {
-  const explainPayload = buildFileChangeExplainJobPayloadFromApproval(approval);
-  if (!explainPayload) {
-    return null;
-  }
-
-  return {
-    ...explainPayload,
-    sourceEvent,
-    fileChangeStatus: "pending_approval"
-  };
-}
-
-function enqueueFileChangeSupervisorInsightFromApproval(
-  approval: PendingApprovalRecord,
-  source: "approval_request" | "approvals_reconcile"
-): void {
-  if (approval.method !== "item/fileChange/requestApproval" || !orchestratorQueue || !env.ORCHESTRATOR_SUPERVISOR_INSIGHT_ENABLED) {
-    return;
-  }
-
-  const payload = buildFileChangeSupervisorInsightJobPayloadFromApproval(approval, source);
-  if (!payload) {
-    return;
-  }
-
-  void orchestratorQueue
-    .enqueue({
-      type: "file_change_supervisor_insight",
-      projectId: payload.projectId,
-      sourceSessionId: approval.threadId,
-      payload
-    })
-    .catch((error) => {
-      app.log.warn(
-        {
-          error,
-          threadId: approval.threadId,
-          turnId: approval.turnId,
-          itemId: approval.itemId,
-          approvalId: approval.approvalId,
-          source
-        },
-        "failed to enqueue file-change supervisor insight job from approval request"
-      );
-    });
-}
-
-function riskRecheckBatchMessageId(payload: { threadId: string; turnId: string }): string {
-  return `risk-recheck-batch-${payload.threadId}-${payload.turnId}`;
-}
-
-function turnSupervisorReviewMessageId(payload: { threadId: string; turnId: string }): string {
-  return `turn-supervisor-review-${payload.threadId}-${payload.turnId}`;
-}
-
-function truncateText(value: string, maxChars: number): string {
-  if (value.length <= maxChars) {
-    return value;
-  }
-  return `${value.slice(0, maxChars)}...`;
-}
-
-function riskBatchSummaryFromChecks(
-  checks: Array<{ status: SupervisorCheckStatus }>
-): RiskRecheckBatchJobResult["summary"] {
-  const summary: RiskRecheckBatchJobResult["summary"] = {
-    total: checks.length,
-    passed: 0,
-    failed: 0,
-    error: 0,
-    timeout: 0,
-    skipped: 0
-  };
-
-  for (const check of checks) {
-    if (check.status === "passed") {
-      summary.passed += 1;
-    } else if (check.status === "failed") {
-      summary.failed += 1;
-    } else if (check.status === "error") {
-      summary.error += 1;
-    } else if (check.status === "timeout") {
-      summary.timeout += 1;
-    } else if (check.status === "skipped") {
-      summary.skipped += 1;
-    }
-  }
-
-  return summary;
-}
-
-function formatRiskRecheckBatchMarkdown(input: {
-  summary: RiskRecheckBatchJobResult["summary"];
-  checks: RiskRecheckBatchJobResult["checks"];
-}): string {
-  const header = `### Risk Recheck Results\n${input.summary.total} checks | ${input.summary.passed} passed | ${input.summary.failed} failed | ${input.summary.error} error | ${input.summary.timeout} timeout | ${input.summary.skipped} skipped`;
-  if (input.checks.length === 0) {
-    return `${header}\n- No risk checks were queued for this turn.`;
-  }
-
-  const lines = input.checks.map(
-    (check) =>
-      `- [${check.status}] ${check.itemId} (${check.riskLevel}) :: ${truncateText(check.instruction, 120)} :: ${truncateText(check.evidence, 120)}`
-  );
-  return [header, ...lines].join("\n");
-}
-
-function upsertRiskRecheckBatchEntry(
-  payload: RiskRecheckBatchJobPayload,
-  input: {
-    status: TranscriptEntry["status"];
-    content: string;
-    summary?: RiskRecheckBatchJobResult["summary"];
-    checks?: RiskRecheckBatchJobResult["checks"];
-    completedAt?: number;
-  }
-): void {
-  const now = Date.now();
-  upsertSupplementalTranscriptEntry(payload.threadId, {
-    messageId: riskRecheckBatchMessageId(payload),
-    turnId: payload.turnId,
-    role: "system",
-    type: "riskRecheck.batch",
-    content: input.content,
-    details: stringifyDetails({
-      summary: input.summary ?? null,
-      checks: input.checks ?? null
-    }),
-    startedAt: now,
-    ...(typeof input.completedAt === "number" ? { completedAt: input.completedAt } : {}),
-    status: input.status
-  });
-}
-
-function formatTurnSupervisorReviewMarkdown(review: TurnSupervisorReviewJobResult["review"]): string {
-  const riskLines =
-    review.topRisks.length > 0
-      ? review.topRisks.map((risk) => `- ${risk.itemId} (${risk.level}, ${risk.state}): ${risk.why}`)
-      : ["- No unresolved risks identified."];
-
-  return [
-    "### Turn Supervisor Review",
-    `**Overall Change**: ${review.overallChange}`,
-    "",
-    "**Top Risks**",
-    ...riskLines,
-    "",
-    `**Next Best Action**: ${review.nextBestAction}`,
-    `**Suggest Reply Guidance**: ${review.suggestReplyGuidance}`
-  ].join("\n");
-}
-
-function upsertTurnSupervisorReviewEntry(
-  payload: TurnSupervisorReviewJobPayload,
-  input: {
-    status: TranscriptEntry["status"];
-    content: string;
-    review?: TurnSupervisorReviewJobResult["review"];
-    completedAt?: number;
-  }
-): void {
-  const now = Date.now();
-  upsertSupplementalTranscriptEntry(payload.threadId, {
-    messageId: turnSupervisorReviewMessageId(payload),
-    turnId: payload.turnId,
-    role: "system",
-    type: "turn.supervisorReview",
-    content: input.content,
-    details: stringifyDetails({
-      review: input.review ?? null
-    }),
-    startedAt: now,
-    ...(typeof input.completedAt === "number" ? { completedAt: input.completedAt } : {}),
-    status: input.status
-  });
-}
-
-function isRiskCheckInstructionSafe(instruction: string): { safe: boolean; reason?: string } {
-  const normalized = instruction.trim().toLowerCase();
-  if (normalized.length === 0) {
-    return { safe: false, reason: "empty instruction" };
-  }
-  const blockedTokens = [
-    " rm ",
-    " rm-",
-    "rm -",
-    "sudo ",
-    "chmod ",
-    "chown ",
-    " mv ",
-    "mv ",
-    "git reset",
-    "git checkout",
-    "git rebase",
-    "git cherry-pick",
-    ">>",
-    " >",
-    "| sh",
-    "| bash",
-    "curl ",
-    "wget ",
-    "apt ",
-    "apk ",
-    "dnf ",
-    "yum "
-  ];
-  for (const token of blockedTokens) {
-    if (normalized.includes(token)) {
-      return { safe: false, reason: `blocked token: ${token.trim()}` };
-    }
-  }
-
-  return { safe: true };
-}
-
-function extractExitCodeFromCommandResponse(response: unknown): number | null {
-  if (!isObjectRecord(response)) {
-    return null;
-  }
-
-  const direct = response.exitCode ?? response.exit_code;
-  if (typeof direct === "number" && Number.isFinite(direct)) {
-    return direct;
-  }
-
-  if (isObjectRecord(response.result)) {
-    const nested = response.result.exitCode ?? response.result.exit_code;
-    if (typeof nested === "number" && Number.isFinite(nested)) {
-      return nested;
-    }
-  }
-
-  return null;
-}
-
-function extractCommandEvidence(response: unknown): string {
-  if (!isObjectRecord(response)) {
-    return String(response);
-  }
-
-  const candidates: Array<unknown> = [
-    response.aggregatedOutput,
-    response.output,
-    response.stdout,
-    response.stderr,
-    isObjectRecord(response.result) ? response.result.aggregatedOutput : null,
-    isObjectRecord(response.result) ? response.result.output : null,
-    isObjectRecord(response.result) ? response.result.stdout : null,
-    isObjectRecord(response.result) ? response.result.stderr : null
-  ];
-
-  for (const candidate of candidates) {
-    if (typeof candidate === "string" && candidate.trim().length > 0) {
-      return truncateText(candidate.trim(), 800);
-    }
-  }
-
-  return truncateText(safePrettyJson(response) ?? "command executed", 800);
-}
-
-async function runRiskRecheckBatchForJob(payload: RiskRecheckBatchJobPayload): Promise<RiskRecheckBatchJobResult> {
-  const maxConcurrency = Math.max(1, payload.execution?.maxConcurrency ?? env.ORCHESTRATOR_RISK_RECHECK_MAX_CONCURRENCY);
-  const perCheckTimeoutMs = Math.max(
-    1_000,
-    payload.execution?.perCheckTimeoutMs ?? env.ORCHESTRATOR_RISK_RECHECK_PER_CHECK_TIMEOUT_MS
-  );
-
-  const queued = [...payload.checks];
-  const results: Array<RiskRecheckBatchJobResult["checks"][number]> = [];
-
-  const runOne = async (check: RiskRecheckBatchJobPayload["checks"][number]): Promise<void> => {
-    const startedAt = Date.now();
-    const safety = isRiskCheckInstructionSafe(check.instruction);
-    if (!safety.safe) {
-      results.push({
-        itemId: check.itemId,
-        riskLevel: check.riskLevel,
-        instruction: check.instruction,
-        expected: check.expected,
-        status: "skipped",
-        evidence: safety.reason ?? "skipped by policy",
-        durationMs: Date.now() - startedAt
-      });
-      return;
-    }
-
-    try {
-      const cwd = sessionMetadata.projects[payload.projectId]?.workingDirectory ?? env.WORKSPACE_ROOT;
-      const response = await supervisor.call("command/exec", {
-        command: ["/bin/bash", "-lc", check.instruction],
-        cwd,
-        timeoutMs: perCheckTimeoutMs,
-        sandboxPolicy: null
-      });
-      const exitCode = extractExitCodeFromCommandResponse(response);
-      const evidence = extractCommandEvidence(response);
-      const expectedLower = check.expected.trim().toLowerCase();
-      const evidenceLower = evidence.toLowerCase();
-      const expectedMatched = expectedLower.length === 0 ? true : evidenceLower.includes(expectedLower);
-      const status: SupervisorCheckStatus = !expectedMatched || (exitCode !== null && exitCode !== 0) ? "failed" : "passed";
-
-      results.push({
-        itemId: check.itemId,
-        riskLevel: check.riskLevel,
-        instruction: check.instruction,
-        expected: check.expected,
-        status,
-        evidence,
-        durationMs: Date.now() - startedAt
-      });
-    } catch (error) {
-      const message = serializeError(error);
-      const status: SupervisorCheckStatus =
-        message.toLowerCase().includes("timed out") || message.toLowerCase().includes("timeout") ? "timeout" : "error";
-      results.push({
-        itemId: check.itemId,
-        riskLevel: check.riskLevel,
-        instruction: check.instruction,
-        expected: check.expected,
-        status,
-        evidence: truncateText(message, 800),
-        durationMs: Date.now() - startedAt
-      });
-    }
-  };
-
-  const workers = Array.from({ length: Math.min(maxConcurrency, queued.length) }).map(async () => {
-    while (queued.length > 0) {
-      const next = queued.shift();
-      if (!next) {
-        return;
-      }
-      await runOne(next);
-    }
-  });
-  await Promise.all(workers);
-
-  const summary = riskBatchSummaryFromChecks(results);
-  return {
-    messageId: riskRecheckBatchMessageId(payload),
-    turnId: payload.turnId,
-    summary,
-    checks: results
-  };
-}
-
-function deterministicTurnSupervisorReview(payload: TurnSupervisorReviewJobPayload): TurnSupervisorReviewJobResult["review"] {
-  const topRisks = payload.insights
-    .filter((insight) => insight.riskLevel !== "none")
-    .map((insight) => {
-      const check = payload.riskBatch?.checks.find((entry) => entry.itemId === insight.itemId);
-      const state: "open" | "validated" | "mitigated" =
-        check && check.status === "passed" ? "validated" : check && check.status === "skipped" ? "open" : "open";
-      return {
-        itemId: insight.itemId,
-        level: insight.riskLevel as "low" | "med" | "high",
-        why: insight.riskReason,
-        state
-      };
-    })
-    .slice(0, 6);
-
-  const overallChange = `${payload.insights.length} file-change insight${payload.insights.length === 1 ? "" : "s"} captured for this turn.`;
-  const unresolved = topRisks.filter((risk) => risk.state === "open");
-  const nextBestAction =
-    unresolved.length > 0
-      ? `Address unresolved risk checks for ${unresolved[0].itemId}, then continue with next scoped task.`
-      : "Proceed with the next scoped implementation step and keep validations green.";
-  const suggestReplyGuidance =
-    unresolved.length > 0
-      ? "Ask to resolve the highest unresolved risk first, then propose a concrete next implementation step."
-      : "Acknowledge completed checks and propose the next concrete project step.";
-
-  return {
-    overallChange,
-    topRisks,
-    nextBestAction,
-    suggestReplyGuidance
-  };
-}
-
-async function generateTurnSupervisorReviewForJob(payload: TurnSupervisorReviewJobPayload): Promise<TurnSupervisorReviewJobResult> {
-  const review = deterministicTurnSupervisorReview(payload);
-  return {
-    messageId: turnSupervisorReviewMessageId(payload),
-    turnId: payload.turnId,
-    review
-  };
-}
-
-function buildTurnSupervisorReviewPayload(input: {
-  threadId: string;
-  turnId: string;
-  projectId: string;
-  sourceSessionId: string;
-  riskBatch: RiskRecheckBatchJobResult | null;
-}): TurnSupervisorReviewJobPayload {
-  const insights = listSupervisorInsightsForTurn(input.projectId, input.turnId).map(({ itemId, insight }) => ({
-    itemId,
-    change: insight.change,
-    impact: insight.impact,
-    riskLevel: insight.riskLevel,
-    riskReason: insight.riskReason
-  }));
-  const riskBatch =
-    input.riskBatch === null
-      ? null
-      : {
-          summary: input.riskBatch.summary,
-          checks: input.riskBatch.checks.map((check) => ({
-            itemId: check.itemId,
-            status: check.status,
-            evidence: check.evidence
-          }))
-        };
-  const transcriptSnapshot = listSupplementalTranscriptEntries(input.threadId)
-    .filter((entry) => entry.entry.turnId === input.turnId)
-    .map((entry) => `${entry.entry.type}:${entry.entry.content}`)
-    .join("\n")
-    .slice(-40_000);
-
-  return {
-    threadId: input.threadId,
-    turnId: input.turnId,
-    projectId: input.projectId,
-    sourceSessionId: input.sourceSessionId,
-    insights,
-    riskBatch,
-    turnTranscriptSnapshot: transcriptSnapshot.length > 0 ? transcriptSnapshot : "No transcript snapshot available."
-  };
-}
-
-function enqueueTurnSupervisorReview(input: {
-  threadId: string;
-  turnId: string;
-  projectId: string;
-  sourceSessionId: string;
-  riskBatch: RiskRecheckBatchJobResult | null;
-  source: "turn_completed_no_risks" | "risk_recheck_terminal";
-}): void {
-  if (!orchestratorQueue || !env.ORCHESTRATOR_TURN_SUPERVISOR_REVIEW_ENABLED) {
-    return;
-  }
-
-  const payload = buildTurnSupervisorReviewPayload({
-    threadId: input.threadId,
-    turnId: input.turnId,
-    projectId: input.projectId,
-    sourceSessionId: input.sourceSessionId,
-    riskBatch: input.riskBatch
-  });
-
-  void orchestratorQueue
-    .enqueue({
-      type: "turn_supervisor_review",
-      projectId: input.projectId,
-      sourceSessionId: input.sourceSessionId,
-      payload
-    })
-    .then((queued) => {
-      setSupervisorReviewJobId(input.projectId, input.turnId, queued.job.id);
-    })
-    .catch((error) => {
-      app.log.warn(
-        { error, threadId: input.threadId, turnId: input.turnId, projectId: input.projectId, source: input.source },
-        "failed to enqueue turn supervisor review job"
-      );
-    });
-}
-
-function enqueueTurnSupervisorPostProcessing(threadId: string, turnId: string): void {
-  if (!orchestratorQueue) {
-    return;
-  }
+function maybeEmitTurnCompletedAgentEvent(threadId: string, turnId: string): void {
   const projectId = resolveSessionProjectId(threadId);
   if (!projectId) {
     return;
   }
-
-  const candidates = buildRiskRecheckCandidates(projectId, turnId);
-  if (candidates.length === 0 || !env.ORCHESTRATOR_RISK_RECHECK_ENABLED) {
-    enqueueTurnSupervisorReview({
-      threadId,
-      turnId,
-      projectId,
-      sourceSessionId: threadId,
-      riskBatch: null,
-      source: "turn_completed_no_risks"
-    });
+  const fileChangeCount = getFileChangeEventCount(threadId, turnId);
+  if (fileChangeCount <= 0) {
     return;
   }
 
-  const payload: RiskRecheckBatchJobPayload = {
-    threadId,
-    turnId,
-    projectId,
-    sourceSessionId: threadId,
-    checks: candidates,
-    execution: {
-      maxConcurrency: env.ORCHESTRATOR_RISK_RECHECK_MAX_CONCURRENCY,
-      perCheckTimeoutMs: env.ORCHESTRATOR_RISK_RECHECK_PER_CHECK_TIMEOUT_MS
-    }
-  };
-
-  void orchestratorQueue
-    .enqueue({
-      type: "risk_recheck_batch",
+  const snapshot = collectTurnTranscriptSnapshot(threadId, turnId);
+  void emitAgentEvent("turn.completed", {
+    context: {
       projectId,
       sourceSessionId: threadId,
-      payload
-    })
-    .then((queued) => {
-      setSupervisorRiskBatchJobId(projectId, turnId, queued.job.id);
+      threadId,
+      turnId,
+      userRequest: snapshot.userRequest
+    },
+    hadFileChangeRequests: true,
+    turnTranscriptSnapshot: snapshot.transcript,
+    fileChangeRequestCount: fileChangeCount
+  })
+    .then(() => {
+      clearFileChangeEventCount(threadId, turnId);
     })
     .catch((error) => {
-      app.log.warn({ error, threadId, turnId, projectId }, "failed to enqueue risk recheck batch job");
-      enqueueTurnSupervisorReview({
-        threadId,
-        turnId,
-        projectId,
-        sourceSessionId: threadId,
-        riskBatch: null,
-        source: "turn_completed_no_risks"
-      });
+      app.log.warn({ error, threadId, turnId, projectId }, "failed to emit turn.completed agent event");
     });
 }
 
-async function ensureSuggestionThread(sessionId: string, sourceThread: CodexThread, model?: string): Promise<string> {
-  const previousThreadId = suggestionThreadBySession.get(sessionId);
-  if (previousThreadId) {
-    await cleanupSuggestionThread(sessionId, previousThreadId);
+function buildFallbackSuggestedReply(contextEntries: Array<TranscriptEntry>, draft?: string): string {
+  const cleanedDraft = typeof draft === "string" ? draft.trim() : "";
+  if (cleanedDraft.length > 0) {
+    return cleanedDraft;
   }
+  const lastUser = [...contextEntries].reverse().find((entry) => entry.role === "user" && entry.content.trim().length > 0);
+  if (lastUser) {
+    const request = lastUser.content.replace(/\s+/g, " ").trim().slice(0, 220);
+    return `Please continue from your last response and focus on this request: ${request}`;
+  }
+  const lastAssistant = [...contextEntries]
+    .reverse()
+    .find((entry) => entry.role === "assistant" && entry.content.trim().length > 0);
+  if (lastAssistant) {
+    const summarized = lastAssistant.content.replace(/\s+/g, " ").trim().slice(0, 260);
+    return `Please continue from your last response and focus on the concrete next step. (${summarized})`;
+  }
+  return "Please continue with the next concrete step and include exact commands or code changes.";
+}
 
-  const created = await supervisor.call<{ thread: CodexThread }>("thread/start", {
-    cwd: sourceThread.cwd,
-    model: model || undefined,
-    sandbox: "read-only",
-    approvalPolicy: "never",
-    experimentalRawEvents: false
+function suggestionContextEntriesFromTranscript(transcript: Array<TranscriptEntry>): Array<TranscriptEntry> {
+  return transcript
+    .filter((entry) => (entry.role === "user" || entry.role === "assistant") && entry.content.trim().length > 0)
+    .slice(-20);
+}
+
+async function loadSuggestionContext(sessionId: string): Promise<Array<TranscriptEntry>> {
+  try {
+    const source = await codexRuntime.call<{ thread: CodexThread }>("thread/read", {
+      threadId: sessionId,
+      includeTurns: true
+    });
+    const transcript = mergeTranscriptWithSupplemental(
+      sessionId,
+      turnsToTranscript(sessionId, Array.isArray(source.thread.turns) ? source.thread.turns : [])
+    );
+    return suggestionContextEntriesFromTranscript(transcript);
+  } catch (error) {
+    if (!isIncludeTurnsUnavailableError(error)) {
+      throw error;
+    }
+    const transcript = mergeTranscriptWithSupplemental(sessionId, []);
+    return suggestionContextEntriesFromTranscript(transcript);
+  }
+}
+
+function suggestionQueueProjectId(sessionId: string): string {
+  const projectId = resolveSessionProjectId(sessionId);
+  return projectId ?? sessionScopedAgentOwnerId(sessionId);
+}
+
+function suggestionTurnIdForSession(sessionId: string): string {
+  return activeTurnByThread.get(sessionId) ?? "suggest-request";
+}
+
+function formatSuggestionContext(entries: Array<TranscriptEntry>): { userRequest: string; transcript: string } {
+  const userRequest =
+    [...entries].reverse().find((entry) => entry.role === "user" && entry.content.trim().length > 0)?.content ??
+    "User request unavailable.";
+  const transcript =
+    entries.map((entry, index) => `${index + 1}. ${entry.role}: ${entry.content}`).join("\n").trim() ||
+    "No transcript context available.";
+  return { userRequest, transcript };
+}
+
+async function enqueueSuggestedReplyViaAgentEvent(input: {
+  sessionId: string;
+  projectId: string;
+  requestKey: string;
+  model?: string;
+  effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  draft?: string;
+}): Promise<EnqueueJobResult> {
+  const contextEntries = await loadSuggestionContext(input.sessionId).catch(() => []);
+  const context = formatSuggestionContext(contextEntries);
+  const results = await emitAgentEvent("suggest_request.requested", {
+    requestKey: input.requestKey,
+    sessionId: input.sessionId,
+    projectId: input.projectId,
+    threadId: input.sessionId,
+    turnId: suggestionTurnIdForSession(input.sessionId),
+    userRequest: context.userRequest,
+    turnTranscript: context.transcript,
+    ...(input.model ? { model: input.model } : {}),
+    ...(input.effort ? { effort: input.effort } : {}),
+    ...(input.draft ? { draft: input.draft } : {})
   });
-  const helperThreadId = created.thread.id;
-  suggestionThreadBySession.set(sessionId, helperThreadId);
-  suggestionThreadIds.add(helperThreadId);
-  if (setSuggestionHelperSession(helperThreadId, true)) {
-    await persistSessionMetadata();
-  }
 
-  try {
-    await supervisor.call("thread/archive", {
-      threadId: helperThreadId
-    });
-  } catch (error) {
-    app.log.warn({ error, sessionId, helperThreadId }, "failed to archive suggestion helper thread");
+  const enqueue = firstEnqueueResultFromAgentEvent(results);
+  if (!enqueue) {
+    throw new OrchestratorQueueError(
+      "job_conflict",
+      "no agent handler enqueued a suggest_request job for suggest_request.requested",
+      409
+    );
   }
-
-  return helperThreadId;
+  return enqueue;
 }
 
-async function cleanupSuggestionThread(sessionId: string, helperThreadId: string): Promise<void> {
-  if (suggestionThreadBySession.get(sessionId) === helperThreadId) {
-    suggestionThreadBySession.delete(sessionId);
+async function generateSuggestedReplyForJob(
+  payload: SuggestRequestJobPayload,
+  options?: {
+    signal?: AbortSignal;
+    onTurnStarted?: (threadId: string, turnId: string) => void;
   }
-  suggestionThreadIds.delete(helperThreadId);
+): Promise<SuggestRequestJobResult> {
+  const runResult = await runAgentInstructionJob(
+    {
+      agent: payload.agent,
+      jobKind: "suggest_request",
+      projectId: payload.projectId,
+      sourceSessionId: payload.sessionId,
+      threadId: payload.sourceThreadId,
+      turnId: payload.sourceTurnId,
+      instructionText: payload.instructionText,
+      expectResponse: "assistant_text"
+    },
+    options
+  );
 
-  try {
-    await hardDeleteSession(helperThreadId);
-  } catch (error) {
-    app.log.warn({ error, sessionId, helperThreadId }, "failed to cleanup suggestion helper thread");
+  const suggestion = (runResult.outputText ?? "").trim();
+  if (suggestion.length > 0) {
+    return {
+      suggestion,
+      requestKey: payload.requestKey
+    };
+  }
+
+  return {
+    suggestion: buildFallbackSuggestedReply([], payload.draft),
+    requestKey: payload.requestKey
+  };
+}
+
+type AgentOutputUpdate = {
+  text: string;
+  status: "streaming" | "complete";
+};
+
+function normalizeAgentOutputText(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= 12_000) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, 12_000)}\n\n[truncated]`;
+}
+
+function agentTurnFailedError(outputText: string | null | undefined): Error {
+  const normalized = typeof outputText === "string" ? normalizeAgentOutputText(outputText).trim() : "";
+  if (normalized.length === 0) {
+    return new Error("agent turn failed");
+  }
+  const capped = normalized.length > 400 ? `${normalized.slice(0, 400)}...` : normalized;
+  return new Error(`agent turn failed: ${capped}`);
+}
+
+function runtimeObservedTurnKey(threadId: string, turnId: string): string {
+  return `${threadId}::${turnId}`;
+}
+
+function emitRuntimeTurnSignal(threadId: string, turnId: string): void {
+  const key = runtimeObservedTurnKey(threadId, turnId);
+  const waiters = runtimeTurnSignalWaitersByKey.get(key);
+  if (!waiters || waiters.size === 0) {
+    return;
+  }
+  runtimeTurnSignalWaitersByKey.delete(key);
+  for (const waiter of waiters) {
+    waiter();
   }
 }
 
-async function waitForSuggestedReply(threadId: string, turnId: string, signal?: AbortSignal): Promise<string> {
+function observeRuntimeTurnState(
+  threadId: string,
+  turnId: string,
+  mutator: (state: RuntimeObservedTurnState) => void
+): RuntimeObservedTurnState {
+  const key = runtimeObservedTurnKey(threadId, turnId);
+  const existing = runtimeObservedTurnsByKey.get(key);
+  const baseline: RuntimeObservedTurnState =
+    existing ?? {
+      threadId,
+      turnId,
+      status: "running",
+      assistantText: "",
+      updatedAt: Date.now()
+    };
+  mutator(baseline);
+  baseline.updatedAt = Date.now();
+  runtimeObservedTurnsByKey.set(key, baseline);
+  if (runtimeObservedTurnsByKey.size > 2_000) {
+    let oldestKey: string | null = null;
+    let oldestAt = Number.POSITIVE_INFINITY;
+    for (const [candidateKey, state] of runtimeObservedTurnsByKey.entries()) {
+      if (state.updatedAt < oldestAt) {
+        oldestAt = state.updatedAt;
+        oldestKey = candidateKey;
+      }
+    }
+    if (oldestKey) {
+      runtimeObservedTurnsByKey.delete(oldestKey);
+      runtimeTurnSignalWaitersByKey.delete(oldestKey);
+    }
+  }
+  emitRuntimeTurnSignal(threadId, turnId);
+  return baseline;
+}
+
+function markRuntimeTurnStarted(threadId: string, turnId: string): void {
+  observeRuntimeTurnState(threadId, turnId, (state) => {
+    state.status = "running";
+    state.assistantText = "";
+  });
+}
+
+function markRuntimeTurnSettled(threadId: string, turnId: string, status: RuntimeObservedTurnStatus): void {
+  observeRuntimeTurnState(threadId, turnId, (state) => {
+    state.status = status;
+  });
+}
+
+function setRuntimeTurnAssistantText(threadId: string, turnId: string, text: string): void {
+  observeRuntimeTurnState(threadId, turnId, (state) => {
+    state.assistantText = text;
+  });
+}
+
+function appendRuntimeTurnAssistantDelta(threadId: string, turnId: string, delta: string): void {
+  observeRuntimeTurnState(threadId, turnId, (state) => {
+    state.assistantText = `${state.assistantText}${delta}`;
+  });
+}
+
+function runtimeStatusFromTurnStatus(status: string): RuntimeObservedTurnStatus {
+  if (isTurnStillRunning(status)) {
+    return "running";
+  }
+  const normalized = status.trim().toLowerCase();
+  if (normalized === "failed" || normalized === "error") {
+    return "failed";
+  }
+  return "completed";
+}
+
+function runtimeTurnStateFromStore(threadId: string, turnId: string): RuntimeObservedTurnState | null {
+  return runtimeObservedTurnsByKey.get(runtimeObservedTurnKey(threadId, turnId)) ?? null;
+}
+
+async function waitForRuntimeTurnSignal(threadId: string, turnId: string, waitMs: number, signal?: AbortSignal): Promise<void> {
   throwIfAborted(signal);
-  const startedAt = Date.now();
-  const timeoutMs = 30_000;
-  let sawCompletedTurnWithoutOutput = false;
+  const boundedWaitMs = Math.max(0, waitMs);
+  if (boundedWaitMs === 0) {
+    return;
+  }
 
-  while (Date.now() - startedAt < timeoutMs) {
-    throwIfAborted(signal);
-    const response = await supervisor.call<{ thread: CodexThread }>("thread/read", {
+  const key = runtimeObservedTurnKey(threadId, turnId);
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    const cleanup = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (signal) {
+        signal.removeEventListener("abort", onAbort);
+      }
+      const waiters = runtimeTurnSignalWaitersByKey.get(key);
+      if (waiters) {
+        waiters.delete(onSignal);
+        if (waiters.size === 0) {
+          runtimeTurnSignalWaitersByKey.delete(key);
+        }
+      }
+    };
+
+    const onSignal = (): void => {
+      cleanup();
+      resolve();
+    };
+
+    const onAbort = (): void => {
+      cleanup();
+      reject(new Error("orchestrator job aborted"));
+    };
+
+    const waiters = runtimeTurnSignalWaitersByKey.get(key) ?? new Set<() => void>();
+    waiters.add(onSignal);
+    runtimeTurnSignalWaitersByKey.set(key, waiters);
+
+    timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, boundedWaitMs);
+
+    if (signal) {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
+}
+
+function observeRuntimeTurnNotification(notification: JsonRpcNotification, extractedThreadId?: string): void {
+  const params = notification.params;
+  const fallbackThreadId = extractedThreadId;
+
+  if (notification.method === "turn/started") {
+    const threadId = fallbackThreadId;
+    const turnId = extractTurnId(params);
+    if (threadId && turnId) {
+      markRuntimeTurnStarted(threadId, turnId);
+    }
+    return;
+  }
+
+  if (notification.method === "turn/completed" || notification.method === "turn/failed") {
+    const threadId = fallbackThreadId;
+    const turnId = extractTurnId(params);
+    if (threadId && turnId) {
+      markRuntimeTurnSettled(threadId, turnId, notification.method === "turn/failed" ? "failed" : "completed");
+    }
+    return;
+  }
+
+  if (
+    (notification.method === "item/started" || notification.method === "item/completed") &&
+    fallbackThreadId &&
+    isObjectRecord(params) &&
+    isObjectRecord(params.item) &&
+    params.item.type === "agentMessage"
+  ) {
+    const turnId = extractTurnId(params) ?? activeTurnByThread.get(fallbackThreadId) ?? null;
+    if (turnId) {
+      const text = typeof params.item.text === "string" ? params.item.text : "";
+      if (text.length > 0) {
+        setRuntimeTurnAssistantText(fallbackThreadId, turnId, text);
+      }
+    }
+    return;
+  }
+
+  if (
+    notification.method === "item/agentMessage/delta" &&
+    fallbackThreadId &&
+    isObjectRecord(params) &&
+    typeof params.delta === "string"
+  ) {
+    const turnId = extractTurnId(params) ?? activeTurnByThread.get(fallbackThreadId) ?? null;
+    if (turnId) {
+      appendRuntimeTurnAssistantDelta(fallbackThreadId, turnId, params.delta);
+    }
+    return;
+  }
+
+  if (
+    notification.method === "codex/event/agent_message_content_delta" &&
+    isObjectRecord(params) &&
+    isObjectRecord(params.msg) &&
+    typeof params.msg.delta === "string"
+  ) {
+    const threadId =
+      (typeof params.msg.thread_id === "string" ? params.msg.thread_id : null) ??
+      (typeof params.conversationId === "string" ? params.conversationId : null) ??
+      fallbackThreadId;
+    const turnId =
+      (typeof params.msg.turn_id === "string" ? params.msg.turn_id : null) ??
+      extractTurnId(params) ??
+      (threadId ? activeTurnByThread.get(threadId) ?? null : null);
+    if (threadId && turnId) {
+      appendRuntimeTurnAssistantDelta(threadId, turnId, params.msg.delta);
+    }
+    return;
+  }
+
+  if (
+    notification.method === "codex/event/agent_message" &&
+    isObjectRecord(params) &&
+    isObjectRecord(params.msg) &&
+    typeof params.msg.message === "string"
+  ) {
+    const threadId =
+      (typeof params.msg.thread_id === "string" ? params.msg.thread_id : null) ??
+      (typeof params.conversationId === "string" ? params.conversationId : null) ??
+      fallbackThreadId;
+    const turnId =
+      (typeof params.msg.turn_id === "string" ? params.msg.turn_id : null) ??
+      extractTurnId(params) ??
+      (threadId ? activeTurnByThread.get(threadId) ?? null : null);
+    if (threadId && turnId) {
+      setRuntimeTurnAssistantText(threadId, turnId, params.msg.message);
+    }
+  }
+}
+
+type ReadThreadForTurnPollingResult = {
+  thread: CodexThread;
+  materialized: boolean;
+};
+
+async function readThreadForTurnPolling(threadId: string, signal?: AbortSignal): Promise<ReadThreadForTurnPollingResult> {
+  throwIfAborted(signal);
+  try {
+    const response = await codexRuntime.call<{ thread: CodexThread }>("thread/read", {
       threadId,
       includeTurns: true
     });
-    const turn = response.thread.turns.find((entry) => entry.id === turnId);
-    if (!turn) {
-      await delayWithSignal(350, signal);
-      continue;
+    return {
+      thread: response.thread,
+      materialized: true
+    };
+  } catch (error) {
+    if (!isIncludeTurnsUnavailableError(error)) {
+      throw error;
     }
+  }
 
-    const suggestion = latestAgentMessageFromTurn(turn);
-    if (!isTurnStillRunning(turn.status)) {
-      if (suggestion) {
-        return suggestion;
+  // The thread exists but is still materializing (common immediately after thread/start).
+  // Polling should continue instead of failing the job terminally.
+  const fallback = await codexRuntime.call<{ thread: CodexThread }>("thread/read", {
+    threadId,
+    includeTurns: false
+  });
+  return {
+    thread: fallback.thread,
+    materialized: false
+  };
+}
+
+async function waitForAssistantText(
+  threadId: string,
+  turnId: string,
+  signal?: AbortSignal,
+  onOutputUpdate?: (update: AgentOutputUpdate) => void
+): Promise<string> {
+  throwIfAborted(signal);
+  const startedAt = Date.now();
+  const timeoutMs = env.ORCHESTRATOR_AGENT_TURN_TIMEOUT_MS;
+  const includeTurnsGraceMs = env.ORCHESTRATOR_AGENT_INCLUDE_TURNS_GRACE_MS;
+  let nonMaterializedSince: number | null = null;
+  let sawCompletedTurnWithoutOutput = false;
+  let completedTurnWithoutOutputAt: number | null = null;
+  let lastOutputText: string | null = null;
+  let lastOutputStatus: AgentOutputUpdate["status"] | null = null;
+
+  const emitOutput = (text: string, status: AgentOutputUpdate["status"]): void => {
+    const normalizedText = normalizeAgentOutputText(text);
+    if (!normalizedText) {
+      return;
+    }
+    if (lastOutputText === normalizedText && lastOutputStatus === status) {
+      return;
+    }
+    lastOutputText = normalizedText;
+    lastOutputStatus = status;
+    onOutputUpdate?.({
+      text: normalizedText,
+      status
+    });
+  };
+
+  while (Date.now() - startedAt < timeoutMs) {
+    throwIfAborted(signal);
+    const observed = runtimeTurnStateFromStore(threadId, turnId);
+    if (observed) {
+      const observedText = normalizeAgentOutputText(observed.assistantText);
+      if (observedText.length > 0) {
+        emitOutput(observedText, observed.status === "completed" ? "complete" : "streaming");
       }
-      sawCompletedTurnWithoutOutput = true;
-      await delayWithSignal(350, signal);
-      continue;
+      if (observed.status === "failed") {
+        throw agentTurnFailedError(observedText);
+      }
+      if (observed.status === "completed") {
+        if (observedText.length > 0) {
+          return observedText;
+        }
+        sawCompletedTurnWithoutOutput = true;
+        if (completedTurnWithoutOutputAt === null) {
+          completedTurnWithoutOutputAt = Date.now();
+        }
+      }
     }
 
-    await delayWithSignal(350, signal);
+    const shouldPollThreadRead = !isSystemOwnedSession(threadId) || !observed;
+    if (shouldPollThreadRead) {
+      const readResult = await readThreadForTurnPolling(threadId, signal);
+      if (!readResult.materialized) {
+        if (nonMaterializedSince === null) {
+          nonMaterializedSince = Date.now();
+        } else if (Date.now() - nonMaterializedSince >= includeTurnsGraceMs) {
+          throw new Error(`includeTurns not materialized yet for thread ${threadId} after ${includeTurnsGraceMs}ms`);
+        }
+      } else {
+        nonMaterializedSince = null;
+
+        const turns = Array.isArray(readResult.thread.turns) ? readResult.thread.turns : [];
+        const turn = turns.find((entry) => entry.id === turnId);
+        if (turn) {
+          const runtimeStatus = runtimeStatusFromTurnStatus(turn.status);
+          markRuntimeTurnSettled(threadId, turnId, runtimeStatus);
+          const assistantText = latestAgentMessageFromTurn(turn);
+          if (assistantText) {
+            setRuntimeTurnAssistantText(threadId, turnId, assistantText);
+            emitOutput(assistantText, runtimeStatus === "completed" ? "complete" : "streaming");
+          }
+          if (runtimeStatus === "failed") {
+            throw agentTurnFailedError(assistantText);
+          }
+          if (runtimeStatus === "completed") {
+            if (assistantText) {
+              return normalizeAgentOutputText(assistantText);
+            }
+            sawCompletedTurnWithoutOutput = true;
+            if (completedTurnWithoutOutputAt === null) {
+              completedTurnWithoutOutputAt = Date.now();
+            }
+          }
+        }
+      }
+    }
+
+    if (
+      sawCompletedTurnWithoutOutput &&
+      completedTurnWithoutOutputAt !== null &&
+      Date.now() - completedTurnWithoutOutputAt >= env.ORCHESTRATOR_AGENT_POLL_INTERVAL_MS * 2
+    ) {
+      throw new Error("agent turn completed but no assistant text was readable before timeout");
+    }
+
+    await waitForRuntimeTurnSignal(threadId, turnId, env.ORCHESTRATOR_AGENT_POLL_INTERVAL_MS, signal);
   }
 
   if (sawCompletedTurnWithoutOutput) {
-    throw new Error("suggestion turn completed but no assistant message was readable before timeout");
+    throw new Error("agent turn completed but no assistant text was readable before timeout");
   }
-
-  throw new Error("timed out waiting for suggested reply");
+  throw new Error("timed out waiting for agent assistant text");
 }
 
+async function waitForTurnToSettle(
+  threadId: string,
+  turnId: string,
+  signal?: AbortSignal,
+  onOutputUpdate?: (update: AgentOutputUpdate) => void
+): Promise<string | null> {
+  throwIfAborted(signal);
+  const startedAt = Date.now();
+  const timeoutMs = env.ORCHESTRATOR_AGENT_TURN_TIMEOUT_MS;
+  const includeTurnsGraceMs = env.ORCHESTRATOR_AGENT_INCLUDE_TURNS_GRACE_MS;
+  let nonMaterializedSince: number | null = null;
+  let latestOutputText: string | null = null;
+  let lastOutputText: string | null = null;
+  let lastOutputStatus: AgentOutputUpdate["status"] | null = null;
+
+  const emitOutput = (text: string, status: AgentOutputUpdate["status"]): void => {
+    const normalizedText = normalizeAgentOutputText(text);
+    if (!normalizedText) {
+      return;
+    }
+    if (lastOutputText === normalizedText && lastOutputStatus === status) {
+      return;
+    }
+    lastOutputText = normalizedText;
+    lastOutputStatus = status;
+    onOutputUpdate?.({
+      text: normalizedText,
+      status
+    });
+  };
+
+  while (Date.now() - startedAt < timeoutMs) {
+    throwIfAborted(signal);
+    const observed = runtimeTurnStateFromStore(threadId, turnId);
+    if (observed) {
+      const observedText = normalizeAgentOutputText(observed.assistantText);
+      if (observedText.length > 0) {
+        latestOutputText = observedText;
+        emitOutput(observedText, observed.status === "completed" ? "complete" : "streaming");
+      }
+      if (observed.status === "failed") {
+        throw agentTurnFailedError(observedText);
+      }
+      if (observed.status === "completed") {
+        return latestOutputText;
+      }
+    }
+
+    const shouldPollThreadRead = !isSystemOwnedSession(threadId) || !observed;
+    if (shouldPollThreadRead) {
+      const readResult = await readThreadForTurnPolling(threadId, signal);
+      if (!readResult.materialized) {
+        if (nonMaterializedSince === null) {
+          nonMaterializedSince = Date.now();
+        } else if (Date.now() - nonMaterializedSince >= includeTurnsGraceMs) {
+          throw new Error(`includeTurns not materialized yet for thread ${threadId} after ${includeTurnsGraceMs}ms`);
+        }
+      } else {
+        nonMaterializedSince = null;
+
+        const turns = Array.isArray(readResult.thread.turns) ? readResult.thread.turns : [];
+        const turn = turns.find((entry) => entry.id === turnId);
+        if (turn) {
+          const runtimeStatus = runtimeStatusFromTurnStatus(turn.status);
+          markRuntimeTurnSettled(threadId, turnId, runtimeStatus);
+          const assistantText = latestAgentMessageFromTurn(turn);
+          if (assistantText) {
+            setRuntimeTurnAssistantText(threadId, turnId, assistantText);
+            latestOutputText = normalizeAgentOutputText(assistantText);
+            emitOutput(assistantText, runtimeStatus === "completed" ? "complete" : "streaming");
+          }
+          if (runtimeStatus === "failed") {
+            throw agentTurnFailedError(assistantText);
+          }
+
+          if (runtimeStatus === "completed") {
+            return latestOutputText;
+          }
+        }
+      }
+    }
+
+    await waitForRuntimeTurnSignal(threadId, turnId, env.ORCHESTRATOR_AGENT_POLL_INTERVAL_MS, signal);
+  }
+
+  throw new Error("timed out waiting for agent turn completion");
+}
+
+async function ensureAgentOrientation(
+  sessionId: string,
+  projectId: string,
+  agent: string,
+  runtimePolicy: AgentRuntimePolicyConfig,
+  options?: {
+    signal?: AbortSignal;
+    onTurnStarted?: (threadId: string, turnId: string) => void;
+  }
+): Promise<void> {
+  if (agentOrientationCompletedBySession.has(sessionId)) {
+    return;
+  }
+
+  const orientationPath = agentOrientationPath(agent);
+  if (!existsSync(orientationPath)) {
+    agentOrientationCompletedBySession.add(sessionId);
+    return;
+  }
+
+  const orientation = (await readFile(orientationPath, "utf8")).trim();
+  if (!orientation) {
+    agentOrientationCompletedBySession.add(sessionId);
+    return;
+  }
+
+  const turn = await codexRuntime.call<{ turn: { id: string } }>("turn/start", {
+    threadId: sessionId,
+    model: runtimePolicy.model ?? undefined,
+    effort: runtimePolicy.orientationTurnPolicy.effort ?? undefined,
+    sandboxPolicy: toTurnSandboxPolicy(
+      runtimePolicy.orientationTurnPolicy.sandbox,
+      runtimePolicy.orientationTurnPolicy.networkAccess
+    ),
+    approvalPolicy: runtimePolicy.orientationTurnPolicy.approvalPolicy,
+    input: [
+      {
+        type: "text",
+        text: orientation,
+        text_elements: []
+      }
+    ]
+  });
+  options?.onTurnStarted?.(sessionId, turn.turn.id);
+  markRuntimeTurnStarted(sessionId, turn.turn.id);
+  await waitForTurnToSettle(sessionId, turn.turn.id, options?.signal);
+  agentOrientationCompletedBySession.add(sessionId);
+  app.log.info({ projectId, agent, sessionId }, "completed agent orientation turn");
+}
+
+async function resolveAgentSession(
+  projectId: string,
+  agent: string,
+  runtimePolicy: AgentRuntimePolicyConfig,
+  sourceSessionId?: string
+): Promise<string> {
+  if (!isKnownAgent(agent)) {
+    throw new Error(`unknown agent "${agent}" under ${agentsRootPath}`);
+  }
+  return ensureProjectAgentSession(projectId, agent, runtimePolicy, sourceSessionId);
+}
+
+async function runAgentInstructionJob(
+  payload: AgentInstructionJobPayload,
+  options?: {
+    signal?: AbortSignal;
+    onTurnStarted?: (threadId: string, turnId: string) => void;
+    onOutputUpdate?: (update: AgentOutputUpdate) => void;
+  }
+): Promise<AgentInstructionJobResult> {
+  throwIfAborted(options?.signal);
+  let recoveredMissingSession = false;
+  const runtimePolicy = await resolveAgentRuntimePolicyConfig(payload.agent);
+
+  while (true) {
+    const agentSessionId = await resolveAgentSession(
+      payload.projectId,
+      payload.agent,
+      runtimePolicy,
+      payload.sourceSessionId
+    );
+    try {
+      await ensureAgentOrientation(agentSessionId, payload.projectId, payload.agent, runtimePolicy, options);
+      throwIfAborted(options?.signal);
+
+      const turn = await codexRuntime.call<{ turn: { id: string } }>("turn/start", {
+        threadId: agentSessionId,
+        model: runtimePolicy.model ?? undefined,
+        effort: runtimePolicy.instructionTurnPolicy.effort ?? undefined,
+        sandboxPolicy: toTurnSandboxPolicy(
+          runtimePolicy.instructionTurnPolicy.sandbox,
+          runtimePolicy.instructionTurnPolicy.networkAccess
+        ),
+        approvalPolicy: runtimePolicy.instructionTurnPolicy.approvalPolicy,
+        input: [
+          {
+            type: "text",
+            text: payload.instructionText,
+            text_elements: []
+          }
+        ]
+      });
+      options?.onTurnStarted?.(agentSessionId, turn.turn.id);
+      markRuntimeTurnStarted(agentSessionId, turn.turn.id);
+
+      if (payload.expectResponse === "assistant_text") {
+        const outputText = await waitForAssistantText(
+          agentSessionId,
+          turn.turn.id,
+          options?.signal,
+          options?.onOutputUpdate
+        );
+        return {
+          status: "ok",
+          ...(outputText.trim().length > 0 ? { outputText } : {})
+        };
+      }
+
+      const outputText = await waitForTurnToSettle(
+        agentSessionId,
+        turn.turn.id,
+        options?.signal,
+        options?.onOutputUpdate
+      );
+      return {
+        status: "ok",
+        ...(outputText && outputText.trim().length > 0 ? { outputText } : {})
+      };
+    } catch (error) {
+      if (isAbortError(error) || options?.signal?.aborted) {
+        throw error;
+      }
+
+      const recoverableMissingSession = isMissingThreadError(error) || isNoRolloutFoundError(error);
+      if (!recoverableMissingSession || recoveredMissingSession) {
+        throw error;
+      }
+
+      recoveredMissingSession = true;
+      app.log.warn(
+        {
+          error,
+          projectId: payload.projectId,
+          agent: payload.agent,
+          agentSessionId,
+          jobKind: payload.jobKind
+        },
+        "agent session unavailable during instruction job; clearing mapping and retrying once"
+      );
+      await clearProjectAgentSessionMapping(payload.projectId, payload.agent, agentSessionId);
+    }
+  }
+}
 function extractThreadId(params: unknown): string | undefined {
   if (!isObjectRecord(params)) {
     return undefined;
@@ -4628,6 +3945,19 @@ function isInvalidThreadIdError(error: unknown): boolean {
 
   const message = error.message.toLowerCase();
   return message.includes("invalid thread id") || message.includes("invalid conversation id");
+}
+
+function isThreadNotFoundError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message.toLowerCase();
+  return message.includes("thread not found") || message.includes("conversation not found");
+}
+
+function isMissingThreadError(error: unknown): boolean {
+  return isInvalidThreadIdError(error) || isThreadNotFoundError(error);
 }
 
 function isSessionPurged(sessionId: string): boolean {
@@ -5076,11 +4406,11 @@ async function callThreadMethodWithRawEventsFallback<T>(
 ): Promise<T> {
   const shouldTryRawEvents = experimentalRawEventsCapability !== "unsupported";
   if (!shouldTryRawEvents) {
-    return supervisor.call<T>(method, params);
+    return codexRuntime.call<T>(method, params);
   }
 
   try {
-    const response = await supervisor.call<T>(method, {
+    const response = await codexRuntime.call<T>(method, {
       ...params,
       experimentalRawEvents: true
     });
@@ -5092,7 +4422,7 @@ async function callThreadMethodWithRawEventsFallback<T>(
     }
 
     experimentalRawEventsCapability = "unsupported";
-    return supervisor.call<T>(method, params);
+    return codexRuntime.call<T>(method, params);
   }
 }
 
@@ -5219,7 +4549,7 @@ async function refreshCapabilities(): Promise<void> {
     const next = new Map<string, CapabilityEntry>();
     for (const probe of capabilityMethodProbes) {
       try {
-        await supervisor.call(probe.method, probe.probeParams);
+        await codexRuntime.call(probe.method, probe.probeParams);
         next.set(probe.method, {
           status: "available",
           reason: null
@@ -5291,7 +4621,7 @@ async function resolveKnownSessionTitle(sessionId: string): Promise<string | und
   }
 
   try {
-    const response = await supervisor.call<{ thread: CodexThread & { threadName?: unknown; name?: unknown } }>(
+    const response = await codexRuntime.call<{ thread: CodexThread & { threadName?: unknown; name?: unknown } }>(
       "thread/read",
       {
         threadId: sessionId,
@@ -5312,7 +4642,7 @@ async function listThreadIdsByArchiveState(archived: boolean): Promise<Set<strin
   let cursor: string | null = null;
 
   do {
-    const response: { data: Array<CodexThread>; nextCursor: string | null } = await supervisor.call("thread/list", {
+    const response: { data: Array<CodexThread>; nextCursor: string | null } = await codexRuntime.call("thread/list", {
       archived,
       limit: 200,
       cursor: cursor ?? undefined
@@ -5332,13 +4662,13 @@ async function listThreadIdsByArchiveState(archived: boolean): Promise<Set<strin
 
 async function sessionExistsForProjectAssignment(sessionId: string): Promise<boolean> {
   try {
-    await supervisor.call("thread/read", {
+    await codexRuntime.call("thread/read", {
       threadId: sessionId,
       includeTurns: false
     });
     return true;
   } catch (error) {
-    if (isInvalidThreadIdError(error)) {
+    if (isMissingThreadError(error)) {
       return false;
     }
 
@@ -5347,7 +4677,7 @@ async function sessionExistsForProjectAssignment(sessionId: string): Promise<boo
     }
   }
 
-  const loaded = await supervisor.call<{ data: Array<string> }>("thread/loaded/list", {});
+  const loaded = await codexRuntime.call<{ data: Array<string> }>("thread/loaded/list", {});
   return loaded.data.includes(sessionId);
 }
 
@@ -5398,7 +4728,7 @@ async function classifyProjectSessionAssignments(sessionIds: Array<string>): Pro
   const [activeIds, archivedIds, loaded] = await Promise.all([
     listThreadIdsByArchiveState(false),
     listThreadIdsByArchiveState(true),
-    supervisor.call<{ data: Array<string> }>("thread/loaded/list", {})
+    codexRuntime.call<{ data: Array<string> }>("thread/loaded/list", {})
   ]);
 
   const knownSessionIds = new Set<string>();
@@ -5462,12 +4792,12 @@ async function pruneStaleSessionControlMetadata(): Promise<number> {
 
 async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOutcome> {
   if (isSessionPurged(sessionId)) {
-    const helperMetadataChanged = setSuggestionHelperSession(sessionId, false);
+    const sessionScopedAgentMappingChanged = clearSessionScopedAgentSessionMappingsForSourceSession(sessionId);
     const systemMetadataChanged = setSystemOwnedSession(sessionId, false);
     const policyMetadataChanged = setSessionApprovalPolicy(sessionId, null);
     const turnTimingMetadataChanged = clearSessionTurnTimings(sessionId);
     clearSupplementalTranscriptEntries(sessionId);
-    if (helperMetadataChanged || systemMetadataChanged || policyMetadataChanged || turnTimingMetadataChanged) {
+    if (sessionScopedAgentMappingChanged || systemMetadataChanged || policyMetadataChanged || turnTimingMetadataChanged) {
       await persistSessionMetadata();
     }
     return {
@@ -5479,7 +4809,7 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
   const activeTurnId = activeTurnByThread.get(sessionId);
   if (activeTurnId) {
     try {
-      await supervisor.call("turn/interrupt", {
+      await codexRuntime.call("turn/interrupt", {
         threadId: sessionId,
         turnId: activeTurnId
       });
@@ -5492,7 +4822,7 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
   let knownPath: string | null = null;
   let sessionReadSucceeded = false;
   try {
-    const response = await supervisor.call<{
+    const response = await codexRuntime.call<{
       thread: CodexThread & { path?: unknown; rolloutPath?: unknown; threadName?: unknown; name?: unknown };
     }>("thread/read", {
       threadId: sessionId,
@@ -5519,18 +4849,16 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
     sessionReadSucceeded ||
     knownPath !== null;
   if (!existsInMemory && deletedPaths.length === 0) {
+    const sessionScopedAgentMappingChanged = clearSessionScopedAgentSessionMappingsForSourceSession(sessionId);
     const titleMetadataChanged = setSessionTitleOverride(sessionId, null);
     const projectMetadataChanged = setSessionProjectAssignment(sessionId, null);
-    const orchestratorMetadataChanged = clearProjectOrchestratorSessionForSession(sessionId);
-    const helperMetadataChanged = setSuggestionHelperSession(sessionId, false);
     const policyMetadataChanged = setSessionApprovalPolicy(sessionId, null);
     const turnTimingMetadataChanged = clearSessionTurnTimings(sessionId);
     clearSupplementalTranscriptEntries(sessionId);
     if (
+      sessionScopedAgentMappingChanged ||
       titleMetadataChanged ||
       projectMetadataChanged ||
-      orchestratorMetadataChanged ||
-      helperMetadataChanged ||
       policyMetadataChanged ||
       turnTimingMetadataChanged
     ) {
@@ -5547,28 +4875,21 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
   }
 
   activeTurnByThread.delete(sessionId);
-  const helperThreadId = suggestionThreadBySession.get(sessionId);
-  suggestionThreadBySession.delete(sessionId);
-  if (helperThreadId) {
-    suggestionThreadIds.delete(helperThreadId);
-  }
   clearSupplementalTranscriptEntries(sessionId);
   clearPendingApprovalsForThread(sessionId);
   clearPendingToolInputsForThread(sessionId);
   purgedSessionIds.add(sessionId);
 
+  const sessionScopedAgentMappingChanged = clearSessionScopedAgentSessionMappingsForSourceSession(sessionId);
   const titleMetadataChanged = setSessionTitleOverride(sessionId, null);
   const projectMetadataChanged = setSessionProjectAssignment(sessionId, null);
-  const orchestratorMetadataChanged = clearProjectOrchestratorSessionForSession(sessionId);
-  const helperMetadataChanged = setSuggestionHelperSession(sessionId, false);
   const systemMetadataChanged = setSystemOwnedSession(sessionId, false);
   const policyMetadataChanged = setSessionApprovalPolicy(sessionId, null);
   const turnTimingMetadataChanged = clearSessionTurnTimings(sessionId);
   if (
+    sessionScopedAgentMappingChanged ||
     titleMetadataChanged ||
     projectMetadataChanged ||
-    orchestratorMetadataChanged ||
-    helperMetadataChanged ||
     systemMetadataChanged ||
     policyMetadataChanged ||
     turnTimingMetadataChanged
@@ -5639,18 +4960,304 @@ function publishToSockets(type: string, payload: unknown, threadId?: string, opt
   }
 }
 
+async function enqueueJobForAgentEvent(input: EnqueueJobInput): Promise<EnqueueJobResult> {
+  if (!orchestratorQueue) {
+    throw new Error("orchestrator queue is unavailable");
+  }
+  return orchestratorQueue.enqueue(input);
+}
+
+async function emitAgentEvent(type: string, payload: Record<string, unknown>): Promise<Array<unknown>> {
+  return agentEventsRuntime.emit(
+    {
+      type,
+      payload
+    },
+    {
+      enqueueJob: enqueueJobForAgentEvent,
+      logger: app.log
+    }
+  );
+}
+
+function firstEnqueueResultFromAgentEvent(results: Array<unknown>): EnqueueJobResult | null {
+  for (const result of results) {
+    if (!isObjectRecord(result) || !isObjectRecord(result.job)) {
+      continue;
+    }
+
+    if (
+      typeof result.status === "string" &&
+      (result.status === "enqueued" || result.status === "already_queued") &&
+      typeof result.job.id === "string" &&
+      typeof result.job.type === "string" &&
+      typeof result.job.projectId === "string"
+    ) {
+      return result as EnqueueJobResult;
+    }
+  }
+
+  return null;
+}
+
+function publishTranscriptUpdated(
+  threadId: string,
+  payload: {
+    turnId?: string;
+    messageId?: string;
+    type?: string;
+    entry?: TranscriptEntry;
+  }
+): void {
+  publishToSockets(
+    "transcript_updated",
+    {
+      threadId,
+      ...payload
+    },
+    threadId
+  );
+}
+
+function agentInstructionOutputMessageId(jobId: string): string {
+  return `agent-job-output::${jobId}`;
+}
+
+type AgentInstructionSupplementalTarget = {
+  messageId: string;
+  type: string;
+  placeholderTexts: Array<string>;
+  completeFallback: string;
+  errorFallback: string;
+  canceledFallback: string;
+};
+
+function defaultSupplementalFallback(type: string, terminalStatus: "complete" | "error" | "canceled"): string {
+  if (terminalStatus === "complete") {
+    return `${type} completed, but no detailed output was produced.`;
+  }
+  if (terminalStatus === "error") {
+    return `${type} failed before detailed output was produced.`;
+  }
+  return `${type} was canceled before detailed output was produced.`;
+}
+
+function expectedSupplementalTargetsForAgentInstruction(
+  payload: AgentInstructionJobPayload
+): Array<AgentInstructionSupplementalTarget> {
+  if (!Array.isArray(payload.supplementalTargets) || payload.supplementalTargets.length === 0) {
+    return [];
+  }
+
+  const normalizedTargets: Array<AgentInstructionSupplementalTarget> = [];
+  const seenMessageIds = new Set<string>();
+  for (const target of payload.supplementalTargets) {
+    if (!isObjectRecord(target)) {
+      continue;
+    }
+    const messageId = typeof target.messageId === "string" ? target.messageId.trim() : "";
+    const type = typeof target.type === "string" ? target.type.trim() : "";
+    if (!messageId || !type || seenMessageIds.has(messageId)) {
+      continue;
+    }
+
+    const placeholderTexts = Array.isArray(target.placeholderTexts)
+      ? target.placeholderTexts
+          .filter((entry): entry is string => typeof entry === "string")
+          .map((entry) => entry.trim().toLowerCase())
+          .filter((entry) => entry.length > 0)
+      : [];
+
+    normalizedTargets.push({
+      messageId,
+      type,
+      placeholderTexts,
+      completeFallback:
+        typeof target.completeFallback === "string" && target.completeFallback.trim().length > 0
+          ? target.completeFallback.trim()
+          : defaultSupplementalFallback(type, "complete"),
+      errorFallback:
+        typeof target.errorFallback === "string" && target.errorFallback.trim().length > 0
+          ? target.errorFallback.trim()
+          : defaultSupplementalFallback(type, "error"),
+      canceledFallback:
+        typeof target.canceledFallback === "string" && target.canceledFallback.trim().length > 0
+          ? target.canceledFallback.trim()
+          : defaultSupplementalFallback(type, "canceled")
+    });
+    seenMessageIds.add(messageId);
+  }
+
+  return normalizedTargets;
+}
+
+function isSupplementalPlaceholderContent(value: string, target: AgentInstructionSupplementalTarget): boolean {
+  if (target.placeholderTexts.length === 0) {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  return target.placeholderTexts.includes(normalized);
+}
+
+function reconcileAgentInstructionSupplementalStreamingEntries(input: {
+  payload: AgentInstructionJobPayload;
+  terminalStatus: "complete" | "error" | "canceled";
+  errorMessage?: string;
+}): void {
+  const targets = expectedSupplementalTargetsForAgentInstruction(input.payload);
+  if (targets.length === 0) {
+    return;
+  }
+
+  const threadEntries = supplementalTranscriptByThread.get(input.payload.sourceSessionId);
+  const now = Date.now();
+  for (const target of targets) {
+    const existing = threadEntries?.get(target.messageId)?.entry;
+
+    let content = existing?.content.trim() ?? "";
+    if (
+      content.length === 0 ||
+      (input.terminalStatus === "complete" && isSupplementalPlaceholderContent(content, target))
+    ) {
+      if (input.terminalStatus === "complete") {
+        content = target.completeFallback;
+      } else if (input.terminalStatus === "error") {
+        const reason = typeof input.errorMessage === "string" && input.errorMessage.trim().length > 0 ? input.errorMessage : null;
+        content = reason ? `${target.errorFallback} (${reason})` : target.errorFallback;
+      } else {
+        content = target.canceledFallback;
+      }
+    }
+
+    const existingDetails = typeof existing?.details === "string" ? existing.details : "";
+    const details =
+      existingDetails.trim().length > 0
+        ? existingDetails
+        : JSON.stringify({
+            anchorItemId: input.payload.anchorItemId ?? input.payload.itemId ?? null,
+            approvalId: input.payload.approvalId ?? null
+          });
+
+    const shouldUpsert =
+      !existing ||
+      existing.status !== input.terminalStatus ||
+      existing.content.trim() !== content ||
+      (input.terminalStatus === "complete" && isSupplementalPlaceholderContent(existing.content, target));
+
+    if (!shouldUpsert) {
+      continue;
+    }
+
+    upsertSupplementalTranscriptEntry(input.payload.sourceSessionId, {
+      messageId: target.messageId,
+      turnId: input.payload.turnId,
+      role: "system",
+      type: target.type,
+      content,
+      details,
+      status: input.terminalStatus,
+      startedAt: existing?.startedAt ?? now,
+      completedAt: now
+    });
+
+    const entry: TranscriptEntry = {
+      messageId: target.messageId,
+      turnId: input.payload.turnId,
+      role: "system",
+      type: target.type,
+      content,
+      details,
+      status: input.terminalStatus,
+      startedAt: existing?.startedAt ?? now,
+      completedAt: now
+    };
+
+    publishTranscriptUpdated(input.payload.sourceSessionId, {
+      turnId: input.payload.turnId,
+      messageId: target.messageId,
+      type: target.type,
+      entry
+    });
+  }
+}
+
+function buildAgentInstructionOutputDetails(payload: AgentInstructionJobPayload, jobId: string): string {
+  const details: Record<string, unknown> = {
+    jobId,
+    jobKind: payload.jobKind,
+    agent: payload.agent,
+    projectId: payload.projectId,
+    sourceSessionId: payload.sourceSessionId,
+    sourceThreadId: payload.threadId,
+    sourceTurnId: payload.turnId
+  };
+
+  if (payload.itemId) {
+    details.itemId = payload.itemId;
+  }
+  if (payload.anchorItemId) {
+    details.anchorItemId = payload.anchorItemId;
+  }
+  if (payload.approvalId) {
+    details.approvalId = payload.approvalId;
+  }
+
+  return JSON.stringify(details);
+}
+
+function upsertAgentInstructionOutputTranscript(input: {
+  payload: AgentInstructionJobPayload;
+  jobId: string;
+  status: TranscriptEntry["status"];
+  content: string;
+}): void {
+  const content = input.content.trim();
+  if (!content) {
+    return;
+  }
+
+  const now = Date.now();
+  const messageId = agentInstructionOutputMessageId(input.jobId);
+  const details = buildAgentInstructionOutputDetails(input.payload, input.jobId);
+
+  const entry: TranscriptEntry = {
+    messageId,
+    turnId: input.payload.turnId,
+    role: "system",
+    type: "agent.jobOutput",
+    content,
+    details,
+    status: input.status,
+    startedAt: now,
+    ...(input.status === "streaming" ? {} : { completedAt: now })
+  };
+
+  upsertSupplementalTranscriptEntry(input.payload.sourceSessionId, entry);
+
+  publishTranscriptUpdated(input.payload.sourceSessionId, {
+    turnId: input.payload.turnId,
+    messageId,
+    type: "agent.jobOutput",
+    entry
+  });
+}
+
+function agentRetryDelayMs(attempt: number): number {
+  return Math.max(0, (Math.max(1, attempt) - 1) * 60);
+}
+
 function buildOrchestratorJobDefinitions(): JobDefinitionsMap {
   const definitions: Array<any> = [];
 
-  if (env.ORCHESTRATOR_SUGGEST_REPLY_ENABLED) {
+  if (env.ORCHESTRATOR_SUGGEST_REQUEST_ENABLED) {
     definitions.push({
-      type: "suggest_reply",
+      type: "suggest_request",
       version: 1,
       priority: "interactive",
-      payloadSchema: suggestReplyJobPayloadSchema,
-      resultSchema: suggestReplyJobResultSchema,
+      payloadSchema: suggestRequestJobPayloadSchema,
+      resultSchema: suggestRequestJobResultSchema,
       dedupe: {
-        key: (payload: SuggestReplyJobPayload) => `${payload.projectId}:${payload.sessionId}:suggest_reply`,
+        key: (payload: SuggestRequestJobPayload) => `${payload.projectId}:${payload.sessionId}:suggest_request`,
         mode: "single_flight"
       },
       retry: {
@@ -5662,21 +5269,32 @@ function buildOrchestratorJobDefinitions(): JobDefinitionsMap {
               : typeof error === "string"
                 ? error.toLowerCase()
                 : "";
-          if (message.includes("timed out") || message.includes("timeout")) {
+          if (
+            message.includes("timed out") ||
+            message.includes("timeout") ||
+            message.includes("thread not found") ||
+            message.includes("conversation not found") ||
+            message.includes("invalid thread id") ||
+            message.includes("invalid conversation id") ||
+            message.includes("no rollout found for thread id") ||
+            message.includes("no rollout found for conversation id") ||
+            message.includes("temporarily unavailable")
+          ) {
             return "retryable";
           }
           return "fatal";
         },
-        baseDelayMs: 500,
-        maxDelayMs: 5_000,
-        jitter: true
+        baseDelayMs: 60,
+        maxDelayMs: 10_000,
+        jitter: false,
+        delayForAttempt: agentRetryDelayMs
       },
       timeoutMs: env.ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS,
       cancel: {
         strategy: "interrupt_turn",
         gracefulWaitMs: 1_500
       },
-      run: async (ctx: JobRunContext, payload: SuggestReplyJobPayload) =>
+      run: async (ctx: JobRunContext, payload: SuggestRequestJobPayload) =>
         generateSuggestedReplyForJob(payload, {
           signal: ctx.signal,
           onTurnStarted: (threadId, turnId) => {
@@ -5686,356 +5304,146 @@ function buildOrchestratorJobDefinitions(): JobDefinitionsMap {
     });
   }
 
-  if (env.ORCHESTRATOR_DIFF_EXPLAIN_ENABLED) {
-    definitions.push({
-      type: "file_change_explain",
-      version: 1,
-      priority: "background",
-      payloadSchema: fileChangeExplainJobPayloadSchema,
-      resultSchema: fileChangeExplainJobResultSchema,
-      dedupe: {
-        key: (payload: FileChangeExplainJobPayload) => `${payload.projectId}:${payload.threadId}:${payload.turnId}:${payload.itemId}`,
-        mode: "drop_duplicate"
+  definitions.push({
+    type: "agent_instruction",
+    version: 1,
+    priority: "interactive",
+    payloadSchema: agentInstructionJobPayloadSchema,
+    resultSchema: agentInstructionJobResultSchema,
+    dedupe: {
+      key: (payload: AgentInstructionJobPayload) =>
+        payload.dedupeKey
+          ? `${payload.projectId}:${payload.dedupeKey}`
+          : `${payload.projectId}:${payload.threadId}:${payload.turnId}:${payload.jobKind}`,
+      mode: "single_flight"
+    },
+    retry: {
+      maxAttempts: env.ORCHESTRATOR_QUEUE_MAX_ATTEMPTS,
+      classify: (error: unknown) => {
+        const message =
+          error instanceof Error
+            ? error.message.toLowerCase()
+            : typeof error === "string"
+              ? error.toLowerCase()
+              : "";
+        if (
+          message.includes("timed out") ||
+          message.includes("timeout") ||
+          message.includes("temporarily unavailable") ||
+          message.includes("thread not found") ||
+          message.includes("conversation not found") ||
+          message.includes("invalid thread id") ||
+          message.includes("invalid conversation id") ||
+          message.includes("no rollout found for thread id") ||
+          message.includes("no rollout found for conversation id") ||
+          message.includes("includeturns is unavailable before first user message") ||
+          (message.includes("not materialized yet") && message.includes("includeturns"))
+        ) {
+          return "retryable";
+        }
+        return "fatal";
       },
-      retry: {
-        maxAttempts: env.ORCHESTRATOR_QUEUE_MAX_ATTEMPTS,
-        classify: (error: unknown) => {
-          const message =
-            error instanceof Error
-              ? error.message.toLowerCase()
-              : typeof error === "string"
-                ? error.toLowerCase()
-                : "";
-          if (message.includes("timed out") || message.includes("timeout")) {
-            return "retryable";
-          }
-          return "fatal";
-        },
-        baseDelayMs: 1_000,
-        maxDelayMs: 10_000,
-        jitter: true
-      },
-      timeoutMs: Math.max(env.ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS, 90_000),
-      cancel: {
-        strategy: "interrupt_turn",
-        gracefulWaitMs: 1_500
-      },
-      onQueued: async (_ctx: unknown, payload: FileChangeExplainJobPayload) => {
-        upsertFileChangeExplainabilityEntry(payload, {
-          status: "streaming",
-          content: "Queued explainability analysis..."
-        });
-      },
-      onStarted: async (_ctx: unknown, payload: FileChangeExplainJobPayload) => {
-        upsertFileChangeExplainabilityEntry(payload, {
-          status: "streaming",
-          content: "Analyzing completed file change..."
-        });
-      },
-      onCompleted: async (_ctx: unknown, payload: FileChangeExplainJobPayload, result: FileChangeExplainJobResult) => {
-        upsertFileChangeExplainabilityEntry(payload, {
-          status: "complete",
-          content: result.explanation,
-          completedAt: Date.now()
-        });
-      },
-      onFailed: async (_ctx: unknown, payload: FileChangeExplainJobPayload, error: string) => {
-        upsertFileChangeExplainabilityEntry(payload, {
-          status: "error",
-          content: `Explainability failed: ${error}`,
-          completedAt: Date.now()
-        });
-      },
-      onCanceled: async (_ctx: unknown, payload: FileChangeExplainJobPayload) => {
-        upsertFileChangeExplainabilityEntry(payload, {
-          status: "canceled",
-          content: "Explainability canceled before completion.",
-          completedAt: Date.now()
-        });
-      },
-      run: async (ctx: JobRunContext, payload: FileChangeExplainJobPayload) =>
-        generateFileChangeExplainabilityForJob(payload, {
-          signal: ctx.signal,
-          onTurnStarted: (threadId, turnId) => {
-            ctx.setRunningContext({ threadId, turnId });
-          }
-        })
-    });
-  }
+      baseDelayMs: 60,
+      maxDelayMs: 10_000,
+      jitter: false,
+      delayForAttempt: agentRetryDelayMs
+    },
+    timeoutMs: Math.max(env.ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS, 180_000),
+    cancel: {
+      strategy: "interrupt_turn",
+      gracefulWaitMs: 1_500
+    },
+    run: async (ctx: JobRunContext, payload: AgentInstructionJobPayload) => {
+      let latestOutputText: string | null = null;
+      let latestOutputStatus: "streaming" | "complete" | null = null;
 
-  if (env.ORCHESTRATOR_SUPERVISOR_INSIGHT_ENABLED) {
-    definitions.push({
-      type: "file_change_supervisor_insight",
-      version: 1,
-      priority: "interactive",
-      payloadSchema: fileChangeSupervisorInsightJobPayloadSchema,
-      resultSchema: fileChangeSupervisorInsightJobResultSchema,
-      dedupe: {
-        key: (payload: FileChangeSupervisorInsightJobPayload) =>
-          `${payload.projectId}:${payload.threadId}:${payload.turnId}:${payload.itemId}:supervisor_insight:v1`,
-        mode: "drop_duplicate"
-      },
-      retry: {
-        maxAttempts: env.ORCHESTRATOR_QUEUE_MAX_ATTEMPTS,
-        classify: (error: unknown) => {
-          const message =
-            error instanceof Error
-              ? error.message.toLowerCase()
-              : typeof error === "string"
-                ? error.toLowerCase()
-                : "";
-          if (message.includes("timed out") || message.includes("timeout") || message.includes("temporarily unavailable")) {
-            return "retryable";
-          }
-          return "fatal";
+      const result = await runAgentInstructionJob(payload, {
+        signal: ctx.signal,
+        onTurnStarted: (threadId, turnId) => {
+          ctx.setRunningContext({ threadId, turnId });
         },
-        baseDelayMs: 1_000,
-        maxDelayMs: 10_000,
-        jitter: true
-      },
-      timeoutMs: Math.max(env.ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS, 90_000),
-      cancel: {
-        strategy: "interrupt_turn",
-        gracefulWaitMs: 1_500
-      },
-      onQueued: async (_ctx: unknown, payload: FileChangeSupervisorInsightJobPayload) => {
-        upsertFileChangeSupervisorInsightEntry(payload, {
-          status: "streaming",
-          content: "Supervisor insight queued..."
-        });
-      },
-      onStarted: async (_ctx: unknown, payload: FileChangeSupervisorInsightJobPayload) => {
-        upsertFileChangeSupervisorInsightEntry(payload, {
-          status: "streaming",
-          content: "Supervisor analyzing diff..."
-        });
-      },
-      onCompleted: async (
-        _ctx: unknown,
-        payload: FileChangeSupervisorInsightJobPayload,
-        result: FileChangeSupervisorInsightJobResult
-      ) => {
-        upsertFileChangeSupervisorInsightEntry(payload, {
-          status: "complete",
-          content: formatSupervisorInsightMarkdown(result.insight),
-          insight: result.insight,
-          completedAt: Date.now()
-        });
-        upsertSupervisorInsightLedger({
-          projectId: payload.projectId,
-          turnId: payload.turnId,
-          itemId: payload.itemId,
-          threadId: payload.threadId,
-          approvalId: payload.approvalId ?? null,
-          applied: payload.fileChangeStatus === "completed",
-          insight: {
-            change: result.insight.change,
-            impact: result.insight.impact,
-            riskLevel: result.insight.risk.level,
-            riskReason: result.insight.risk.reason,
-            checkInstruction: result.insight.check.instruction,
-            checkExpected: result.insight.check.expected,
-            confidence: result.insight.confidence
+        onOutputUpdate: (update) => {
+          const normalizedText = normalizeAgentOutputText(update.text);
+          if (!normalizedText) {
+            return;
           }
-        });
-      },
-      onFailed: async (_ctx: unknown, payload: FileChangeSupervisorInsightJobPayload, error: string) => {
-        upsertFileChangeSupervisorInsightEntry(payload, {
-          status: "error",
-          content: `Supervisor insight failed: ${error}`,
-          completedAt: Date.now()
-        });
-      },
-      onCanceled: async (_ctx: unknown, payload: FileChangeSupervisorInsightJobPayload) => {
-        upsertFileChangeSupervisorInsightEntry(payload, {
-          status: "canceled",
-          content: "Supervisor insight canceled before completion.",
-          completedAt: Date.now()
-        });
-      },
-      run: async (ctx: JobRunContext, payload: FileChangeSupervisorInsightJobPayload) =>
-        generateFileChangeSupervisorInsightForJob(payload, {
-          signal: ctx.signal,
-          onTurnStarted: (threadId, turnId) => {
-            ctx.setRunningContext({ threadId, turnId });
+          if (latestOutputText === normalizedText && latestOutputStatus === update.status) {
+            return;
           }
-        })
-    });
-  }
 
-  if (env.ORCHESTRATOR_RISK_RECHECK_ENABLED) {
-    definitions.push({
-      type: "risk_recheck_batch",
-      version: 1,
-      priority: "background",
-      payloadSchema: riskRecheckBatchJobPayloadSchema,
-      resultSchema: riskRecheckBatchJobResultSchema,
-      dedupe: {
-        key: (payload: RiskRecheckBatchJobPayload) =>
-          `${payload.projectId}:${payload.threadId}:${payload.turnId}:risk_recheck_batch:v1`,
-        mode: "single_flight"
-      },
-      retry: {
-        maxAttempts: env.ORCHESTRATOR_QUEUE_MAX_ATTEMPTS,
-        classify: (error: unknown) => {
-          const message =
-            error instanceof Error
-              ? error.message.toLowerCase()
-              : typeof error === "string"
-                ? error.toLowerCase()
-                : "";
-          if (message.includes("timed out") || message.includes("timeout") || message.includes("temporarily unavailable")) {
-            return "retryable";
-          }
-          return "fatal";
-        },
-        baseDelayMs: 2_000,
-        maxDelayMs: 12_000,
-        jitter: true
-      },
-      timeoutMs: Math.max(env.ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS, 300_000),
-      cancel: {
-        strategy: "interrupt_turn",
-        gracefulWaitMs: 1_500
-      },
-      onQueued: async (_ctx: unknown, payload: RiskRecheckBatchJobPayload) => {
-        upsertRiskRecheckBatchEntry(payload, {
-          status: "streaming",
-          content: "Queued risk recheck analysis..."
-        });
-      },
-      onStarted: async (_ctx: unknown, payload: RiskRecheckBatchJobPayload) => {
-        upsertRiskRecheckBatchEntry(payload, {
-          status: "streaming",
-          content: "Running queued risk checks..."
-        });
-      },
-      onCompleted: async (_ctx: unknown, payload: RiskRecheckBatchJobPayload, result: RiskRecheckBatchJobResult) => {
-        upsertRiskRecheckBatchEntry(payload, {
-          status: "complete",
-          content: formatRiskRecheckBatchMarkdown({
-            summary: result.summary,
-            checks: result.checks
-          }),
-          summary: result.summary,
-          checks: result.checks,
-          completedAt: Date.now()
-        });
-        enqueueTurnSupervisorReview({
-          threadId: payload.threadId,
-          turnId: payload.turnId,
-          projectId: payload.projectId,
-          sourceSessionId: payload.sourceSessionId,
-          riskBatch: result,
-          source: "risk_recheck_terminal"
-        });
-      },
-      onFailed: async (_ctx: unknown, payload: RiskRecheckBatchJobPayload, error: string) => {
-        upsertRiskRecheckBatchEntry(payload, {
-          status: "error",
-          content: `Risk recheck failed: ${error}`,
-          completedAt: Date.now()
-        });
-        enqueueTurnSupervisorReview({
-          threadId: payload.threadId,
-          turnId: payload.turnId,
-          projectId: payload.projectId,
-          sourceSessionId: payload.sourceSessionId,
-          riskBatch: null,
-          source: "risk_recheck_terminal"
-        });
-      },
-      onCanceled: async (_ctx: unknown, payload: RiskRecheckBatchJobPayload) => {
-        upsertRiskRecheckBatchEntry(payload, {
-          status: "canceled",
-          content: "Risk recheck canceled before completion.",
-          completedAt: Date.now()
-        });
-        enqueueTurnSupervisorReview({
-          threadId: payload.threadId,
-          turnId: payload.turnId,
-          projectId: payload.projectId,
-          sourceSessionId: payload.sourceSessionId,
-          riskBatch: null,
-          source: "risk_recheck_terminal"
-        });
-      },
-      run: async (_ctx: JobRunContext, payload: RiskRecheckBatchJobPayload) => runRiskRecheckBatchForJob(payload)
-    });
-  }
+          latestOutputText = normalizedText;
+          latestOutputStatus = update.status;
+          ctx.emitProgress({
+            stage: "assistant_output",
+            status: update.status,
+            text: normalizedText
+          });
+          upsertAgentInstructionOutputTranscript({
+            payload,
+            jobId: ctx.jobId,
+            status: update.status === "complete" ? "complete" : "streaming",
+            content: normalizedText
+          });
+        }
+      });
 
-  if (env.ORCHESTRATOR_TURN_SUPERVISOR_REVIEW_ENABLED) {
-    definitions.push({
-      type: "turn_supervisor_review",
-      version: 1,
-      priority: "background",
-      payloadSchema: turnSupervisorReviewJobPayloadSchema,
-      resultSchema: turnSupervisorReviewJobResultSchema,
-      dedupe: {
-        key: (payload: TurnSupervisorReviewJobPayload) =>
-          `${payload.projectId}:${payload.threadId}:${payload.turnId}:turn_supervisor_review:v1`,
-        mode: "single_flight"
-      },
-      retry: {
-        maxAttempts: env.ORCHESTRATOR_QUEUE_MAX_ATTEMPTS,
-        classify: (error: unknown) => {
-          const message =
-            error instanceof Error
-              ? error.message.toLowerCase()
-              : typeof error === "string"
-                ? error.toLowerCase()
-                : "";
-          if (message.includes("timed out") || message.includes("timeout") || message.includes("temporarily unavailable")) {
-            return "retryable";
-          }
-          return "fatal";
-        },
-        baseDelayMs: 1_000,
-        maxDelayMs: 8_000,
-        jitter: true
-      },
-      timeoutMs: Math.max(env.ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS, 120_000),
-      cancel: {
-        strategy: "mark_canceled",
-        gracefulWaitMs: 0
-      },
-      onQueued: async (_ctx: unknown, payload: TurnSupervisorReviewJobPayload) => {
-        upsertTurnSupervisorReviewEntry(payload, {
-          status: "streaming",
-          content: "Queued supervisor turn review..."
-        });
-      },
-      onStarted: async (_ctx: unknown, payload: TurnSupervisorReviewJobPayload) => {
-        upsertTurnSupervisorReviewEntry(payload, {
-          status: "streaming",
-          content: "Compiling supervisor turn review..."
-        });
-      },
-      onCompleted: async (_ctx: unknown, payload: TurnSupervisorReviewJobPayload, result: TurnSupervisorReviewJobResult) => {
-        upsertTurnSupervisorReviewEntry(payload, {
+      const finalOutputText = typeof result.outputText === "string" ? normalizeAgentOutputText(result.outputText) : "";
+      if (finalOutputText) {
+        if (latestOutputText !== finalOutputText || latestOutputStatus !== "complete") {
+          ctx.emitProgress({
+            stage: "assistant_output",
+            status: "complete",
+            text: finalOutputText
+          });
+          upsertAgentInstructionOutputTranscript({
+            payload,
+            jobId: ctx.jobId,
+            status: "complete",
+            content: finalOutputText
+          });
+        }
+      } else if (!latestOutputText) {
+        upsertAgentInstructionOutputTranscript({
+          payload,
+          jobId: ctx.jobId,
           status: "complete",
-          content: formatTurnSupervisorReviewMarkdown(result.review),
-          review: result.review,
-          completedAt: Date.now()
+          content: "Agent job completed with no assistant output."
         });
-      },
-      onFailed: async (_ctx: unknown, payload: TurnSupervisorReviewJobPayload, error: string) => {
-        upsertTurnSupervisorReviewEntry(payload, {
-          status: "error",
-          content: `Turn supervisor review failed: ${error}`,
-          completedAt: Date.now()
-        });
-      },
-      onCanceled: async (_ctx: unknown, payload: TurnSupervisorReviewJobPayload) => {
-        upsertTurnSupervisorReviewEntry(payload, {
-          status: "canceled",
-          content: "Turn supervisor review canceled before completion.",
-          completedAt: Date.now()
-        });
-      },
-      run: async (_ctx: JobRunContext, payload: TurnSupervisorReviewJobPayload) => generateTurnSupervisorReviewForJob(payload)
-    });
-  }
+      }
+
+      reconcileAgentInstructionSupplementalStreamingEntries({
+        payload,
+        terminalStatus: "complete"
+      });
+
+      return finalOutputText ? { ...result, outputText: finalOutputText } : result;
+    },
+    onFailed: async (_ctx: JobRunContext, payload: AgentInstructionJobPayload, error: string, jobId: string) => {
+      upsertAgentInstructionOutputTranscript({
+        payload,
+        jobId,
+        status: "error",
+        content: `Agent job failed: ${error}`
+      });
+      reconcileAgentInstructionSupplementalStreamingEntries({
+        payload,
+        terminalStatus: "error",
+        errorMessage: error
+      });
+    },
+    onCanceled: async (_ctx: JobRunContext, payload: AgentInstructionJobPayload, jobId: string) => {
+      upsertAgentInstructionOutputTranscript({
+        payload,
+        jobId,
+        status: "canceled",
+        content: "Agent job canceled before completion."
+      });
+      reconcileAgentInstructionSupplementalStreamingEntries({
+        payload,
+        terminalStatus: "canceled"
+      });
+    }
+  });
 
   return createJobDefinitionsRegistry(definitions);
 }
@@ -6091,7 +5499,14 @@ function currentAuthStatus(): AuthStatus {
 }
 
 function isIncludeTurnsUnavailableError(error: unknown): boolean {
-  return error instanceof Error && error.message.includes("includeTurns is unavailable before first user message");
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("includeturns is unavailable before first user message") ||
+    (message.includes("not materialized yet") && message.includes("includeturns"))
+  );
 }
 
 function buildApprovalSummary(method: ApprovalMethod, params: Record<string, unknown>): string {
@@ -6207,15 +5622,17 @@ function toTurnSandboxPolicy(
   mode: DefaultSandboxMode,
   networkAccess: NetworkAccess = "restricted"
 ): { type: "readOnly" | "workspaceWrite" | "dangerFullAccess"; networkAccess?: boolean } {
+  const networkAccessEnabled = networkAccess === "enabled";
+
   if (mode === "read-only") {
-    return { type: "readOnly" };
+    return networkAccessEnabled ? { type: "readOnly", networkAccess: true } : { type: "readOnly" };
   }
 
   if (mode === "workspace-write") {
-    return { type: "workspaceWrite", networkAccess: networkAccess === "enabled" };
+    return { type: "workspaceWrite", networkAccess: networkAccessEnabled };
   }
 
-  return { type: "dangerFullAccess" };
+  return networkAccessEnabled ? { type: "dangerFullAccess", networkAccess: true } : { type: "dangerFullAccess" };
 }
 
 function listPendingApprovalRecordsByThread(threadId: string): Array<PendingApprovalRecord> {
@@ -6257,9 +5674,10 @@ function clearPendingApprovalsForTurn(threadId: string, turnId: string): void {
   }
 }
 
-supervisor.on("notification", (notification: JsonRpcNotification) => {
+codexRuntime.on("notification", (notification: JsonRpcNotification) => {
   const threadId = extractThreadId(notification.params);
-  if (threadId && (suggestionThreadIds.has(threadId) || isSuggestionHelperSession(threadId) || isSystemOwnedSession(threadId))) {
+  observeRuntimeTurnNotification(notification, threadId);
+  if (threadId && isSystemOwnedSession(threadId)) {
     return;
   }
   if (threadId && isSessionPurged(threadId)) {
@@ -6331,7 +5749,7 @@ supervisor.on("notification", (notification: JsonRpcNotification) => {
         clearPendingToolInputsForTurn(params.threadId, params.turn.id);
 
         if (notification.method === "turn/completed") {
-          enqueueTurnSupervisorPostProcessing(params.threadId, params.turn.id);
+          maybeEmitTurnCompletedAgentEvent(params.threadId, params.turn.id);
         }
       }
     }
@@ -6370,69 +5788,6 @@ supervisor.on("notification", (notification: JsonRpcNotification) => {
     }
     upsertSupplementalTranscriptEntry(threadId, transcriptEntry);
 
-    if (notification.method === "item/completed" && item.type === "fileChange" && orchestratorQueue) {
-      const explainPayload = buildFileChangeExplainJobPayload({
-        threadId,
-        turnId,
-        itemId: item.id,
-        item
-      });
-      if (explainPayload) {
-        void orchestratorQueue
-          .enqueue({
-            type: "file_change_explain",
-            projectId: explainPayload.projectId,
-            sourceSessionId: threadId,
-            payload: explainPayload
-          })
-          .catch((error) => {
-            app.log.warn(
-              {
-                error,
-                threadId,
-                turnId,
-                itemId: item.id
-              },
-              "failed to enqueue file-change explainability job"
-            );
-          });
-      }
-
-      const supervisorPayload = buildFileChangeSupervisorInsightJobPayload({
-        threadId,
-        turnId,
-        itemId: item.id,
-        item,
-        sourceEvent: "item_completed"
-      });
-      if (supervisorPayload && env.ORCHESTRATOR_SUPERVISOR_INSIGHT_ENABLED) {
-        markSupervisorInsightApplied({
-          projectId: supervisorPayload.projectId,
-          turnId: supervisorPayload.turnId,
-          itemId: supervisorPayload.itemId,
-          threadId: supervisorPayload.threadId
-        });
-
-        void orchestratorQueue
-          .enqueue({
-            type: "file_change_supervisor_insight",
-            projectId: supervisorPayload.projectId,
-            sourceSessionId: threadId,
-            payload: supervisorPayload
-          })
-          .catch((error) => {
-            app.log.warn(
-              {
-                error,
-                threadId,
-                turnId,
-                itemId: item.id
-              },
-              "failed to enqueue file-change supervisor insight job"
-            );
-          });
-      }
-    }
   }
 
   if (notification.method === "thread/tokenUsage/updated") {
@@ -6462,19 +5817,16 @@ supervisor.on("notification", (notification: JsonRpcNotification) => {
   publishToSockets("notification", notification, threadId);
 });
 
-supervisor.on("serverRequest", (serverRequest: JsonRpcServerRequest) => {
+codexRuntime.on("serverRequest", (serverRequest: JsonRpcServerRequest) => {
   const requestThreadId = extractThreadId(serverRequest.params);
-  if (
-    requestThreadId &&
-    (suggestionThreadIds.has(requestThreadId) || isSuggestionHelperSession(requestThreadId) || isSystemOwnedSession(requestThreadId))
-  ) {
+  if (requestThreadId && isSystemOwnedSession(requestThreadId)) {
     const approval = createPendingApproval(serverRequest);
     if (approval) {
       const payload = approvalDecisionPayload(approval, "decline", "turn");
-      void supervisor
+      void codexRuntime
         .respond(serverRequest.id, payload)
         .catch((error) => {
-          app.log.warn({ error, threadId: requestThreadId }, "failed to decline suggestion helper approval request");
+          app.log.warn({ error, threadId: requestThreadId }, "failed to decline system session approval request");
         });
       return;
     }
@@ -6484,26 +5836,26 @@ supervisor.on("serverRequest", (serverRequest: JsonRpcServerRequest) => {
       const payload = toolUserInputResponsePayload({
         decision: "cancel"
       });
-      void supervisor
+      void codexRuntime
         .respond(serverRequest.id, payload)
         .catch((error) => {
-          app.log.warn({ error, threadId: requestThreadId }, "failed to cancel suggestion helper tool input request");
+          app.log.warn({ error, threadId: requestThreadId }, "failed to cancel system session tool input request");
         });
       return;
     }
 
-    void supervisor
+    void codexRuntime
       .respondError(serverRequest.id, {
         code: -32600,
-        message: "unsupported helper-thread server request"
+        message: "unsupported system-session server request"
       })
       .catch((error) => {
-        app.log.warn({ error, threadId: requestThreadId }, "failed to reject server request for suggestion helper thread");
+        app.log.warn({ error, threadId: requestThreadId }, "failed to reject server request for system-owned session");
       });
     return;
   }
   if (requestThreadId && isSessionPurged(requestThreadId)) {
-    void supervisor
+    void codexRuntime
       .respondError(serverRequest.id, {
         code: -32600,
         message: `thread ${requestThreadId} is deleted`
@@ -6520,8 +5872,18 @@ supervisor.on("serverRequest", (serverRequest: JsonRpcServerRequest) => {
     pendingApprovals.set(approval.approvalId, approval);
     upsertSupplementalTranscriptEntry(approval.threadId, approvalToTranscriptEntry(approval));
     publishToSockets("approval", toPublicApproval(approval), approval.threadId);
-    enqueueFileChangeExplainabilityFromApproval(approval, "approval_request");
-    enqueueFileChangeSupervisorInsightFromApproval(approval, "approval_request");
+    void enqueueFileChangeReviewEventFromApproval(approval, "approval_request").catch((error) => {
+      app.log.warn(
+        {
+          error,
+          threadId: approval.threadId,
+          turnId: approval.turnId,
+          itemId: approval.itemId,
+          approvalId: approval.approvalId
+        },
+        "failed to enqueue file-change review event from approval request"
+      );
+    });
 
     return;
   }
@@ -6536,7 +5898,7 @@ supervisor.on("serverRequest", (serverRequest: JsonRpcServerRequest) => {
 
   publishToSockets("server_request", serverRequest, requestThreadId);
 
-  void supervisor
+  void codexRuntime
     .respondError(serverRequest.id, {
       code: -32601,
       message: `client does not support server-initiated method: ${serverRequest.method}`
@@ -6607,7 +5969,7 @@ app.get("/api/health", async () => {
   return {
     status: "ok",
     service: "api",
-    codex: supervisor.status(),
+    codex: codexRuntime.status(),
     orchestratorQueue: queueStats
       ? {
           enabled: true,
@@ -6646,7 +6008,7 @@ app.get("/api/capabilities", async (request) => {
   return {
     status: "ok",
     runtime: {
-      initialized: supervisor.status().initialized,
+      initialized: codexRuntime.status().initialized,
       capabilitiesLastUpdatedAt
     },
     methods,
@@ -6658,7 +6020,7 @@ app.get("/api/capabilities", async (request) => {
 app.get("/api/features/experimental", async (request, reply) => {
   const query = listQuerySchema.parse(request.query);
   try {
-    const response = await supervisor.call<{ data: Array<Record<string, unknown>>; nextCursor: string | null }>(
+    const response = await codexRuntime.call<{ data: Array<Record<string, unknown>>; nextCursor: string | null }>(
       "experimentalFeature/list",
       {
         limit: query.limit ?? 100,
@@ -6676,7 +6038,7 @@ app.get("/api/features/experimental", async (request, reply) => {
 app.get("/api/collaboration/modes", async (request, reply) => {
   const query = listQuerySchema.parse(request.query);
   try {
-    const response = await supervisor.call<{ data: Array<Record<string, unknown>>; nextCursor?: string | null }>(
+    const response = await codexRuntime.call<{ data: Array<Record<string, unknown>>; nextCursor?: string | null }>(
       "collaborationMode/list",
       {
         limit: query.limit ?? 100,
@@ -6697,7 +6059,7 @@ app.get("/api/collaboration/modes", async (request, reply) => {
 app.get("/api/apps", async (request, reply) => {
   const query = appsQuerySchema.parse(request.query);
   try {
-    const response = await supervisor.call<{ data: Array<Record<string, unknown>>; nextCursor: string | null }>("app/list", {
+    const response = await codexRuntime.call<{ data: Array<Record<string, unknown>>; nextCursor: string | null }>("app/list", {
       limit: query.limit ?? 100,
       cursor: query.cursor ?? null,
       threadId: query.threadId ?? null,
@@ -6714,7 +6076,7 @@ app.get("/api/apps", async (request, reply) => {
 app.get("/api/skills", async (request, reply) => {
   const query = skillsListQuerySchema.parse(request.query);
   try {
-    const response = await supervisor.call<{ data: Array<Record<string, unknown>>; nextCursor?: string | null }>("skills/list", {
+    const response = await codexRuntime.call<{ data: Array<Record<string, unknown>>; nextCursor?: string | null }>("skills/list", {
       forceReload: query.forceReload === "true",
       cwds: query.cwd ? [query.cwd] : undefined
     });
@@ -6732,7 +6094,7 @@ app.get("/api/skills", async (request, reply) => {
 app.post("/api/skills/config", async (request, reply) => {
   const body = skillsConfigWriteBodySchema.parse(request.body);
   try {
-    const response = await supervisor.call("skills/config/write", {
+    const response = await codexRuntime.call("skills/config/write", {
       path: body.path,
       enabled: body.enabled
     });
@@ -6750,7 +6112,7 @@ app.post("/api/skills/config", async (request, reply) => {
 
 app.get("/api/skills/remote", async (_request, reply) => {
   try {
-    const response = await supervisor.call("skills/remote/read", {});
+    const response = await codexRuntime.call("skills/remote/read", {});
     return {
       status: "ok",
       result: response
@@ -6765,7 +6127,7 @@ app.get("/api/skills/remote", async (_request, reply) => {
 app.post("/api/skills/remote", async (request, reply) => {
   const body = skillsRemoteWriteBodySchema.parse(request.body);
   try {
-    const response = await supervisor.call("skills/remote/write", {
+    const response = await codexRuntime.call("skills/remote/write", {
       hazelnutId: body.hazelnutId,
       isPreload: body.isPreload
     });
@@ -6783,7 +6145,7 @@ app.post("/api/skills/remote", async (request, reply) => {
 
 app.post("/api/mcp/reload", async (_request, reply) => {
   try {
-    const response = await supervisor.call("config/mcpServer/reload", undefined);
+    const response = await codexRuntime.call("config/mcpServer/reload", undefined);
     return {
       status: "ok",
       result: response
@@ -6799,7 +6161,7 @@ app.post("/api/mcp/servers/:serverName/oauth/login", async (request, reply) => {
   const params = z.object({ serverName: z.string().min(1) }).parse(request.params);
   const body = mcpOauthLoginBodySchema.parse(request.body ?? {});
   try {
-    const response = await supervisor.call("mcpServer/oauth/login", {
+    const response = await codexRuntime.call("mcpServer/oauth/login", {
       name: params.serverName,
       scopes: body.scopes ?? null,
       timeoutSecs: body.timeoutSecs ?? null
@@ -6818,7 +6180,7 @@ app.post("/api/mcp/servers/:serverName/oauth/login", async (request, reply) => {
 
 app.get("/api/account", async (_request, reply) => {
   try {
-    const response = await supervisor.call("account/read", {});
+    const response = await codexRuntime.call("account/read", {});
     return response;
   } catch (error) {
     return sendMappedCodexError(reply, error, "failed to read account state", {
@@ -6830,7 +6192,7 @@ app.get("/api/account", async (_request, reply) => {
 app.post("/api/account/login/start", async (request, reply) => {
   const body = accountLoginStartBodySchema.parse(request.body);
   try {
-    const response = await supervisor.call("account/login/start", {
+    const response = await codexRuntime.call("account/login/start", {
       ...(body.type === "apiKey"
         ? {
             type: "apiKey",
@@ -6862,7 +6224,7 @@ app.post("/api/account/login/start", async (request, reply) => {
 app.post("/api/account/login/cancel", async (request, reply) => {
   const body = accountLoginCancelBodySchema.parse(request.body);
   try {
-    const response = await supervisor.call("account/login/cancel", {
+    const response = await codexRuntime.call("account/login/cancel", {
       loginId: body.loginId
     });
     return {
@@ -6879,7 +6241,7 @@ app.post("/api/account/login/cancel", async (request, reply) => {
 
 app.post("/api/account/logout", async (_request, reply) => {
   try {
-    const response = await supervisor.call("account/logout", undefined);
+    const response = await codexRuntime.call("account/logout", undefined);
     return {
       status: "ok",
       result: response
@@ -6893,7 +6255,7 @@ app.post("/api/account/logout", async (_request, reply) => {
 
 app.get("/api/account/rate-limits", async (_request, reply) => {
   try {
-    const response = await supervisor.call("account/rateLimits/read", undefined);
+    const response = await codexRuntime.call("account/rateLimits/read", undefined);
     return response;
   } catch (error) {
     return sendMappedCodexError(reply, error, "failed to read rate limits", {
@@ -6905,7 +6267,7 @@ app.get("/api/account/rate-limits", async (_request, reply) => {
 app.get("/api/config", async (request, reply) => {
   const query = configReadQuerySchema.parse(request.query);
   try {
-    const response = await supervisor.call("config/read", {
+    const response = await codexRuntime.call("config/read", {
       cwd: query.cwd ?? null,
       includeLayers: query.includeLayers === "true"
     });
@@ -6919,7 +6281,7 @@ app.get("/api/config", async (request, reply) => {
 
 app.get("/api/config/requirements", async (_request, reply) => {
   try {
-    const response = await supervisor.call("configRequirements/read", undefined);
+    const response = await codexRuntime.call("configRequirements/read", undefined);
     return response;
   } catch (error) {
     return sendMappedCodexError(reply, error, "failed to read config requirements", {
@@ -6931,7 +6293,7 @@ app.get("/api/config/requirements", async (_request, reply) => {
 app.post("/api/config/value", async (request, reply) => {
   const body = configValueWriteBodySchema.parse(request.body);
   try {
-    const response = await supervisor.call("config/value/write", {
+    const response = await codexRuntime.call("config/value/write", {
       keyPath: body.keyPath,
       mergeStrategy: body.mergeStrategy,
       value: body.value,
@@ -6953,7 +6315,7 @@ app.post("/api/config/value", async (request, reply) => {
 app.post("/api/config/batch", async (request, reply) => {
   const body = configBatchWriteBodySchema.parse(request.body);
   try {
-    const response = await supervisor.call("config/batchWrite", {
+    const response = await codexRuntime.call("config/batchWrite", {
       edits: body.edits,
       expectedVersion: body.expectedVersion ?? null,
       filePath: body.filePath ?? null
@@ -6972,7 +6334,7 @@ app.post("/api/config/batch", async (request, reply) => {
 app.post("/api/commands/exec", async (request, reply) => {
   const body = commandExecBodySchema.parse(request.body);
   try {
-    const response = await supervisor.call("command/exec", {
+    const response = await codexRuntime.call("command/exec", {
       command: body.command,
       cwd: body.cwd ?? null,
       timeoutMs: body.timeoutMs ?? null,
@@ -6993,7 +6355,7 @@ app.post("/api/commands/exec", async (request, reply) => {
 app.post("/api/feedback", async (request, reply) => {
   const body = feedbackUploadBodySchema.parse(request.body);
   try {
-    const response = await supervisor.call("feedback/upload", {
+    const response = await codexRuntime.call("feedback/upload", {
       classification: body.classification,
       includeLogs: body.includeLogs,
       reason: body.reason ?? null,
@@ -7013,7 +6375,7 @@ app.post("/api/feedback", async (request, reply) => {
 app.get("/api/models", async (request) => {
   const query = listQuerySchema.parse(request.query);
 
-  const response = await supervisor.call<{ data: Array<Record<string, unknown>>; nextCursor: string | null }>(
+  const response = await codexRuntime.call<{ data: Array<Record<string, unknown>>; nextCursor: string | null }>(
     "model/list",
     {
       limit: query.limit ?? 100,
@@ -7027,7 +6389,7 @@ app.get("/api/models", async (request) => {
 app.get("/api/mcp/servers", async (request) => {
   const query = listQuerySchema.parse(request.query);
 
-  const response = await supervisor.call<{ data: Array<Record<string, unknown>>; nextCursor: string | null }>(
+  const response = await codexRuntime.call<{ data: Array<Record<string, unknown>>; nextCursor: string | null }>(
     "mcpServerStatus/list",
     {
       limit: query.limit ?? 100,
@@ -7115,12 +6477,9 @@ app.post("/api/orchestrator/jobs/:jobId/cancel", async (request, reply) => {
   };
 });
 
-app.get("/api/projects", async () => {
-  await ensureProjectOrchestrationSessions();
-  return {
-    data: listProjectSummaries()
-  };
-});
+app.get("/api/projects", async () => ({
+  data: listProjectSummaries()
+}));
 
 app.post("/api/projects", async (request, reply) => {
   const body = upsertProjectBodySchema.parse(request.body);
@@ -7143,45 +6502,14 @@ app.post("/api/projects", async (request, reply) => {
     updatedAt: now
   };
   sessionMetadata.projects[projectId] = project;
-
-  let orchestrationThread: CodexThread | null = null;
-  try {
-    orchestrationThread = await createProjectOrchestrationSession(projectId, project.name, project.workingDirectory);
-  } catch (error) {
-    delete sessionMetadata.projects[projectId];
-    delete sessionMetadata.projectOrchestratorSessionById[projectId];
-    if (orchestrationThread) {
-      delete sessionMetadata.sessionProjectById[orchestrationThread.id];
-      if (sessionMetadata.titles[orchestrationThread.id]) {
-        delete sessionMetadata.titles[orchestrationThread.id];
-      }
-      void hardDeleteSession(orchestrationThread.id).catch((cleanupError) => {
-        app.log.warn({ error: cleanupError, threadId: orchestrationThread?.id }, "failed to cleanup orchestration session");
-      });
-    }
-    return sendMappedCodexError(reply, error, "failed to create project orchestration session", {
-      method: "thread/start",
-      projectId
-    });
-  }
+  await persistSessionMetadata();
 
   const payload = toProjectSummary(projectId, project);
   publishToSockets("project_upserted", { project: payload }, undefined, { broadcastToAll: true });
-  if (orchestrationThread) {
-    publishToSockets(
-      "session_project_updated",
-      {
-        sessionId: orchestrationThread.id,
-        projectId
-      },
-      orchestrationThread.id,
-      { broadcastToAll: true }
-    );
-  }
   return {
     status: "ok",
     project: payload,
-    orchestrationSession: orchestrationThread ? toSessionSummary(orchestrationThread, false) : null
+    orchestrationSession: null
   };
 });
 
@@ -7210,82 +6538,27 @@ app.post("/api/projects/:projectId/rename", async (request, reply) => {
   const nextName = body.name.trim();
   const nextWorkingDirectory =
     body.workingDirectory === undefined ? current.workingDirectory : normalizeProjectWorkingDirectory(body.workingDirectory);
-  const previousName = current.name;
   const shouldUpdateName = current.name !== nextName;
   const shouldUpdateWorkingDirectory = current.workingDirectory !== nextWorkingDirectory;
 
   if (shouldUpdateName || shouldUpdateWorkingDirectory) {
-    let replacementOrchestratorThread: CodexThread | null = null;
-    const previousOrchestratorSessionId = sessionMetadata.projectOrchestratorSessionById[params.projectId] ?? null;
-    if (shouldUpdateWorkingDirectory) {
-      try {
-        replacementOrchestratorThread = await createProjectOrchestrationSession(params.projectId, nextName, nextWorkingDirectory);
-      } catch (error) {
-        return sendMappedCodexError(reply, error, "failed to update project orchestration session", {
-          method: "thread/start",
-          projectId: params.projectId
-        });
-      }
-    }
-
     current.name = nextName;
     current.workingDirectory = nextWorkingDirectory;
     current.updatedAt = new Date().toISOString();
-    const orchestratorSessionId = sessionMetadata.projectOrchestratorSessionById[params.projectId];
-    if (
-      shouldUpdateName &&
-      !shouldUpdateWorkingDirectory &&
-      typeof orchestratorSessionId === "string" &&
-      orchestratorSessionId.trim().length > 0
-    ) {
-      const currentStoredTitle = sessionMetadata.titles[orchestratorSessionId];
-      const expectedPreviousTitle = buildProjectOrchestratorTitle(previousName);
-      if (!currentStoredTitle || currentStoredTitle === expectedPreviousTitle) {
-        await setSessionTitle(orchestratorSessionId, buildProjectOrchestratorTitle(nextName));
-      }
-    }
-    await persistSessionMetadata();
 
-    if (replacementOrchestratorThread) {
-      publishToSockets(
-        "session_project_updated",
-        {
-          sessionId: replacementOrchestratorThread.id,
-          projectId: params.projectId
-        },
-        replacementOrchestratorThread.id,
-        { broadcastToAll: true }
-      );
-    }
-
-    if (
-      replacementOrchestratorThread &&
-      typeof previousOrchestratorSessionId === "string" &&
-      previousOrchestratorSessionId.trim().length > 0 &&
-      previousOrchestratorSessionId !== replacementOrchestratorThread.id
-    ) {
-      try {
-        await hardDeleteSession(previousOrchestratorSessionId);
-      } catch (error) {
-        const detached = setSessionProjectAssignment(previousOrchestratorSessionId, null);
-        if (detached) {
-          await persistSessionMetadata();
-          publishToSockets(
-            "session_project_updated",
-            {
-              sessionId: previousOrchestratorSessionId,
-              projectId: null
-            },
-            previousOrchestratorSessionId,
-            { broadcastToAll: true }
-          );
+    if (shouldUpdateWorkingDirectory) {
+      const agentSessionIds = listProjectAgentSessionIds(params.projectId);
+      for (const sessionId of agentSessionIds) {
+        try {
+          await hardDeleteSession(sessionId);
+        } catch (error) {
+          app.log.warn({ error, projectId: params.projectId, sessionId }, "failed to clean up project agent session");
         }
-        app.log.warn(
-          { error, projectId: params.projectId, sessionId: previousOrchestratorSessionId, detached },
-          "failed to cleanup previous project orchestration session after working directory update; detached assignment fallback applied"
-        );
       }
+      clearProjectAgentSessionMappingsForProject(params.projectId);
     }
+
+    await persistSessionMetadata();
   }
 
   const payload = toProjectSummary(params.projectId, current);
@@ -7329,30 +6602,26 @@ app.delete("/api/projects/:projectId", async (request, reply) => {
     }
   }
 
-  const orchestrationSessionId = sessionMetadata.projectOrchestratorSessionById[params.projectId] ?? null;
-  const blockingSessionIds = orchestrationSessionId
-    ? existingSessionIds.filter((sessionId) => sessionId !== orchestrationSessionId)
-    : existingSessionIds;
-
-  if (blockingSessionIds.length > 0) {
+  if (existingSessionIds.length > 0) {
     reply.code(409);
     return {
       status: "project_not_empty",
       projectId: params.projectId,
-      sessionCount: blockingSessionIds.length
+      sessionCount: existingSessionIds.length
     };
   }
 
-  if (orchestrationSessionId) {
-    const outcome = await hardDeleteSession(orchestrationSessionId);
+  const agentSessionIds = listProjectAgentSessionIds(params.projectId);
+  for (const sessionId of agentSessionIds) {
+    const outcome = await hardDeleteSession(sessionId);
     if (outcome.status === "not_found") {
-      setSessionProjectAssignment(orchestrationSessionId, null);
-      setSessionTitleOverride(orchestrationSessionId, null);
+      setSessionProjectAssignment(sessionId, null);
+      setSessionTitleOverride(sessionId, null);
     }
   }
 
   delete sessionMetadata.projects[params.projectId];
-  delete sessionMetadata.projectOrchestratorSessionById[params.projectId];
+  clearProjectAgentSessionMappingsForProject(params.projectId);
   await persistSessionMetadata();
   publishToSockets(
     "project_deleted",
@@ -7411,7 +6680,7 @@ app.post("/api/projects/:projectId/chats/move-all", async (request, reply) => {
 
     for (const sessionId of classification.archivableSessionIds) {
       try {
-        await supervisor.call("thread/archive", {
+        await codexRuntime.call("thread/archive", {
           threadId: sessionId
         });
         archivedSessionCount += 1;
@@ -7517,22 +6786,18 @@ app.post("/api/projects/:projectId/chats/delete-all", async (request, reply) => 
 });
 
 app.get("/api/sessions", async (request) => {
-  await cleanupSuggestionHelperSessions();
-  await ensureProjectOrchestrationSessions();
   const query = listSessionsQuerySchema.parse(request.query);
   const archived = query.archived === "true";
   const cursor = query.cursor;
   const limit = query.limit ?? 100;
 
-  const response = await supervisor.call<{ data: Array<CodexThread>; nextCursor: string | null }>("thread/list", {
+  const response = await codexRuntime.call<{ data: Array<CodexThread>; nextCursor: string | null }>("thread/list", {
     limit,
     archived,
     cursor
   });
 
-  const threads = response.data.filter(
-    (thread) => !isSessionPurged(thread.id) && !isSuggestionHelperSession(thread.id) && !isSystemOwnedSession(thread.id)
-  );
+  const threads = response.data.filter((thread) => !isSessionPurged(thread.id) && !isSystemOwnedSession(thread.id));
   const materializedByThreadId = new Map<string, boolean>();
   for (const thread of threads) {
     materializedByThreadId.set(thread.id, true);
@@ -7540,21 +6805,17 @@ app.get("/api/sessions", async (request) => {
 
   if (!archived && !cursor) {
     try {
-      const loaded = await supervisor.call<{ data: Array<string> }>("thread/loaded/list", {});
+      const loaded = await codexRuntime.call<{ data: Array<string> }>("thread/loaded/list", {});
       const existingIds = new Set(threads.map((thread) => thread.id));
       const missingThreadIds = loaded.data.filter(
-        (threadId) =>
-          !existingIds.has(threadId) &&
-          !isSessionPurged(threadId) &&
-          !isSuggestionHelperSession(threadId) &&
-          !isSystemOwnedSession(threadId)
+        (threadId) => !existingIds.has(threadId) && !isSessionPurged(threadId) && !isSystemOwnedSession(threadId)
       );
 
       if (missingThreadIds.length > 0) {
         const loadedThreads = await Promise.all(
           missingThreadIds.map(async (threadId) => {
             try {
-              const readWithTurns = await supervisor.call<{ thread: CodexThread }>("thread/read", {
+              const readWithTurns = await codexRuntime.call<{ thread: CodexThread }>("thread/read", {
                 threadId,
                 includeTurns: true
               });
@@ -7568,7 +6829,7 @@ app.get("/api/sessions", async (request) => {
                 return null;
               }
 
-              const readWithoutTurns = await supervisor.call<{ thread: CodexThread }>("thread/read", {
+              const readWithoutTurns = await codexRuntime.call<{ thread: CodexThread }>("thread/read", {
                 threadId,
                 includeTurns: false
               });
@@ -7660,7 +6921,7 @@ app.get("/api/sessions/:sessionId", async (request, reply) => {
   let materialized = true;
 
   try {
-    response = await supervisor.call<{ thread: CodexThread }>("thread/read", {
+    response = await codexRuntime.call<{ thread: CodexThread }>("thread/read", {
       threadId: params.sessionId,
       includeTurns: true
     });
@@ -7670,7 +6931,7 @@ app.get("/api/sessions/:sessionId", async (request, reply) => {
       throw error;
     }
 
-    response = await supervisor.call<{ thread: CodexThread }>("thread/read", {
+    response = await codexRuntime.call<{ thread: CodexThread }>("thread/read", {
       threadId: params.sessionId,
       includeTurns: false
     });
@@ -7684,6 +6945,50 @@ app.get("/api/sessions/:sessionId", async (request, reply) => {
     session: toSessionSummary(response.thread, materialized),
     thread: response.thread,
     transcript
+  };
+});
+
+app.post("/api/sessions/:sessionId/transcript/upsert", async (request, reply) => {
+  const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
+  if (isSessionPurged(params.sessionId)) {
+    reply.code(410);
+    return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  const exists = await sessionExistsForProjectAssignment(params.sessionId);
+  if (!exists) {
+    reply.code(404);
+    return {
+      status: "not_found",
+      sessionId: params.sessionId
+    };
+  }
+
+  const body = transcriptUpsertBodySchema.parse(request.body);
+  const entry: TranscriptEntry = {
+    messageId: body.messageId,
+    turnId: body.turnId,
+    role: body.role,
+    type: body.type,
+    content: body.content,
+    ...(typeof body.details === "string" ? { details: body.details } : {}),
+    ...(typeof body.startedAt === "number" ? { startedAt: body.startedAt } : {}),
+    ...(typeof body.completedAt === "number" ? { completedAt: body.completedAt } : {}),
+    status: body.status
+  };
+
+  upsertSupplementalTranscriptEntry(params.sessionId, entry);
+  publishTranscriptUpdated(params.sessionId, {
+    turnId: entry.turnId,
+    messageId: entry.messageId,
+    type: entry.type,
+    entry
+  });
+
+  return {
+    status: "ok",
+    sessionId: params.sessionId,
+    entry
   };
 });
 
@@ -7737,7 +7042,7 @@ app.post("/api/sessions/:sessionId/compact", async (request, reply) => {
   }
 
   try {
-    const response = await supervisor.call("thread/compact/start", {
+    const response = await codexRuntime.call("thread/compact/start", {
       threadId: params.sessionId
     });
     return {
@@ -7767,7 +7072,7 @@ app.post("/api/sessions/:sessionId/rollback", async (request, reply) => {
   const body = rollbackBodySchema.parse(request.body);
 
   try {
-    const response = await supervisor.call("thread/rollback", {
+    const response = await codexRuntime.call("thread/rollback", {
       threadId: params.sessionId,
       numTurns: body.numTurns
     });
@@ -7799,7 +7104,7 @@ app.post("/api/sessions/:sessionId/background-terminals/clean", async (request, 
   }
 
   try {
-    const response = await supervisor.call("thread/backgroundTerminals/clean", {
+    const response = await codexRuntime.call("thread/backgroundTerminals/clean", {
       threadId: params.sessionId
     });
     return {
@@ -7839,7 +7144,7 @@ app.post("/api/sessions/:sessionId/review", async (request, reply) => {
           : { type: "custom", instructions: body.instructions ?? "Review this thread's current changes." };
 
   try {
-    const response = await supervisor.call("review/start", {
+    const response = await codexRuntime.call("review/start", {
       threadId: params.sessionId,
       delivery: body.delivery ?? "inline",
       target
@@ -7871,7 +7176,7 @@ app.post("/api/sessions/:sessionId/turns/:turnId/steer", async (request, reply) 
   const body = steerBodySchema.parse(request.body);
 
   try {
-    const response = await supervisor.call("turn/steer", {
+    const response = await codexRuntime.call("turn/steer", {
       threadId: params.sessionId,
       expectedTurnId: params.turnId,
       input: [
@@ -7915,7 +7220,7 @@ app.post("/api/sessions/:sessionId/rename", async (request, reply) => {
   let response: { thread: CodexThread };
   let materialized = true;
   try {
-    response = await supervisor.call<{ thread: CodexThread }>("thread/read", {
+    response = await codexRuntime.call<{ thread: CodexThread }>("thread/read", {
       threadId: params.sessionId,
       includeTurns: true
     });
@@ -7924,7 +7229,7 @@ app.post("/api/sessions/:sessionId/rename", async (request, reply) => {
       throw error;
     }
 
-    response = await supervisor.call<{ thread: CodexThread }>("thread/read", {
+    response = await codexRuntime.call<{ thread: CodexThread }>("thread/read", {
       threadId: params.sessionId,
       includeTurns: false
     });
@@ -8001,7 +7306,7 @@ app.post("/api/sessions/:sessionId/archive", async (request, reply) => {
   }
 
   try {
-    await supervisor.call("thread/archive", {
+    await codexRuntime.call("thread/archive", {
       threadId: params.sessionId
     });
   } catch (error) {
@@ -8034,7 +7339,7 @@ app.post("/api/sessions/:sessionId/unarchive", async (request, reply) => {
     return systemSessionPayload(params.sessionId);
   }
 
-  const response = await supervisor.call<{ thread: CodexThread }>("thread/unarchive", {
+  const response = await codexRuntime.call<{ thread: CodexThread }>("thread/unarchive", {
     threadId: params.sessionId
   });
 
@@ -8087,8 +7392,18 @@ app.get("/api/sessions/:sessionId/approvals", async (request, reply) => {
 
   const approvals = listPendingApprovalRecordsByThread(params.sessionId);
   for (const approval of approvals) {
-    enqueueFileChangeExplainabilityFromApproval(approval, "approvals_reconcile");
-    enqueueFileChangeSupervisorInsightFromApproval(approval, "approvals_reconcile");
+    void enqueueFileChangeReviewEventFromApproval(approval, "approvals_reconcile").catch((error) => {
+      app.log.warn(
+        {
+          error,
+          threadId: approval.threadId,
+          turnId: approval.turnId,
+          itemId: approval.itemId,
+          approvalId: approval.approvalId
+        },
+        "failed to enqueue file-change review event during approvals reconcile"
+      );
+    });
   }
 
   return {
@@ -8277,7 +7592,7 @@ app.post("/api/sessions/:sessionId/approval-policy", async (request, reply) => {
   };
 });
 
-app.post("/api/sessions/:sessionId/suggested-reply/jobs", async (request, reply) => {
+app.post("/api/sessions/:sessionId/suggested-request/jobs", async (request, reply) => {
   const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
   if (isSessionPurged(params.sessionId)) {
     reply.code(410);
@@ -8313,18 +7628,13 @@ app.post("/api/sessions/:sessionId/suggested-reply/jobs", async (request, reply)
   const requestKey = randomUUID();
 
   try {
-    const queued = await queue.enqueue({
-      type: "suggest_reply",
+    const queued = await enqueueSuggestedReplyViaAgentEvent({
+      sessionId: params.sessionId,
       projectId,
-      sourceSessionId: params.sessionId,
-      payload: {
-        sessionId: params.sessionId,
-        projectId,
-        requestKey,
-        model: body?.model,
-        effort: body?.effort,
-        draft: body?.draft
-      }
+      requestKey,
+      model: body?.model,
+      effort: body?.effort,
+      draft: body?.draft
     });
 
     reply.code(202);
@@ -8340,7 +7650,7 @@ app.post("/api/sessions/:sessionId/suggested-reply/jobs", async (request, reply)
   }
 });
 
-app.post("/api/sessions/:sessionId/suggested-reply", async (request, reply) => {
+app.post("/api/sessions/:sessionId/suggested-request", async (request, reply) => {
   const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
   if (isSessionPurged(params.sessionId)) {
     reply.code(410);
@@ -8377,24 +7687,19 @@ app.post("/api/sessions/:sessionId/suggested-reply", async (request, reply) => {
 
   let queued;
   try {
-    queued = await queue.enqueue({
-      type: "suggest_reply",
+    queued = await enqueueSuggestedReplyViaAgentEvent({
+      sessionId: params.sessionId,
       projectId,
-      sourceSessionId: params.sessionId,
-      payload: {
-        sessionId: params.sessionId,
-        projectId,
-        requestKey,
-        model: body?.model,
-        effort: body?.effort,
-        draft: body?.draft
-      }
+      requestKey,
+      model: body?.model,
+      effort: body?.effort,
+      draft: body?.draft
     });
   } catch (error) {
     return sendOrchestratorQueueError(reply, error, params.sessionId);
   }
 
-  const terminal = await queue.waitForTerminal(queued.job.id, env.ORCHESTRATOR_SUGGEST_REPLY_WAIT_MS);
+  const terminal = await queue.waitForTerminal(queued.job.id, env.ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS);
   if (!terminal) {
     reply.code(202);
     return {
@@ -8422,7 +7727,7 @@ app.post("/api/sessions/:sessionId/suggested-reply", async (request, reply) => {
     return {
       status: "no_context",
       sessionId: params.sessionId,
-      message: "No chat messages available to build a suggestion."
+      message: "No chat messages available to build a suggested request."
     };
   }
 
@@ -8470,7 +7775,7 @@ app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
   const approvalPolicy = protocolApprovalPolicyFromSessionControl(requestedControls.approvalPolicy);
 
   const startTurn = async (): Promise<{ turn: { id: string } }> =>
-    supervisor.call<{ turn: { id: string } }>("turn/start", {
+    codexRuntime.call<{ turn: { id: string } }>("turn/start", {
       threadId: params.sessionId,
       model: requestedControls.model ?? undefined,
       effort: body.effort as ReasoningEffort | undefined,
@@ -8555,7 +7860,7 @@ app.post("/api/sessions/:sessionId/interrupt", async (request, reply) => {
     };
   }
 
-  await supervisor.call("turn/interrupt", {
+  await codexRuntime.call("turn/interrupt", {
     threadId: params.sessionId,
     turnId
   });
@@ -8581,7 +7886,7 @@ app.post("/api/tool-input/:requestId/decision", async (request, reply) => {
   }
 
   try {
-    await supervisor.respond(pending.rpcId, toolUserInputResponsePayload(body));
+    await codexRuntime.respond(pending.rpcId, toolUserInputResponsePayload(body));
     upsertSupplementalTranscriptEntry(
       pending.threadId,
       toolInputResolutionToTranscriptEntry(pending, {
@@ -8630,7 +7935,7 @@ app.post("/api/approvals/:approvalId/decision", async (request, reply) => {
 
   try {
     const payload = approvalDecisionPayload(approval, body.decision, body.scope ?? "turn");
-    await supervisor.respond(approval.rpcId, payload);
+    await codexRuntime.respond(approval.rpcId, payload);
 
     upsertSupplementalTranscriptEntry(
       approval.threadId,
@@ -8674,11 +7979,6 @@ app.addHook("onClose", async () => {
     supplementalTranscriptPersistTimer = null;
   }
   await flushSupplementalTranscriptPersistence();
-  if (supervisorLedgerPersistTimer !== null) {
-    clearTimeout(supervisorLedgerPersistTimer);
-    supervisorLedgerPersistTimer = null;
-  }
-  await flushSupervisorLedgerPersistence();
 
   for (const socket of sockets) {
     try {
@@ -8691,14 +7991,17 @@ app.addHook("onClose", async () => {
   sockets.clear();
   socketThreadFilter.clear();
   activeTurnByThread.clear();
-  suggestionThreadBySession.clear();
-  suggestionThreadIds.clear();
+  fileChangeEventCountByTurn.clear();
+  agentOrientationCompletedBySession.clear();
+  runtimeObservedTurnsByKey.clear();
+  runtimeTurnSignalWaitersByKey.clear();
+  projectAgentSessionEnsureInFlightByKey.clear();
   pendingApprovals.clear();
   pendingToolUserInputs.clear();
   if (orchestratorQueue) {
     await orchestratorQueue.stop({ drainMs: 2_000 });
   }
-  await supervisor.stop();
+  await codexRuntime.stop();
 });
 
 let shuttingDown = false;
@@ -8727,14 +8030,12 @@ process.on("SIGTERM", () => {
   void shutdown("SIGTERM");
 });
 
-await supervisor.start();
+await codexRuntime.start();
 try {
   const prunedControlEntries = await pruneStaleSessionControlMetadata();
   if (prunedControlEntries > 0) {
     app.log.info({ prunedControlEntries }, "pruned stale session-control metadata entries");
   }
-  await cleanupSuggestionHelperSessions();
-  await ensureProjectOrchestrationSessions();
   if (orchestratorQueue) {
     await orchestratorQueue.start();
   }

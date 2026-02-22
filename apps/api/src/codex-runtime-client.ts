@@ -31,7 +31,7 @@ type PendingRequest = {
   timeout: NodeJS.Timeout;
 };
 
-export type CodexSupervisorOptions = {
+export type CodexRuntimeClientOptions = {
   bin: string;
   codeHome?: string;
   dataDir: string;
@@ -50,7 +50,7 @@ export type CodexStatus = {
   };
 };
 
-export class CodexSupervisor extends EventEmitter {
+export class CodexRuntimeClient extends EventEmitter {
   private child: ChildProcessWithoutNullStreams | undefined;
   private codexLogStream: WriteStream | undefined;
   private lastExit: { code: number | null; signal: NodeJS.Signals | null; at: string } | undefined;
@@ -59,7 +59,7 @@ export class CodexSupervisor extends EventEmitter {
   private stdoutLineBuffer = "";
   private initialized = false;
 
-  constructor(private readonly options: CodexSupervisorOptions) {
+  constructor(private readonly options: CodexRuntimeClientOptions) {
     super();
   }
 

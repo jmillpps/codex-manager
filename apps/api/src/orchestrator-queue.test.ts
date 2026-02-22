@@ -87,8 +87,8 @@ async function waitForState(
 
 test("single-flight dedupe returns existing job identity", async () => {
   const definitions: JobDefinitionsMap = {
-    suggest_reply: {
-      type: "suggest_reply",
+    suggest_request: {
+      type: "suggest_request",
       version: 1,
       priority: "interactive",
       payloadSchema: z.object({ key: z.string() }),
@@ -122,14 +122,14 @@ test("single-flight dedupe returns existing job identity", async () => {
   await queue.start();
 
   const first = await queue.enqueue({
-    type: "suggest_reply",
+    type: "suggest_request",
     projectId: "p1",
     sourceSessionId: "s1",
     payload: { key: "chat-1" }
   });
 
   const second = await queue.enqueue({
-    type: "suggest_reply",
+    type: "suggest_request",
     projectId: "p1",
     sourceSessionId: "s1",
     payload: { key: "chat-1" }
@@ -956,6 +956,75 @@ test("retryable failures honor backoff and eventually complete", async () => {
   assert.equal(runTimestamps.length, 2);
   assert.ok(runTimestamps[1] - runTimestamps[0] >= 90, "retry should be delayed by backoff");
   assert.equal(terminal?.attempts, 2);
+
+  await queue.stop();
+});
+
+test("custom retry delay can run immediate retry followed by linear backoff", async () => {
+  const runTimestamps: Array<number> = [];
+  let invocationCount = 0;
+
+  const definitions: JobDefinitionsMap = {
+    retry_job: {
+      type: "retry_job",
+      version: 1,
+      priority: "interactive",
+      payloadSchema: z.object({ key: z.string() }),
+      resultSchema: z.object({ ok: z.boolean() }),
+      dedupe: {
+        key: () => null,
+        mode: "none"
+      },
+      retry: {
+        maxAttempts: 4,
+        classify: (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          return message.includes("transient") ? "retryable" : "fatal";
+        },
+        baseDelayMs: 60,
+        maxDelayMs: 10_000,
+        jitter: false,
+        delayForAttempt: (attempt: number) => Math.max(0, (Math.max(1, attempt) - 1) * 60)
+      },
+      timeoutMs: 1_000,
+      cancel: {
+        strategy: "mark_canceled",
+        gracefulWaitMs: 0
+      },
+      run: async () => {
+        invocationCount += 1;
+        runTimestamps.push(Date.now());
+        if (invocationCount <= 2) {
+          throw new Error("transient network hiccup");
+        }
+        return { ok: true };
+      }
+    }
+  };
+
+  const { queue } = createQueue({
+    definitions,
+    globalConcurrency: 1
+  });
+  await queue.start();
+
+  const enqueued = await queue.enqueue({
+    type: "retry_job",
+    projectId: "p1",
+    sourceSessionId: "s1",
+    payload: { key: "x" }
+  });
+
+  const terminal = await queue.waitForTerminal(enqueued.job.id, 5_000);
+  assert.equal(terminal?.state, "completed");
+  assert.equal(invocationCount, 3);
+  assert.equal(runTimestamps.length, 3);
+
+  const immediateRetryGapMs = runTimestamps[1] - runTimestamps[0];
+  const linearRetryGapMs = runTimestamps[2] - runTimestamps[1];
+  assert.ok(immediateRetryGapMs < 80, `expected immediate retry gap < 80ms, got ${immediateRetryGapMs}ms`);
+  assert.ok(linearRetryGapMs >= 45, `expected linear retry gap >= 45ms, got ${linearRetryGapMs}ms`);
+  assert.equal(terminal?.attempts, 3);
 
   await queue.stop();
 });

@@ -62,6 +62,12 @@ type ChatMessage = {
 };
 
 type LocalSendState = "sending" | "sent" | "delivered" | "failed";
+type PendingSendAck = {
+  sessionId: string;
+  turnId: string | null;
+  messageId: string;
+  startedAt: number;
+};
 
 type MessageTiming = {
   startedAt: number;
@@ -168,6 +174,7 @@ type NotificationEnvelope = {
     | "account_updated"
     | "account_login_completed"
     | "account_rate_limits_updated"
+    | "transcript_updated"
     | "orchestrator_job_queued"
     | "orchestrator_job_started"
     | "orchestrator_job_progress"
@@ -231,7 +238,7 @@ type SessionControlsSummaryParts = {
   filesystem: SessionControlsSummaryPart;
 };
 
-type PendingSuggestReplyJob = {
+type PendingSuggestRequestJob = {
   jobId: string;
   sessionId: string;
   draftAtStart: string;
@@ -276,6 +283,7 @@ function MarkdownText({ content, className }: { content: string; className?: str
 const allReasoningEfforts: Array<ReasoningEffort> = ["none", "minimal", "low", "medium", "high", "xhigh"];
 const preferredReasoningEffortOrder: Array<ReasoningEffort> = ["xhigh", "high", "medium", "low", "minimal", "none"];
 const approvalSnapBackStartDelayMs = 60;
+const transcriptReconcileFallbackMs = 1500;
 const mobileViewportMaxWidthPx = 880;
 const mobileViewportMediaQuery = `(max-width: ${mobileViewportMaxWidthPx}px)`;
 const sessionControlApprovalPolicies: Array<SessionControlApprovalPolicy> = ["untrusted", "on-failure", "on-request", "never"];
@@ -1157,6 +1165,163 @@ function parseDetailsRecord(details?: string): Record<string, unknown> | null {
   }
 }
 
+function transcriptStatusPriority(status: TranscriptEntry["status"] | ChatMessage["status"]): number {
+  if (status === "error") {
+    return 3;
+  }
+  if (status === "canceled") {
+    return 2;
+  }
+  if (status === "complete") {
+    return 1;
+  }
+  return 0;
+}
+
+function pickRicherText(preferred?: string, fallback?: string): string | undefined {
+  const preferredLength = typeof preferred === "string" ? preferred.trim().length : 0;
+  const fallbackLength = typeof fallback === "string" ? fallback.trim().length : 0;
+  if (preferredLength === 0 && fallbackLength === 0) {
+    return undefined;
+  }
+  if (preferredLength === 0) {
+    return fallback;
+  }
+  if (fallbackLength === 0) {
+    return preferred;
+  }
+  return preferredLength >= fallbackLength ? preferred : fallback;
+}
+
+function normalizeTranscriptEntryFromNotification(value: unknown): TranscriptEntry | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const messageId = typeof record.messageId === "string" ? record.messageId.trim() : "";
+  const turnId = typeof record.turnId === "string" ? record.turnId.trim() : "";
+  const role = record.role;
+  const type = typeof record.type === "string" ? record.type.trim() : "";
+  const content = typeof record.content === "string" ? record.content : "";
+  const status = record.status;
+  if (!messageId || !turnId || !type) {
+    return null;
+  }
+  if (role !== "user" && role !== "assistant" && role !== "system") {
+    return null;
+  }
+  if (status !== "streaming" && status !== "complete" && status !== "canceled" && status !== "error") {
+    return null;
+  }
+
+  const startedAt =
+    toEpochMs(record.startedAt) ??
+    toEpochMs(record.started_at) ??
+    toEpochMs(record.startTime) ??
+    toEpochMs(record.start_time);
+  const completedAt =
+    toEpochMs(record.completedAt) ??
+    toEpochMs(record.completed_at) ??
+    toEpochMs(record.endTime) ??
+    toEpochMs(record.end_time);
+
+  const normalized: TranscriptEntry = {
+    messageId,
+    turnId,
+    role,
+    type,
+    content,
+    status
+  };
+
+  if (typeof record.details === "string") {
+    normalized.details = record.details;
+  }
+  if (typeof startedAt === "number") {
+    normalized.startedAt = startedAt;
+  }
+  if (typeof completedAt === "number") {
+    normalized.completedAt = completedAt;
+  }
+
+  return normalized;
+}
+
+function parseSupervisorAnchorFromMessageId(messageId: string, prefix: string): string | null {
+  if (!messageId.startsWith(prefix)) {
+    return null;
+  }
+  const parts = messageId.split("::");
+  if (parts.length < 4) {
+    return null;
+  }
+  const anchor = parts[3]?.trim();
+  return anchor && anchor.length > 0 ? anchor : null;
+}
+
+function transcriptEntryAnchorItemId(entry: { type: string; messageId: string; details?: string }): string | null {
+  const details = parseDetailsRecord(entry.details);
+  const detailsAnchor =
+    details && typeof details.anchorItemId === "string" && details.anchorItemId.trim().length > 0
+      ? details.anchorItemId.trim()
+      : null;
+  if (detailsAnchor) {
+    return detailsAnchor;
+  }
+
+  if (entry.type === "fileChange.explainability") {
+    return parseSupervisorAnchorFromMessageId(entry.messageId, "file-change-explain::");
+  }
+  if (entry.type === "fileChange.supervisorInsight") {
+    return parseSupervisorAnchorFromMessageId(entry.messageId, "file-change-supervisor-insight::");
+  }
+
+  return null;
+}
+
+function mergeChatMessageFromTranscriptDelta(existing: ChatMessage, incoming: TranscriptEntry): ChatMessage {
+  const existingPriority = transcriptStatusPriority(existing.status);
+  const incomingPriority = transcriptStatusPriority(incoming.status);
+  if (incomingPriority < existingPriority) {
+    return existing;
+  }
+
+  const mergedContent = pickRicherText(incoming.content, existing.content) ?? incoming.content;
+  const mergedDetails = pickRicherText(
+    typeof incoming.details === "string" ? incoming.details : undefined,
+    existing.details
+  );
+
+  const next: ChatMessage = {
+    id: existing.id,
+    turnId: incoming.turnId,
+    role: incoming.role,
+    type: incoming.type,
+    content: mergedContent,
+    status: incoming.status
+  };
+  if (typeof mergedDetails === "string") {
+    next.details = mergedDetails;
+  }
+  return next;
+}
+
+function timingFromTranscriptEntry(entry: TranscriptEntry): MessageTiming | null {
+  const startedAt = toEpochMs(entry.startedAt);
+  const completedAt = toEpochMs(entry.completedAt);
+  if (startedAt && completedAt) {
+    return completedAt >= startedAt ? { startedAt, completedAt } : { startedAt };
+  }
+  if (startedAt) {
+    return { startedAt };
+  }
+  if (completedAt) {
+    return { startedAt: completedAt, completedAt };
+  }
+  return parseMessageTimingFromDetails(entry.details);
+}
+
 function parseEmbeddedRecord(value: unknown): Record<string, unknown> | null {
   let current = value;
   for (let depth = 0; depth < 6; depth += 1) {
@@ -2028,7 +2193,7 @@ export function App() {
   const [toolInputActionRequestId, setToolInputActionRequestId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [enqueueingSuggestedReply, setEnqueueingSuggestedReply] = useState(false);
-  const [pendingSuggestReplyJob, setPendingSuggestReplyJob] = useState<PendingSuggestReplyJob | null>(null);
+  const [pendingSuggestRequestJob, setPendingSuggestRequestJob] = useState<PendingSuggestRequestJob | null>(null);
   const [steerDraft, setSteerDraft] = useState("");
   const [submittingSteer, setSubmittingSteer] = useState(false);
   const [activeTurnIdBySession, setActiveTurnIdBySession] = useState<Record<string, string>>({});
@@ -2099,7 +2264,7 @@ export function App() {
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptRef = useRef(0);
   const sendAckTimerRef = useRef<number | null>(null);
-  const pendingSendAckRef = useRef<{ sessionId: string; turnId: string | null; messageId: string } | null>(null);
+  const pendingSendAckRef = useRef<PendingSendAck | null>(null);
   const optimisticMessageIdByTurnIdRef = useRef<Record<string, string>>({});
   const openSessionMenuRef = useRef<HTMLDivElement | null>(null);
   const sessionMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -2113,11 +2278,12 @@ export function App() {
   const approvalSnapBackDelayTimerRef = useRef<number | null>(null);
   const approvalSnapBackFrameRef = useRef<number | null>(null);
   const approvalReconcileTimersRef = useRef<Record<string, number>>({});
+  const transcriptReconcileTimersRef = useRef<Record<string, number>>({});
   const threadMenuRef = useRef<HTMLDivElement | null>(null);
   const threadMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const suggestedReplyAbortRef = useRef<AbortController | null>(null);
   const suggestedReplyRequestIdRef = useRef(0);
-  const pendingSuggestReplyJobRef = useRef<PendingSuggestReplyJob | null>(null);
+  const pendingSuggestRequestJobRef = useRef<PendingSuggestRequestJob | null>(null);
   const transcriptLoadRequestIdRef = useRef(0);
   const approvalsLoadRequestIdRef = useRef(0);
   const toolInputsLoadRequestIdRef = useRef(0);
@@ -2135,7 +2301,7 @@ export function App() {
   approvalActionByIdRef.current = approvalActionById;
   localSendStateByMessageIdRef.current = localSendStateByMessageId;
   draftRef.current = draft;
-  pendingSuggestReplyJobRef.current = pendingSuggestReplyJob;
+  pendingSuggestRequestJobRef.current = pendingSuggestRequestJob;
   useEffect(() => {
     persistSelectedSessionId(selectedSessionId);
   }, [selectedSessionId]);
@@ -2150,7 +2316,7 @@ export function App() {
     }
   }, [approvalActionById]);
   useEffect(() => {
-    const pending = pendingSuggestReplyJob;
+    const pending = pendingSuggestRequestJob;
     if (!pending) {
       return;
     }
@@ -2177,18 +2343,18 @@ export function App() {
         ) {
           setDraft(suggestion);
         }
-        setPendingSuggestReplyJob((current) => (current && current.jobId === pending.jobId ? null : current));
+        setPendingSuggestRequestJob((current) => (current && current.jobId === pending.jobId ? null : current));
         setEnqueueingSuggestedReply(false);
         return;
       }
 
       if (state === "failed" || state === "canceled") {
         const message =
-          typeof error === "string" && error.trim().length > 0 ? error.trim() : "suggested reply job failed";
+          typeof error === "string" && error.trim().length > 0 ? error.trim() : "suggested request job failed";
         if (selectedSessionIdRef.current === pending.sessionId) {
           setError(message);
         }
-        setPendingSuggestReplyJob((current) => (current && current.jobId === pending.jobId ? null : current));
+        setPendingSuggestRequestJob((current) => (current && current.jobId === pending.jobId ? null : current));
         setEnqueueingSuggestedReply(false);
       }
     };
@@ -2212,7 +2378,7 @@ export function App() {
         const response = await fetch(`${apiBase}/orchestrator/jobs/${encodeURIComponent(pending.jobId)}`);
         if (!response.ok) {
           if (response.status === 404) {
-            setPendingSuggestReplyJob((current) => (current && current.jobId === pending.jobId ? null : current));
+            setPendingSuggestRequestJob((current) => (current && current.jobId === pending.jobId ? null : current));
             setEnqueueingSuggestedReply(false);
             return;
           }
@@ -2243,12 +2409,12 @@ export function App() {
       canceled = true;
       clearTimer();
     };
-  }, [apiBase, pendingSuggestReplyJob]);
+  }, [apiBase, pendingSuggestRequestJob]);
   const selectedSession = useMemo(
     () => sessions.find((session) => session.sessionId === selectedSessionId) ?? null,
     [sessions, selectedSessionId]
   );
-  const loadingSuggestedReply = enqueueingSuggestedReply || Boolean(pendingSuggestReplyJob && pendingSuggestReplyJob.sessionId === selectedSessionId);
+  const loadingSuggestedReply = enqueueingSuggestedReply || Boolean(pendingSuggestRequestJob && pendingSuggestRequestJob.sessionId === selectedSessionId);
   const sessionsByProjectId = useMemo(() => {
     const byProjectId = new Map<string, Array<SessionSummary>>();
     for (const project of projects) {
@@ -2467,25 +2633,150 @@ export function App() {
     clearPendingSendAck();
   };
   const startPendingSendAck = (sessionId: string, turnId: string | null, messageId: string): void => {
+    const initialTimeoutMs = 12_000;
+    const retryTimeoutMs = 6_000;
+    const hardTimeoutMs = 45_000;
     clearPendingSendAck();
     pendingSendAckRef.current = {
       sessionId,
       turnId,
-      messageId
+      messageId,
+      startedAt: Date.now()
     };
-    sendAckTimerRef.current = window.setTimeout(() => {
+    const checkPendingAck = (): void => {
       const pending = pendingSendAckRef.current;
-      if (!pending || pending.sessionId !== sessionId) {
+      if (!pending || pending.sessionId !== sessionId || pending.messageId !== messageId) {
+        return;
+      }
+
+      const socket = websocketRef.current;
+      const socketConnected = socket?.readyState === WebSocket.OPEN;
+      const elapsedMs = Date.now() - pending.startedAt;
+
+      // Stream delivery can be missed transiently; reconcile from transcript before escalating.
+      void loadSessionTranscript(sessionId);
+
+      if (socketConnected) {
+        setError("No live turn updates yet. Transcript sync in progress.");
+        pendingSendAckRef.current = null;
+        sendAckTimerRef.current = null;
+        return;
+      }
+
+      if (elapsedMs < hardTimeoutMs) {
+        setError("No live turn updates yet. Waiting for reconnect and transcript sync.");
+        sendAckTimerRef.current = window.setTimeout(checkPendingAck, retryTimeoutMs);
         return;
       }
 
       updateLocalSendState(pending.messageId, "failed");
       pendingSendAckRef.current = null;
       sendAckTimerRef.current = null;
-      setWsState("disconnected");
       setStreaming(false);
-      setError("No response after sending. Connection appears disconnected. Reconnect to continue.");
-    }, 12_000);
+      setError("No response after sending. Live updates did not recover. Reconnect to continue.");
+    };
+
+    sendAckTimerRef.current = window.setTimeout(checkPendingAck, initialTimeoutMs);
+  };
+
+  const upsertTranscriptDeltaEntry = (entry: TranscriptEntry): void => {
+    const normalized: ChatMessage = {
+      id: entry.messageId,
+      turnId: entry.turnId,
+      role: entry.role,
+      type: entry.type,
+      content: entry.content,
+      status: entry.status,
+      ...(typeof entry.details === "string" ? { details: entry.details } : {})
+    };
+    const incomingAnchorItemId = transcriptEntryAnchorItemId({
+      type: normalized.type,
+      messageId: normalized.id,
+      details: normalized.details
+    });
+
+    setMessages((current) => {
+      const existingIndex = current.findIndex((message) => message.id === normalized.id);
+      if (existingIndex >= 0) {
+        const existing = current[existingIndex];
+        const merged = mergeChatMessageFromTranscriptDelta(existing, entry);
+        if (
+          merged.turnId === existing.turnId &&
+          merged.role === existing.role &&
+          merged.type === existing.type &&
+          merged.content === existing.content &&
+          merged.status === existing.status &&
+          merged.details === existing.details
+        ) {
+          return current;
+        }
+        const next = [...current];
+        next[existingIndex] = merged;
+        return next;
+      }
+
+      let insertAt = current.length;
+      if (incomingAnchorItemId) {
+        const anchorIndex = current.findIndex((message) => message.id === incomingAnchorItemId);
+        if (anchorIndex >= 0) {
+          insertAt = Math.min(current.length, anchorIndex + 1);
+          while (insertAt < current.length) {
+            const candidate = current[insertAt];
+            if (candidate.turnId !== normalized.turnId) {
+              break;
+            }
+            const candidateAnchor = transcriptEntryAnchorItemId({
+              type: candidate.type,
+              messageId: candidate.id,
+              details: candidate.details
+            });
+            if (candidateAnchor !== incomingAnchorItemId) {
+              break;
+            }
+            insertAt += 1;
+          }
+        }
+      } else {
+        for (let index = current.length - 1; index >= 0; index -= 1) {
+          if (current[index].turnId === normalized.turnId) {
+            insertAt = index + 1;
+            break;
+          }
+        }
+      }
+
+      const next = [...current];
+      next.splice(insertAt, 0, normalized);
+      return next;
+    });
+
+    const timing = timingFromTranscriptEntry(entry);
+    if (!timing) {
+      return;
+    }
+
+    setMessageTimingById((current) => {
+      const existing = current[entry.messageId];
+      const startedAt = existing ? Math.min(existing.startedAt, timing.startedAt) : timing.startedAt;
+      const completedAt =
+        typeof existing?.completedAt === "number" && typeof timing.completedAt === "number"
+          ? Math.max(existing.completedAt, timing.completedAt)
+          : typeof existing?.completedAt === "number"
+            ? existing.completedAt
+            : timing.completedAt;
+
+      if (existing && existing.startedAt === startedAt && existing.completedAt === completedAt) {
+        return current;
+      }
+
+      return {
+        ...current,
+        [entry.messageId]: {
+          startedAt,
+          ...(typeof completedAt === "number" ? { completedAt } : {})
+        }
+      };
+    });
   };
 
   const allTurnGroups = useMemo(() => {
@@ -2520,7 +2811,27 @@ export function App() {
     hasPending: boolean;
   } => {
     const responseMessages = group.messages.filter((message) => message.role !== "user");
+    const thinkingActive = activeTurnId === group.turnId;
+    const hasPendingDecisionInTurn = responseMessages.some((message) => {
+      const approvalId = approvalIdFromMessage(message);
+      if (approvalId && pendingApprovalsById.has(approvalId)) {
+        return true;
+      }
+
+      const toolInputRequestId = toolInputRequestIdFromMessage(message);
+      if (toolInputRequestId && pendingToolInputsById.has(toolInputRequestId)) {
+        return true;
+      }
+
+      return false;
+    });
     const finalAssistantIndex = (() => {
+      // While a turn is still active or waiting on a pending decision, assistant messages
+      // are progress/thought content rather than a terminal final response.
+      if (thinkingActive || hasPendingDecisionInTurn) {
+        return -1;
+      }
+
       for (let index = responseMessages.length - 1; index >= 0; index -= 1) {
         if (responseMessages[index].role === "assistant") {
           return index;
@@ -2530,7 +2841,6 @@ export function App() {
     })();
     const finalAssistantMessage = finalAssistantIndex >= 0 ? responseMessages[finalAssistantIndex] : null;
     const thoughtMessages = responseMessages.filter((_message, index) => index !== finalAssistantIndex);
-    const thinkingActive = activeTurnId === group.turnId;
     const pendingIds = new Set<string>();
     for (const message of thoughtMessages) {
       const approvalId = approvalIdFromMessage(message);
@@ -3006,6 +3316,7 @@ export function App() {
   };
 
   const loadSessionTranscript = async (sessionId: string): Promise<void> => {
+    clearTranscriptReconcileTimer(sessionId);
     const requestId = transcriptLoadRequestIdRef.current + 1;
     transcriptLoadRequestIdRef.current = requestId;
     setLoadingTranscript(true);
@@ -4403,7 +4714,7 @@ export function App() {
       return;
     }
 
-    const existingPending = pendingSuggestReplyJobRef.current;
+    const existingPending = pendingSuggestRequestJobRef.current;
     if (existingPending && existingPending.sessionId === selectedSessionId) {
       return;
     }
@@ -4419,7 +4730,7 @@ export function App() {
     setError(null);
     setEnqueueingSuggestedReply(true);
     try {
-      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(sessionIdAtStart)}/suggested-reply/jobs`, {
+      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(sessionIdAtStart)}/suggested-request/jobs`, {
         method: "POST",
         headers: {
           "content-type": "application/json"
@@ -4436,19 +4747,19 @@ export function App() {
         if (await handleDeletedSessionResponse(response, sessionIdAtStart)) {
           return;
         }
-        throw new Error(`failed to load suggested reply (${response.status})`);
+        throw new Error(`failed to load suggested request (${response.status})`);
       }
 
       const payload = (await response.json()) as { jobId?: string };
       if (typeof payload.jobId !== "string" || payload.jobId.trim().length === 0) {
-        throw new Error("suggested reply queue request did not return a job id");
+        throw new Error("suggested request queue request did not return a job id");
       }
 
       if (controller.signal.aborted || suggestedReplyRequestIdRef.current !== requestId) {
         return;
       }
 
-      setPendingSuggestReplyJob({
+      setPendingSuggestRequestJob({
         jobId: payload.jobId,
         sessionId: sessionIdAtStart,
         draftAtStart,
@@ -4458,7 +4769,7 @@ export function App() {
       if (controller.signal.aborted) {
         return;
       }
-      setError(err instanceof Error ? err.message : "failed to load suggested reply");
+      setError(err instanceof Error ? err.message : "failed to load suggested request");
     } finally {
       if (suggestedReplyRequestIdRef.current === requestId) {
         setEnqueueingSuggestedReply(false);
@@ -4714,6 +5025,33 @@ export function App() {
       window.clearTimeout(timerId);
     }
     approvalReconcileTimersRef.current = {};
+  };
+
+  const clearTranscriptReconcileTimer = (sessionId: string): void => {
+    const timerId = transcriptReconcileTimersRef.current[sessionId];
+    if (timerId === undefined) {
+      return;
+    }
+    window.clearTimeout(timerId);
+    delete transcriptReconcileTimersRef.current[sessionId];
+  };
+
+  const clearAllTranscriptReconcileTimers = (): void => {
+    for (const timerId of Object.values(transcriptReconcileTimersRef.current)) {
+      window.clearTimeout(timerId);
+    }
+    transcriptReconcileTimersRef.current = {};
+  };
+
+  const armTranscriptReconcileFallback = (sessionId: string, delayMs = transcriptReconcileFallbackMs): void => {
+    clearTranscriptReconcileTimer(sessionId);
+    transcriptReconcileTimersRef.current[sessionId] = window.setTimeout(() => {
+      delete transcriptReconcileTimersRef.current[sessionId];
+      if (selectedSessionIdRef.current !== sessionId) {
+        return;
+      }
+      void loadSessionTranscript(sessionId);
+    }, delayMs);
   };
 
   const armApprovalReconcileFallback = (approvalId: string, sessionId: string, delayMs = 2500): void => {
@@ -5444,6 +5782,7 @@ export function App() {
     clearPendingSendAck();
     stopApprovalSnapBack();
     clearAllApprovalReconcileTimers();
+    clearAllTranscriptReconcileTimers();
 
     if (!selectedSessionId) {
       setMessages([]);
@@ -5495,6 +5834,7 @@ export function App() {
       suggestedReplyRequestIdRef.current += 1;
       stopApprovalSnapBack();
       clearAllApprovalReconcileTimers();
+      clearAllTranscriptReconcileTimers();
     };
   }, []);
 
@@ -5856,6 +6196,31 @@ export function App() {
           return;
         }
 
+        if (envelope.type === "transcript_updated") {
+          const payload = asRecord(envelope.payload);
+          const payloadThreadId =
+            payload && typeof payload.threadId === "string" && payload.threadId.trim().length > 0
+              ? payload.threadId
+              : typeof envelope.threadId === "string" && envelope.threadId.trim().length > 0
+                ? envelope.threadId
+                : null;
+          if (!payloadThreadId || selectedSessionIdRef.current !== payloadThreadId) {
+            return;
+          }
+
+          const entry = normalizeTranscriptEntryFromNotification(payload?.entry);
+          if (entry) {
+            upsertTranscriptDeltaEntry(entry);
+            markSendActivityObserved(payloadThreadId, entry.turnId);
+            armTranscriptReconcileFallback(payloadThreadId);
+            return;
+          }
+
+          // Fallback for older emitters or malformed payloads.
+          void loadSessionTranscript(payloadThreadId);
+          return;
+        }
+
         if (envelope.type === "tool_user_input_requested") {
           const request = envelope.payload as PendingToolInput;
           if (!request || typeof request.requestId !== "string") {
@@ -5990,24 +6355,20 @@ export function App() {
                 ? envelope.threadId
                 : null;
 
-          if (jobType === "file_change_explain") {
-            if (
-              sourceSessionId &&
-              selectedSessionIdRef.current === sourceSessionId &&
-              (envelope.type === "orchestrator_job_queued" ||
-                envelope.type === "orchestrator_job_started" ||
+          if (jobType === "agent_instruction") {
+            if (sourceSessionId && selectedSessionIdRef.current === sourceSessionId) {
+              const terminalEvent =
                 envelope.type === "orchestrator_job_completed" ||
                 envelope.type === "orchestrator_job_failed" ||
-                envelope.type === "orchestrator_job_canceled")
-            ) {
-              void loadSessionTranscript(sourceSessionId);
+                envelope.type === "orchestrator_job_canceled";
+              armTranscriptReconcileFallback(sourceSessionId, terminalEvent ? 600 : transcriptReconcileFallbackMs);
             }
             return;
           }
 
-          const pending = pendingSuggestReplyJobRef.current;
+          const pending = pendingSuggestRequestJobRef.current;
 
-          if (!jobId || !pending || pending.jobId !== jobId || jobType !== "suggest_reply") {
+          if (!jobId || !pending || pending.jobId !== jobId || jobType !== "suggest_request") {
             return;
           }
 
@@ -6024,7 +6385,7 @@ export function App() {
               setDraft(suggestion);
             }
 
-            setPendingSuggestReplyJob((current) => (current && current.jobId === jobId ? null : current));
+            setPendingSuggestRequestJob((current) => (current && current.jobId === jobId ? null : current));
             setEnqueueingSuggestedReply(false);
             return;
           }
@@ -6033,11 +6394,11 @@ export function App() {
             const errorMessage =
               payload && typeof payload.error === "string" && payload.error.trim().length > 0
                 ? payload.error.trim()
-                : "suggested reply job failed";
+                : "suggested request job failed";
             if (selectedSessionIdRef.current === pending.sessionId) {
               setError(errorMessage);
             }
-            setPendingSuggestReplyJob((current) => (current && current.jobId === jobId ? null : current));
+            setPendingSuggestRequestJob((current) => (current && current.jobId === jobId ? null : current));
             setEnqueueingSuggestedReply(false);
             return;
           }
@@ -6418,6 +6779,7 @@ export function App() {
     return () => {
       disposed = true;
       clearPendingSendAck();
+      clearAllTranscriptReconcileTimers();
       if (reconnectTimerRef.current !== null) {
         window.clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
@@ -6657,6 +7019,8 @@ export function App() {
     const fileChangeExplainabilityMessagesByApprovalId = new Map<string, ChatMessage>();
     const fileChangeSupervisorInsightMessagesByAnchorItemId = new Map<string, ChatMessage>();
     const fileChangeSupervisorInsightMessagesByApprovalId = new Map<string, ChatMessage>();
+    const agentJobOutputMessagesByAnchorItemId = new Map<string, ChatMessage>();
+    const agentJobOutputMessagesByApprovalId = new Map<string, ChatMessage>();
     for (const thoughtMessage of thoughtMessages) {
       if (thoughtMessage.type === "reasoning") {
         reasoningLinesByMessageId.set(
@@ -6669,10 +7033,12 @@ export function App() {
       }
       if (thoughtMessage.type === "fileChange.explainability") {
         const details = parseDetailsRecord(thoughtMessage.details);
-        const anchorItemId =
+        const anchorItemIdFromDetails =
           details && typeof details.anchorItemId === "string" && details.anchorItemId.trim().length > 0
             ? details.anchorItemId.trim()
             : null;
+        const anchorItemId =
+          anchorItemIdFromDetails ?? parseSupervisorAnchorFromMessageId(thoughtMessage.id, "file-change-explain::");
         const approvalId =
           details && typeof details.approvalId === "string" && details.approvalId.trim().length > 0
             ? details.approvalId.trim()
@@ -6686,10 +7052,12 @@ export function App() {
       }
       if (thoughtMessage.type === "fileChange.supervisorInsight") {
         const details = parseDetailsRecord(thoughtMessage.details);
-        const anchorItemId =
+        const anchorItemIdFromDetails =
           details && typeof details.anchorItemId === "string" && details.anchorItemId.trim().length > 0
             ? details.anchorItemId.trim()
             : null;
+        const anchorItemId =
+          anchorItemIdFromDetails ?? parseSupervisorAnchorFromMessageId(thoughtMessage.id, "file-change-supervisor-insight::");
         const approvalId =
           details && typeof details.approvalId === "string" && details.approvalId.trim().length > 0
             ? details.approvalId.trim()
@@ -6699,6 +7067,23 @@ export function App() {
         }
         if (approvalId) {
           fileChangeSupervisorInsightMessagesByApprovalId.set(approvalId, thoughtMessage);
+        }
+      }
+      if (thoughtMessage.type === "agent.jobOutput") {
+        const details = parseDetailsRecord(thoughtMessage.details);
+        const anchorItemId =
+          details && typeof details.anchorItemId === "string" && details.anchorItemId.trim().length > 0
+            ? details.anchorItemId.trim()
+            : null;
+        const approvalId =
+          details && typeof details.approvalId === "string" && details.approvalId.trim().length > 0
+            ? details.approvalId.trim()
+            : null;
+        if (anchorItemId) {
+          agentJobOutputMessagesByAnchorItemId.set(anchorItemId, thoughtMessage);
+        }
+        if (approvalId) {
+          agentJobOutputMessagesByApprovalId.set(approvalId, thoughtMessage);
         }
       }
     }
@@ -6849,6 +7234,7 @@ export function App() {
         const { status, changeCount, files, diffs } = summarizeFileChangeMessage(message);
         const linkedExplainabilityMessage = fileChangeExplainabilityMessagesByAnchorItemId.get(message.id) ?? null;
         const linkedSupervisorInsightMessage = fileChangeSupervisorInsightMessagesByAnchorItemId.get(message.id) ?? null;
+        const linkedAgentJobOutputMessage = agentJobOutputMessagesByAnchorItemId.get(message.id) ?? null;
         const fileChangeLabel = formatFileChangeLabel(changeCount);
         const actionText =
           status === "streaming"
@@ -6869,7 +7255,11 @@ export function App() {
         const eventRow = (
           <div key={`event-${message.id}`} className="thought-row-event" data-thought-no-collapse="true">
             {actionText ? <p className="thought-row-text">{actionText}</p> : null}
-            {diffs.length > 0 || fileListPreview || linkedExplainabilityMessage || linkedSupervisorInsightMessage ? (
+            {diffs.length > 0 ||
+            fileListPreview ||
+            linkedExplainabilityMessage ||
+            linkedSupervisorInsightMessage ||
+            linkedAgentJobOutputMessage ? (
               <div className="thought-diff-explain-bundle">
                 {fileListPreview ? <p className="thought-row-meta">{fileListPreview}</p> : null}
                 {diffs.map((diffEntry, diffIndex) => (
@@ -6898,6 +7288,12 @@ export function App() {
                     <MarkdownText content={linkedSupervisorInsightMessage.content} className="thought-markdown thought-row-text" />
                   </div>
                 ) : null}
+                {linkedAgentJobOutputMessage ? (
+                  <div className="thought-diff-explain-section">
+                    <p className="thought-row-title">Supervisor Job Output</p>
+                    <MarkdownText content={linkedAgentJobOutputMessage.content} className="thought-markdown thought-row-text" />
+                  </div>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -6912,10 +7308,12 @@ export function App() {
 
       if (message.type === "fileChange.explainability") {
         const details = parseDetailsRecord(message.details);
-        const anchorItemId =
+        const anchorItemIdFromDetails =
           details && typeof details.anchorItemId === "string" && details.anchorItemId.trim().length > 0
             ? details.anchorItemId.trim()
             : null;
+        const anchorItemId =
+          anchorItemIdFromDetails ?? parseSupervisorAnchorFromMessageId(message.id, "file-change-explain::");
         const approvalId =
           details && typeof details.approvalId === "string" && details.approvalId.trim().length > 0
             ? details.approvalId.trim()
@@ -6946,10 +7344,12 @@ export function App() {
 
       if (message.type === "fileChange.supervisorInsight") {
         const details = parseDetailsRecord(message.details);
-        const anchorItemId =
+        const anchorItemIdFromDetails =
           details && typeof details.anchorItemId === "string" && details.anchorItemId.trim().length > 0
             ? details.anchorItemId.trim()
             : null;
+        const anchorItemId =
+          anchorItemIdFromDetails ?? parseSupervisorAnchorFromMessageId(message.id, "file-change-supervisor-insight::");
         const approvalId =
           details && typeof details.approvalId === "string" && details.approvalId.trim().length > 0
             ? details.approvalId.trim()
@@ -6978,10 +7378,29 @@ export function App() {
         continue;
       }
 
-      if (message.type === "riskRecheck.batch") {
+      if (message.type === "agent.jobOutput") {
+        const details = parseDetailsRecord(message.details);
+        const anchorItemId =
+          details && typeof details.anchorItemId === "string" && details.anchorItemId.trim().length > 0
+            ? details.anchorItemId.trim()
+            : null;
+        const approvalId =
+          details && typeof details.approvalId === "string" && details.approvalId.trim().length > 0
+            ? details.approvalId.trim()
+            : null;
+        const isLinkedToPendingApproval =
+          (anchorItemId && pendingFileChangeApprovalsByItemId.has(anchorItemId)) ||
+          (approvalId && pendingApprovalsById.has(approvalId));
+        if (isLinkedToPendingApproval) {
+          continue;
+        }
+        if (anchorItemId && fileChangeMessagesById.has(anchorItemId)) {
+          continue;
+        }
+
         const eventRow = (
           <div key={`event-${message.id}`} className="thought-row-event inline" data-thought-no-collapse="true">
-            <p className="thought-row-title">Risk Recheck Results</p>
+            <p className="thought-row-title">Supervisor Job Output</p>
             <MarkdownText content={message.content} className="thought-markdown thought-row-text" />
           </div>
         );
@@ -7051,6 +7470,14 @@ export function App() {
                 fileChangeSupervisorInsightMessagesByApprovalId.get(activeApprovalId) ??
                 null
               : fileChangeSupervisorInsightMessagesByApprovalId.get(activeApprovalId) ?? null
+            : null;
+        const linkedAgentJobOutputMessage =
+          isFileChangeApproval && activeApprovalId
+            ? pendingApproval?.itemId
+              ? agentJobOutputMessagesByAnchorItemId.get(pendingApproval.itemId) ??
+                agentJobOutputMessagesByApprovalId.get(activeApprovalId) ??
+                null
+              : agentJobOutputMessagesByApprovalId.get(activeApprovalId) ?? null
             : null;
         const linkedFileChangePreview = linkedFileChangeMessage ? summarizeFileChangeMessage(linkedFileChangeMessage) : null;
         const effectiveFileChangePreview = (() => {
@@ -7136,6 +7563,13 @@ export function App() {
                     <p className="thought-row-title">Supervisor Insight</p>
                     <MarkdownText
                       content={linkedSupervisorInsightMessage?.content ?? "Supervisor insight queued..."}
+                      className="thought-markdown thought-row-text"
+                    />
+                  </div>
+                  <div className="thought-diff-explain-section">
+                    <p className="thought-row-title">Supervisor Job Output</p>
+                    <MarkdownText
+                      content={linkedAgentJobOutputMessage?.content ?? "Supervisor job output pending..."}
                       className="thought-markdown thought-row-text"
                     />
                   </div>
@@ -7685,6 +8119,7 @@ export function App() {
       reconnectTimerRef.current = null;
     }
     clearPendingSendAck();
+    clearAllTranscriptReconcileTimers();
     setWsState("connecting");
     setWsReconnectNonce((value) => value + 1);
   };
@@ -8091,7 +8526,7 @@ export function App() {
                 <small>
                   {sessionControlsScope === "default"
                     ? "Thinking level applies per chat. Switch scope to This chat to edit."
-                    : "Per-chat reasoning effort used for Send and Suggest Reply."}
+                    : "Per-chat reasoning effort used for Send and Suggest Request."}
                 </small>
               </label>
               <label className="session-control-field">
@@ -8410,7 +8845,7 @@ export function App() {
                 </button>
               ) : null}
               <button type="button" className="ghost" onClick={() => void loadSuggestedReply()} disabled={!selectedSessionId || loadingSuggestedReply}>
-                {loadingSuggestedReply ? "Suggesting..." : "Suggest Reply"}
+                {loadingSuggestedReply ? "Suggesting request..." : "Suggest Request"}
               </button>
               <button type="button" onClick={() => void sendMessage()} disabled={!selectedSessionId || !draft.trim()}>
                 Send
