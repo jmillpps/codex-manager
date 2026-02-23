@@ -22,6 +22,7 @@ This repository contains:
 
 - `apps/web` — a React + Vite chat UI
 - `apps/api` — a Fastify backend that supervises **Codex App Server** (`codex app-server`) and exposes session/message REST endpoints plus WebSocket streaming
+- `apps/cli` — operator automation CLI that maps to API endpoints and websocket stream operations
 - `packages/*` — shared configuration and generated clients/types
 
 Codex is managed via:
@@ -38,13 +39,21 @@ Key runtime semantics operators should know:
 - Session listing merges persisted threads (`thread/list`) with currently loaded non-materialized threads (`thread/loaded/list`) so newly created chats are visible immediately.
 - Non-materialized chats are in-memory runtime state and are not guaranteed to survive API/Codex restart until a first turn materializes rollout state.
 - Session hard delete is a harness extension (`DELETE /api/sessions/:sessionId`) because app-server has no native `thread/delete`.
-- Suggested-request is queue-backed: `POST /api/sessions/:sessionId/suggested-request/jobs` always enqueues `suggest_request`; `POST /api/sessions/:sessionId/suggested-request` enqueues the same job then waits briefly for completion before returning either `200` suggested request text or `202 queued`.
+- Suggested-request is queue-backed: `POST /api/sessions/:sessionId/suggested-request/jobs` emits `suggest_request.requested`, and repository supervisor enqueues one `agent_instruction` job (`jobKind: suggest_request`) that returns `requestKey`; `POST /api/sessions/:sessionId/suggested-request` emits the same event then waits briefly for completion before returning either `200` suggested request text or `202 queued`.
+- Suggested-request worker turns publish live state through `POST /api/sessions/:sessionId/suggested-request/upsert` (`streaming|complete|error|canceled`) and API emits websocket `suggested_request_updated`.
+- Suggested-request queue execution is deadline-bounded (`max(ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS, 45s)`): when no completion signal is observed in time, core writes a deterministic fallback suggestion, interrupts the worker turn best-effort, and completes the queue job.
 - Suggest-request queueing is single-flight per source chat: duplicate clicks while one suggest job is queued/running do not enqueue a second job.
 - Unassigned-chat suggest-request uses a session-scoped queue owner id (`session:<sessionId>`), so suggest-request jobs do not require explicit project assignment.
 - File-change approval events emit agent runtime work; supervisor handlers enqueue one instruction job that writes diff explainability (`type: fileChange.explainability`) and supervisor insight (`type: fileChange.supervisorInsight`) to transcript without blocking foreground turn streaming.
 - Queue terminal reconciliation for agent instruction jobs is payload-driven via `supplementalTargets`; extension handlers define message ids/types/placeholders/fallbacks and core reconciles explicit terminal states.
 - System-owned supervisor worker turns settle from runtime notification streams first (`turn/*`, `item/*`, agent-message deltas); `thread/read(includeTurns)` is a bounded fallback only.
 - Include-turns fallback materialization waits are capped by `ORCHESTRATOR_AGENT_INCLUDE_TURNS_GRACE_MS` and then retried via queue retry policy, avoiding routine full-turn timeout stalls on first-turn materialization gaps.
+- Agent runtime event dispatch is fanout and deterministic (`priority`, then module name, then registration order) with per-handler timeout isolation.
+- Extension inventory and reload lifecycle APIs are available at:
+  - `GET /api/agents/extensions`
+  - `POST /api/agents/extensions/reload`
+- Extension loading supports repo-local, installed-package, and configured-root sources with deterministic precedence and compatibility validation.
+- Runtime profile adapter boundaries are enforced in core execution paths for provider-specific turn/read/interrupt and approval/steer capability actions.
 - System-owned agent sessions are worker infrastructure: hidden from user session lists and denied for normal user chat operations (`403 system_session`).
 - Agent turn permissions are agent-owned via `agents/<agent>/agent.config.json`; when no config is present, the API falls back to global defaults.
 - Project deletion enforces emptiness against live sessions only; stale assignment metadata is pruned during delete before emptiness is evaluated.
@@ -81,9 +90,10 @@ Only `turnPolicy` is typically needed; the other policy blocks are optional over
 Agent extension layout contract:
 
 - `agents/<agent>/events.ts|events.js|events.mjs` registers event subscriptions and enqueues queue jobs.
-- `agents/<agent>/orientation.md` is optional; when present, API runs it once per agent session before the first queued job turn.
 - `agents/<agent>/agent.config.json` is optional; when present, it controls model/thread/turn policy for that agent's worker turns.
-- `agents/<agent>/AGENTS.md` and `agents/<agent>/playbooks/*` are consumed by the worker through queued instruction turns.
+- core runs one system queue-runner orientation turn per agent session before queued jobs.
+- queue payloads can include optional `bootstrapInstruction` (key + text), executed once per agent session after system orientation.
+- `agents/<agent>/AGENTS.md` and `agents/<agent>/playbooks/*` can be referenced by bootstrap/job instructions but are not required by core to start processing.
 - `agents/runtime/*` contains shared helper types/utilities for extension modules and is not treated as an event module directory.
 
 Supervisor extension behavior in this repository:
@@ -93,8 +103,7 @@ Supervisor extension behavior in this repository:
   - `turn.completed`
   - `suggest_request.requested`
 - Those handlers enqueue:
-  - `agent_instruction` for file-change supervision and turn-end review
-  - `suggest_request` for composer suggestion generation
+  - `agent_instruction` for file-change supervision, turn-end review, and suggest-request generation (`jobKind: suggest_request`)
 - All workflow instructions are human-readable markdown job text; API core only executes queued turns and runtime plumbing.
 
 ---
@@ -161,6 +170,16 @@ Do not commit `.env` files.
 If this repository includes `.codex/config.toml`, Codex may require you to mark the directory as “trusted” before it will load the project-scoped configuration.
 
 If Codex prompts you to trust the project, approve it.
+
+### Verify CLI wiring
+
+Run a basic health call through the CLI package:
+
+```bash
+pnpm --filter @repo/cli dev system health
+```
+
+If this command fails, verify API availability and CLI profile/runtime options in `docs/operations/cli.md`.
 
 ---
 
@@ -243,6 +262,19 @@ SUPERVISOR_AUTO_REJECT_ENABLED=false
 SUPERVISOR_AUTO_REJECT_THRESHOLD=high
 SUPERVISOR_AUTO_STEER_ENABLED=true
 SUPERVISOR_AUTO_STEER_THRESHOLD=med
+
+# Extension lifecycle, trust, and external roots
+AGENT_EXTENSION_RBAC_MODE=disabled
+AGENT_EXTENSION_ALLOW_INSECURE_HEADER_MODE=false
+AGENT_EXTENSION_RBAC_HEADER_SECRET=
+AGENT_EXTENSION_RBAC_JWT_SECRET=
+AGENT_EXTENSION_RBAC_JWT_ISSUER=
+AGENT_EXTENSION_RBAC_JWT_AUDIENCE=
+AGENT_EXTENSION_RBAC_JWT_ROLE_CLAIM=role
+AGENT_EXTENSION_RBAC_JWT_ACTOR_CLAIM=sub
+AGENT_EXTENSION_TRUST_MODE=warn
+AGENT_EXTENSION_CONFIGURED_ROOTS=
+AGENT_EXTENSION_PACKAGE_ROOTS=
 ```
 
 Operational rules:
@@ -256,6 +288,15 @@ Operational rules:
 - Agent turn timeout and queue timeout are independent controls:
   - `ORCHESTRATOR_AGENT_TURN_TIMEOUT_MS` bounds worker turn observation loops.
   - queue job timeout is controlled by `ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS` (with `agent_instruction` enforcing a minimum 180s job timeout in code).
+  - suggest-request `agent_instruction` uses an additional completion-signal deadline (`max(ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS, 45s)`); if the signal is not observed, core writes fallback suggestion state and completes the queue job.
+- RBAC modes:
+  - `disabled`: loopback-only local development bypass (`admin` role); non-loopback callers are rejected with `403 rbac_disabled_remote_forbidden`
+  - `header`: role resolution from `x-codex-role` with shared header token `x-codex-rbac-token`
+  - `jwt`: bearer-token verification for lifecycle endpoints
+- Header mode safety guard: unless `AGENT_EXTENSION_ALLOW_INSECURE_HEADER_MODE=true`, header mode requires loopback host binding and `AGENT_EXTENSION_RBAC_HEADER_SECRET`.
+- JWT mode requires `AGENT_EXTENSION_RBAC_JWT_SECRET`; optional issuer/audience and claim-mapping envs constrain accepted tokens.
+- `AGENT_EXTENSION_TRUST_MODE=enforced` blocks undeclared extension capabilities at load/action time.
+- `AGENT_EXTENSION_CONFIGURED_ROOTS` and `AGENT_EXTENSION_PACKAGE_ROOTS` accept path-delimited extension roots (`:` on Linux/macOS, `;` on Windows).
 
 ---
 
@@ -315,6 +356,37 @@ API health endpoint (example):
 - `auth.likelyUnauthenticated=true` indicates likely auth misconfiguration and expected 401 turn failures.
 
 If the health endpoint fails, inspect logs immediately (see Debugging).
+
+### Verify extension lifecycle surfaces
+
+With API running, validate extension runtime inventory/reload surfaces:
+
+```bash
+curl -sS http://127.0.0.1:3001/api/agents/extensions
+curl -sS -X POST http://127.0.0.1:3001/api/agents/extensions/reload
+```
+
+In `AGENT_EXTENSION_RBAC_MODE=disabled`, these lifecycle endpoints are loopback-only.
+
+If `AGENT_EXTENSION_RBAC_MODE=header`, include:
+
+- `x-codex-rbac-token: <AGENT_EXTENSION_RBAC_HEADER_SECRET>`
+- `x-codex-role: admin` (or another allowed role)
+- optional `x-codex-actor: <actor-id>`
+
+If `AGENT_EXTENSION_RBAC_MODE=jwt`, include `Authorization: Bearer <token>` with role claim configured by `AGENT_EXTENSION_RBAC_JWT_ROLE_CLAIM`.
+
+### Run portability conformance gate
+
+Run from repo root:
+
+```bash
+node scripts/run-agent-conformance.mjs
+```
+
+Expected artifact:
+
+- `.data/agent-conformance-report.json`
 
 ---
 

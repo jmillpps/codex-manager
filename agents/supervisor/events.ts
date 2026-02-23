@@ -54,7 +54,10 @@ export type TurnSupervisorReviewJob = {
 
 export type SuggestRequestJob = {
   jobType: "suggest_request";
+  requestKey: string;
   context: SupervisorJobContext;
+  model?: string;
+  effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   draft?: string;
 };
 
@@ -72,6 +75,34 @@ function supervisorInsightMessageId(context: SupervisorJobContext): string {
 
 function turnSupervisorReviewMessageId(context: SupervisorJobContext): string {
   return `turn-supervisor-review::${context.threadId}::${context.turnId}`;
+}
+
+function contextDetailsText(context: SupervisorJobContext): string {
+  return JSON.stringify({
+    anchorItemId: context.anchorItemId ?? context.itemId ?? null,
+    approvalId: context.approvalId ?? null
+  });
+}
+
+const SUPERVISOR_BOOTSTRAP_KEY = "supervisor.queue-runner.bootstrap.v1";
+
+function buildSupervisorBootstrapInstruction(): string {
+  return [
+    "# Extension Bootstrap: Supervisor Queue Runner",
+    "",
+    "System orientation is already complete. This extension bootstrap adds supervisor-specific scope.",
+    "",
+    "Supervisor operating contract:",
+    "- process one queue job at a time",
+    "- supported job kinds: `file_change_supervisor_review`, `turn_supervisor_review`, `suggest_request`",
+    "- for file-change jobs: explainability first, supervisor insight second, auto-actions last",
+    "- use CLI commands for all side effects (transcript upsert, suggested-request upsert, approval decision, turn steer)",
+    "- do not rely on returning structured JSON output for side effects",
+    "- if user action wins first, accept reconciliation and continue",
+    "- follow the exact instruction text for each job",
+    "",
+    "Respond with exactly `READY` and no additional text."
+  ].join("\n");
 }
 
 type FileChangeApprovalRequestedEventPayload = {
@@ -116,8 +147,15 @@ function asString(value: unknown): string | null {
 }
 
 function asRiskLevel(value: unknown): SupervisorRiskLevel | null {
-  if (value === "none" || value === "low" || value === "med" || value === "high") {
-    return value;
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "none" || normalized === "low" || normalized === "med" || normalized === "high") {
+    return normalized;
+  }
+  if (normalized === "medium") {
+    return "med";
   }
   return null;
 }
@@ -169,11 +207,7 @@ function parseEnabledFlag(value: string | undefined, fallback: boolean): boolean
 }
 
 function parseThreshold(value: string | undefined, fallback: SupervisorRiskLevel): SupervisorRiskLevel {
-  const normalized = value?.trim().toLowerCase();
-  if (normalized === "none" || normalized === "low" || normalized === "med" || normalized === "high") {
-    return normalized;
-  }
-  return fallback;
+  return asRiskLevel(value) ?? fallback;
 }
 
 function readAutoActionPolicyFromEnv(): AutoActionPolicy {
@@ -439,13 +473,13 @@ function buildAutoActionSection(policy?: AutoActionPolicy): string {
     "## Auto Actions",
     policy.approve?.enabled
       ? `Auto-approve is enabled at threshold "${policy.approve.threshold}".`
-      : "Auto-approve is disabled. You must not approve and must not call the approval decision route with accept.",
+      : "Auto-approve is disabled. You must not run CLI approval accept actions.",
     policy.reject?.enabled
       ? `Auto-reject is enabled at threshold "${policy.reject.threshold}".`
-      : "Auto-reject is disabled. You must not reject and must not call the approval decision route with decline.",
+      : "Auto-reject is disabled. You must not run CLI approval decline actions.",
     policy.steer?.enabled
       ? `Auto-steer is enabled at threshold "${policy.steer.threshold}".`
-      : "Auto-steer is disabled. You must not send steer and must not call the turn steer route."
+      : "Auto-steer is disabled. You must not run CLI steer actions."
   ].join("\n");
 }
 
@@ -470,7 +504,7 @@ function buildDeterministicExecutionRules(input: {
     "## Deterministic Execution Rules",
     approvalActionEligible
       ? "Approval actions are eligible in this job because fileChangeStatus is pending_approval and approvalId is present."
-      : "Approval actions are not eligible in this job. You must not call the approval decision route.",
+      : "Approval actions are not eligible in this job. Do not run CLI approval decisions.",
     approveEnabled
       ? `If risk is at or below "${approveThreshold}", approve condition is satisfied.`
       : "Approve policy is disabled. Do not approve.",
@@ -481,7 +515,7 @@ function buildDeterministicExecutionRules(input: {
       ? "If both approve and reject conditions match, reject wins."
       : "Approve/reject conflict rule is inactive because one or both policies are disabled.",
     steerEnabled
-      ? `If risk is at or above "${steerThreshold}" and the turn is still active, send steer guidance.`
+      ? `If risk is at or above "${steerThreshold}" and the turn is still active, send CLI steer guidance.`
       : "Steer policy is disabled. Do not send steer.",
     "User decisions are authoritative. If API indicates the request was already resolved, treat it as reconciled and continue."
   ].join("\n");
@@ -490,6 +524,8 @@ function buildDeterministicExecutionRules(input: {
 function buildFileChangeSupervisorReviewText(job: FileChangeSupervisorReviewJob): string {
   const explainabilityId = explainabilityMessageId(job.context);
   const supervisorInsightId = supervisorInsightMessageId(job.context);
+  const detailsText = contextDetailsText(job.context);
+  const approvalActionsEligible = job.fileChangeStatus === "pending_approval" && typeof job.context.approvalId === "string";
 
   return [
     "# Supervisor Job: file_change_supervisor_review",
@@ -537,40 +573,72 @@ function buildFileChangeSupervisorReviewText(job: FileChangeSupervisorReviewJob)
     "3. Evaluate auto-approve / auto-reject / auto-steer conditions and execute only what is enabled and eligible.",
     "4. If user already resolved approval/input, reconcile and continue without retry loops.",
     "",
-    "## Required API Actions",
-    "Before analysis, call transcript upsert for explainability with status `streaming` and content `Analyzing proposed file change...`.",
-    `Use route: POST /api/sessions/${job.context.sourceSessionId}/transcript/upsert`,
-    `Use messageId: ${explainabilityId}`,
-    `Use turnId: ${job.context.turnId}`,
-    "Use role: system",
-    "Use type: fileChange.explainability",
-    "Set details text to include anchorItemId and approvalId.",
+    "## Required Execution Interface",
+    "Use CLI commands only. Do not run raw HTTP requests.",
+    "Use this CLI entrypoint:",
+    "- `pnpm --filter @repo/cli dev ...`",
+    "If needed, equivalent binary is `node apps/cli/dist/main.js ...`.",
     "",
-    "After diff analysis, call transcript upsert for explainability with status `complete` and your final explainability text.",
-    `Use same messageId: ${explainabilityId}`,
+    "## Required CLI Action Sequence",
+    "Create a local workspace for this job:",
+    '```bash',
+    'mkdir -p .data/supervisor',
+    'EXPLAIN_FILE=\"$(mktemp .data/supervisor/explainability.XXXXXX.md)\"',
+    'INSIGHT_FILE=\"$(mktemp .data/supervisor/insight.XXXXXX.md)\"',
+    'STEER_FILE=\"$(mktemp .data/supervisor/steer.XXXXXX.md)\"',
+    '```',
     "",
-    "Then call transcript upsert for supervisor insight with status `streaming` and content `Supervisor analyzing diff...`.",
-    `Use route: POST /api/sessions/${job.context.sourceSessionId}/transcript/upsert`,
-    `Use messageId: ${supervisorInsightId}`,
-    `Use turnId: ${job.context.turnId}`,
-    "Use role: system",
-    "Use type: fileChange.supervisorInsight",
-    "Set details text to include anchorItemId and approvalId.",
+    "Write explainability streaming state first:",
+    '```bash',
+    `pnpm --filter @repo/cli dev --json sessions transcript upsert --session-id ${job.context.sourceSessionId} --message-id ${explainabilityId} --turn-id ${job.context.turnId} --role system --type fileChange.explainability --status streaming --content "Analyzing proposed file change..." --details '${detailsText}'`,
+    '```',
     "",
-    "After supervisor insight is complete, upsert supervisor insight with status `complete` and your final context-aware insight.",
-    `Use same messageId: ${supervisorInsightId}`,
+    "Now analyze the diff and write your explainability text into `$EXPLAIN_FILE`.",
+    "Keep it focused on what changed, why it changed, and concrete approval impact.",
+    "Then publish explainability complete state:",
+    '```bash',
+    `pnpm --filter @repo/cli dev --json sessions transcript upsert --session-id ${job.context.sourceSessionId} --message-id ${explainabilityId} --turn-id ${job.context.turnId} --role system --type fileChange.explainability --status complete --content-file \"$EXPLAIN_FILE\" --details '${detailsText}'`,
+    '```',
     "",
-    "If auto-approve condition matches and approval actions are eligible, call:",
-    `POST /api/approvals/${valueOrPlaceholder(job.context.approvalId)}/decision with decision accept and scope turn.`,
-    "If auto-reject condition matches and approval actions are eligible, call:",
-    `POST /api/approvals/${valueOrPlaceholder(job.context.approvalId)}/decision with decision decline and scope turn.`,
-    "When auto-steer condition matches, call:",
-    `POST /api/sessions/${job.context.sourceSessionId}/turns/${job.context.turnId}/steer`,
-    "Provide steer input that references the risk reason and specific corrective behavior.",
-    "If an approval decision returns not found because the user already resolved it, treat that as reconciled and continue.",
+    "Write supervisor insight streaming state next:",
+    '```bash',
+    `pnpm --filter @repo/cli dev --json sessions transcript upsert --session-id ${job.context.sourceSessionId} --message-id ${supervisorInsightId} --turn-id ${job.context.turnId} --role system --type fileChange.supervisorInsight --status streaming --content "Supervisor analyzing diff..." --details '${detailsText}'`,
+    '```',
+    "",
+    "Create supervisor insight text in `$INSIGHT_FILE` using diff + explainability + user request + transcript context.",
+    "Then publish supervisor insight complete state:",
+    '```bash',
+    `pnpm --filter @repo/cli dev --json sessions transcript upsert --session-id ${job.context.sourceSessionId} --message-id ${supervisorInsightId} --turn-id ${job.context.turnId} --role system --type fileChange.supervisorInsight --status complete --content-file \"$INSIGHT_FILE\" --details '${detailsText}'`,
+    '```',
+    "",
+    ...(approvalActionsEligible
+      ? [
+          "## Auto Actions (only after explainability and supervisor insight are complete)",
+          `Approval actions are eligible. approvalId: ${job.context.approvalId}`,
+          "If auto-approve threshold condition matches: run",
+          '```bash',
+          `pnpm --filter @repo/cli dev --json approvals decide --approval-id ${job.context.approvalId} --decision accept --scope turn`,
+          '```',
+          "If auto-reject threshold condition matches: run",
+          '```bash',
+          `pnpm --filter @repo/cli dev --json approvals decide --approval-id ${job.context.approvalId} --decision decline --scope turn`,
+          '```'
+        ]
+      : ["Approval actions are not eligible for this event. Do not run approval decision commands."]),
+    "If auto-steer threshold condition matches and the turn is still active:",
+    "1) Write concise steering guidance to `$STEER_FILE`.",
+    "2) Run:",
+    '```bash',
+    `pnpm --filter @repo/cli dev --json sessions steer --session-id ${job.context.sourceSessionId} --turn-id ${job.context.turnId} --input-file \"$STEER_FILE\"`,
+    '```',
+    "",
+    "Reconciliation rules:",
+    "- If approval or steer call reports already-resolved/not-found/conflict because user acted first, treat as reconciled.",
+    "- Do not loop retries for reconciled outcomes.",
+    "- Do not block completion waiting for external acknowledgement.",
     "",
     "## Output Tone",
-    "Use concise, context-aware, technically precise language. Focus on what changed, why it matters, and what action is appropriate right now."
+    "Use concise, context-aware, technically precise language in transcript content. Focus on what changed, why it matters, and what action is appropriate right now."
   ].join("\n");
 }
 
@@ -594,6 +662,7 @@ function formatInsightsReadable(insights: TurnSupervisorReviewJob["insights"]): 
 
 function buildTurnSupervisorReviewText(job: TurnSupervisorReviewJob): string {
   const reviewMessageId = turnSupervisorReviewMessageId(job.context);
+  const detailsText = contextDetailsText(job.context);
 
   return [
     "# Supervisor Job: turn_supervisor_review",
@@ -627,15 +696,24 @@ function buildTurnSupervisorReviewText(job: TurnSupervisorReviewJob): string {
     "- recommended next action for user progress",
     "- suggested next-request guidance for the next user message",
     "",
-    "## Required API Actions",
-    "Call transcript upsert with status `streaming` before you begin synthesis.",
-    `Use route: POST /api/sessions/${job.context.sourceSessionId}/transcript/upsert`,
-    `Use messageId: ${reviewMessageId}`,
-    `Use turnId: ${job.context.turnId}`,
-    "Use role: system",
-    "Use type: turn.supervisorReview",
-    "Then upsert the final turn review with status `complete` and the completed review text.",
-    `Use same messageId: ${reviewMessageId}`
+    "## Required Execution Interface",
+    "Use CLI commands only. Do not run raw HTTP requests.",
+    "",
+    "Create a local workspace for this job:",
+    '```bash',
+    'mkdir -p .data/supervisor',
+    'REVIEW_FILE=\"$(mktemp .data/supervisor/turn-review.XXXXXX.md)\"',
+    '```',
+    "",
+    "Set review row to streaming before synthesis:",
+    '```bash',
+    `pnpm --filter @repo/cli dev --json sessions transcript upsert --session-id ${job.context.sourceSessionId} --message-id ${reviewMessageId} --turn-id ${job.context.turnId} --role system --type turn.supervisorReview --status streaming --content "Supervisor reviewing completed turn..." --details '${detailsText}'`,
+    '```',
+    "",
+    "Write final review text to `$REVIEW_FILE`, then set review row to complete:",
+    '```bash',
+    `pnpm --filter @repo/cli dev --json sessions transcript upsert --session-id ${job.context.sourceSessionId} --message-id ${reviewMessageId} --turn-id ${job.context.turnId} --role system --type turn.supervisorReview --status complete --content-file \"$REVIEW_FILE\" --details '${detailsText}'`,
+    '```'
   ].join("\n");
 }
 
@@ -651,6 +729,9 @@ function buildSuggestRequestText(job: SuggestRequestJob): string {
     `Source session: ${job.context.sourceSessionId}`,
     `Thread: ${job.context.threadId}`,
     `Turn: ${job.context.turnId}`,
+    `Request key: ${job.requestKey}`,
+    `Requested model: ${valueOrPlaceholder(job.model)}`,
+    `Requested effort: ${valueOrPlaceholder(job.effort)}`,
     "",
     "## Turn Context",
     "```user-request.md",
@@ -664,13 +745,37 @@ function buildSuggestRequestText(job: SuggestRequestJob): string {
     "## Existing Composer Draft",
     valueOrPlaceholder(job.draft),
     "",
-    "## Output Requirements",
-    "Return exactly one user message and nothing else.",
-    "Write in user-to-agent request voice, not assistant response voice.",
-    "Do not answer the request yourself; draft only what the user should send.",
-    "Keep the request concise and action-oriented with a clear next step.",
-    "If an existing draft is present, refine it while preserving its intent.",
-    "Do not include markdown, labels, bullet points, JSON, code fences, or surrounding quotes."
+    "## Mandatory Execution Contract",
+    "Use CLI commands only. Do not run raw HTTP requests and do not depend on assistant-text output being consumed.",
+    "",
+    "Create local workspace for this job:",
+    "```bash",
+    "mkdir -p .data/supervisor",
+    "SUGGEST_FILE=\"$(mktemp .data/supervisor/suggest-request.XXXXXX.md)\"",
+    "```",
+    "",
+    "Set suggest-request state to streaming immediately:",
+    "```bash",
+    `pnpm --filter @repo/cli dev --json sessions suggest-request upsert --session-id ${job.context.sourceSessionId} --request-key ${job.requestKey} --status streaming`,
+    "```",
+    "",
+    "Now synthesize one concise user-to-agent request and write it into `$SUGGEST_FILE`.",
+    "Constraints for the generated request:",
+    "- user-to-agent request voice only",
+    "- one request only, no analysis wrapper",
+    "- concise and action-oriented with clear next step",
+    "- refine existing draft when present while preserving intent",
+    "- no markdown, labels, bullets, JSON, code fences, or surrounding quotes",
+    "",
+    "Publish completed suggested request:",
+    "```bash",
+    `pnpm --filter @repo/cli dev --json sessions suggest-request upsert --session-id ${job.context.sourceSessionId} --request-key ${job.requestKey} --status complete --suggestion-file \"$SUGGEST_FILE\"`,
+    "```",
+    "",
+    "If synthesis fails and you cannot recover in this job, publish error state:",
+    "```bash",
+    `pnpm --filter @repo/cli dev --json sessions suggest-request upsert --session-id ${job.context.sourceSessionId} --request-key ${job.requestKey} --status error --error \"suggested request generation failed\"`,
+    "```"
   ].join("\n");
 }
 
@@ -720,6 +825,7 @@ async function handleFileChangeApprovalRequested(event: AgentEvent, tools: Agent
   const jobText = buildSupervisorJobText(job);
   const explainabilityId = explainabilityMessageId(job.context);
   const supervisorInsightId = supervisorInsightMessageId(job.context);
+
   return tools.enqueueJob({
     type: "agent_instruction",
     projectId: job.context.projectId,
@@ -734,6 +840,10 @@ async function handleFileChangeApprovalRequested(event: AgentEvent, tools: Agent
       ...(job.context.itemId ? { itemId: job.context.itemId } : {}),
       ...(job.context.approvalId ? { approvalId: job.context.approvalId } : {}),
       ...(job.context.anchorItemId ? { anchorItemId: job.context.anchorItemId } : {}),
+      bootstrapInstruction: {
+        key: SUPERVISOR_BOOTSTRAP_KEY,
+        instructionText: buildSupervisorBootstrapInstruction()
+      },
       instructionText: jobText,
       supplementalTargets: [
         {
@@ -794,6 +904,10 @@ async function handleTurnCompleted(event: AgentEvent, tools: AgentEventTools): P
       sourceSessionId: job.context.sourceSessionId,
       threadId: job.context.threadId,
       turnId: job.context.turnId,
+      bootstrapInstruction: {
+        key: SUPERVISOR_BOOTSTRAP_KEY,
+        instructionText: buildSupervisorBootstrapInstruction()
+      },
       instructionText: jobText,
       supplementalTargets: [
         {
@@ -825,24 +939,37 @@ async function handleSuggestRequestRequested(event: AgentEvent, tools: AgentEven
 
   const job: SuggestRequestJob = {
     jobType: "suggest_request",
+    requestKey: payload.requestKey,
     context: contextFromSuggestRequest(payload),
+    model: payload.model,
+    effort: payload.effort,
     draft: payload.draft
   };
   const jobText = buildSupervisorJobText(job);
   return tools.enqueueJob({
-    type: "suggest_request",
+    type: "agent_instruction",
     projectId: payload.projectId,
     sourceSessionId: payload.sessionId,
     payload: {
-      requestKey: payload.requestKey,
-      sessionId: payload.sessionId,
-      projectId: payload.projectId,
       agent: "supervisor",
-      sourceThreadId: payload.threadId,
-      sourceTurnId: payload.turnId,
+      jobKind: "suggest_request",
+      projectId: payload.projectId,
+      sourceSessionId: payload.sessionId,
+      threadId: payload.threadId,
+      turnId: payload.turnId,
+      dedupeKey: `suggest_request:${payload.sessionId}`,
       ...(payload.model ? { model: payload.model } : {}),
       ...(payload.effort ? { effort: payload.effort } : {}),
-      ...(payload.draft ? { draft: payload.draft } : {}),
+      ...(payload.draft ? { fallbackSuggestionDraft: payload.draft } : {}),
+      expectResponse: "none",
+      completionSignal: {
+        kind: "suggested_request",
+        requestKey: payload.requestKey
+      },
+      bootstrapInstruction: {
+        key: SUPERVISOR_BOOTSTRAP_KEY,
+        instructionText: buildSupervisorBootstrapInstruction()
+      },
       instructionText: jobText
     }
   });

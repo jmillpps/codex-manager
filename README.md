@@ -29,6 +29,11 @@
 - [Quickstart](#quickstart)
 - [Why This Project Exists](#why-this-project-exists)
 - [Feature Highlights](#feature-highlights)
+- [Agent Extension Runtime](#agent-extension-runtime)
+- [Build a 5-Minute Event Pipeline Extension](#build-a-5-minute-event-pipeline-extension)
+- [Package and Load Extensions](#package-and-load-extensions)
+- [Extension Lifecycle Security (RBAC + Trust)](#extension-lifecycle-security-rbac--trust)
+- [Extension Validation and Conformance](#extension-validation-and-conformance)
 - [Backstory](#backstory)
 - [Getting Started (Detailed)](#getting-started-detailed)
 - [Repository Layout](#repository-layout)
@@ -125,10 +130,212 @@ Codex Manager focuses on that layer while keeping Codex as the execution authori
 - Session transcript reload path merges streamed runtime tool/approval events so thought auditing remains visible even when `thread/read` omits raw tool items
 - Thread control surface:
   - `fork`, `steer`, `interrupt`, `compact`, `rollback`, `review/start`, `backgroundTerminals/clean`
+- Extension runtime:
+  - event-driven pipelines as loadable extensions (`agents/*`, package roots, configured roots)
+  - deterministic fanout dispatch + timeout isolation + atomic reload
+  - lifecycle inventory/reload APIs with RBAC and trust/capability enforcement
 - Capability/integration settings:
   - combined `Model -> Reasoning` selection (model-aware effort options), account state, MCP status/oauth, skills, config, collaboration modes, experimental features
 - Cross-client sidebar synchronization via websocket events
 - Right-pane blocking modal when an active session is deleted
+
+---
+
+## Agent Extension Runtime
+
+Codex Manager includes a generic event runtime for building workflow logic as extensions instead of hard-coding behavior in API core.
+
+What you get out of the box:
+
+- deterministic fanout dispatch by `priority`, then module name, then registration order
+- per-handler timeout isolation (a slow/failing handler does not block the rest)
+- typed handler envelopes (`enqueue_result`, `action_result`, `handler_result`, `handler_error`)
+- worker-side structured action intents (`kind: "action_intents"`) executed inside API core with scope + capability + idempotency enforcement
+- atomic extension reload with snapshot preservation on failure
+- extension inventory endpoint with compatibility, trust, and origin metadata
+
+Core event names emitted by API today:
+
+- `file_change.approval_requested`
+- `turn.completed`
+- `suggest_request.requested`
+
+Reference docs:
+
+- [`docs/operations/agent-extension-authoring.md`](docs/operations/agent-extension-authoring.md)
+- [`docs/operations/agent-extension-lifecycle-and-conformance.md`](docs/operations/agent-extension-lifecycle-and-conformance.md)
+- [`docs/protocol/agent-runtime-sdk.md`](docs/protocol/agent-runtime-sdk.md)
+- [`docs/protocol/agent-extension-packaging.md`](docs/protocol/agent-extension-packaging.md)
+
+---
+
+## Build a 5-Minute Event Pipeline Extension
+
+Create a repo-local extension:
+
+```text
+agents/
+  demo-suggest-agent/
+    extension.manifest.json
+    events.mjs
+```
+
+`agents/demo-suggest-agent/extension.manifest.json`:
+
+```json
+{
+  "name": "@acme/demo-suggest-agent",
+  "version": "1.0.0",
+  "agentId": "demo-suggest",
+  "displayName": "Demo Suggest Agent",
+  "runtime": {
+    "coreApiVersionRange": ">=1 <2",
+    "profiles": [{ "name": "codex-manager", "versionRange": ">=1 <2" }]
+  },
+  "entrypoints": {
+    "events": "./events.mjs"
+  },
+  "capabilities": {
+    "events": ["suggest_request.requested"],
+    "actions": ["queue.enqueue"]
+  }
+}
+```
+
+`agents/demo-suggest-agent/events.mjs`:
+
+```js
+export function registerAgentEvents(registry) {
+  registry.on("suggest_request.requested", async (event, tools) => {
+    const payload = event && typeof event.payload === "object" && event.payload ? event.payload : {};
+    const projectId = typeof payload.projectId === "string" && payload.projectId.length > 0 ? payload.projectId : "demo-project";
+    const sessionId = typeof payload.sessionId === "string" && payload.sessionId.length > 0 ? payload.sessionId : "demo-session";
+    const requestKey =
+      typeof payload.requestKey === "string" && payload.requestKey.length > 0 ? payload.requestKey : "demo-request";
+
+    return tools.enqueueJob({
+      type: "suggest_request",
+      projectId,
+      sourceSessionId: sessionId,
+      payload: {
+        requestKey,
+        sessionId,
+        projectId,
+        sourceThreadId: sessionId,
+        sourceTurnId: "demo-turn",
+        instructionText: "Generate one concrete next user request."
+      }
+    });
+  });
+}
+```
+
+Reload and verify:
+
+```bash
+curl -sS -X POST http://127.0.0.1:3001/api/agents/extensions/reload
+curl -sS http://127.0.0.1:3001/api/agents/extensions
+```
+
+---
+
+## Package and Load Extensions
+
+Supported load sources:
+
+- repo-local extensions under `agents/*` (`origin.type = repo_local`)
+- installed package roots via `AGENT_EXTENSION_PACKAGE_ROOTS` (`origin.type = installed_package`)
+- configured roots via `AGENT_EXTENSION_CONFIGURED_ROOTS` (`origin.type = configured_root`)
+
+If the same extension root is discoverable from multiple sources, loader keeps the highest-precedence origin (`repo_local` > `installed_package` > `configured_root`).
+
+External/package layout:
+
+```text
+<extension-root>/
+  extension.manifest.json
+  events.js|events.mjs|events.ts
+  AGENTS.md
+  orientation.md
+  agent.config.json
+```
+
+Example env wiring:
+
+```bash
+# Linux/macOS path delimiter is :
+AGENT_EXTENSION_PACKAGE_ROOTS=/opt/codex/extensions:/home/user/my-extension-packages
+AGENT_EXTENSION_CONFIGURED_ROOTS=/etc/codex/extensions
+```
+
+```powershell
+# Windows path delimiter is ;
+$env:AGENT_EXTENSION_PACKAGE_ROOTS="C:\codex\extensions;D:\team\extensions"
+$env:AGENT_EXTENSION_CONFIGURED_ROOTS="C:\codex\configured-extensions"
+```
+
+Manifest compatibility is enforced at load time (including semver ranges for `coreApiVersionRange` and profile `versionRange`).
+
+---
+
+## Extension Lifecycle Security (RBAC + Trust)
+
+Lifecycle endpoints:
+
+- `GET /api/agents/extensions`
+- `POST /api/agents/extensions/reload`
+
+RBAC modes (`AGENT_EXTENSION_RBAC_MODE`):
+
+- `disabled` (loopback-only local admin access; remote callers are rejected)
+- `header` (trusted proxy/header asserted roles)
+- `jwt` (bearer-token verified role claims)
+
+Header mode:
+
+- validates `x-codex-rbac-token` against `AGENT_EXTENSION_RBAC_HEADER_SECRET`
+- reads `x-codex-role` and optional `x-codex-actor`
+- unless `AGENT_EXTENSION_ALLOW_INSECURE_HEADER_MODE=true`, header mode requires loopback host binding and `AGENT_EXTENSION_RBAC_HEADER_SECRET`
+
+JWT mode:
+
+- verifies `Authorization: Bearer <token>`
+- requires `AGENT_EXTENSION_RBAC_JWT_SECRET`
+- optional issuer/audience constraints:
+  - `AGENT_EXTENSION_RBAC_JWT_ISSUER`
+  - `AGENT_EXTENSION_RBAC_JWT_AUDIENCE`
+- configurable claims:
+  - role claim: `AGENT_EXTENSION_RBAC_JWT_ROLE_CLAIM` (default `role`)
+  - actor claim: `AGENT_EXTENSION_RBAC_JWT_ACTOR_CLAIM` (default `sub`)
+
+Trust/capability mode (`AGENT_EXTENSION_TRUST_MODE`):
+
+- `disabled`: allow undeclared capabilities
+- `warn`: allow + warn
+- `enforced`: block undeclared event/action capabilities
+
+---
+
+## Extension Validation and Conformance
+
+Run full release-gate validation:
+
+```bash
+pnpm --filter @repo/api typecheck
+pnpm --filter @repo/api test
+pnpm --filter @repo/web typecheck
+pnpm --filter @repo/web test
+pnpm smoke:runtime
+node scripts/run-agent-conformance.mjs
+```
+
+Conformance output artifact:
+
+- `.data/agent-conformance-report.json`
+
+Portable extension expectation:
+
+- one extension passes under at least two runtime profiles (`codex-manager` and `fixture-profile` in the bundled conformance harness).
 
 ---
 
@@ -225,8 +432,10 @@ Ignored report/state directories:
 ```text
 apps/
   api/        Fastify API + Codex app-server supervisor
+  cli/        Operator CLI for endpoint-complete API/websocket workflows
   web/        React/Vite frontend
 packages/
+  agent-runtime-sdk/ Provider-neutral extension event/runtime contracts
   api-client/ Generated TypeScript API client
   codex-protocol/ Generated protocol schema/types
 scripts/      Generation + runtime verification utilities
@@ -243,6 +452,7 @@ docs/         Product, architecture, protocol, and operations knowledge tree
 - Codex protocol index: [`docs/codex-app-server.md`](docs/codex-app-server.md)
 - Protocol deep dives: [`docs/protocol/`](docs/protocol/)
 - Operations index: [`docs/ops.md`](docs/ops.md)
+- CLI operations runbook: [`docs/operations/cli.md`](docs/operations/cli.md)
 - Setup/validation/troubleshooting/maintenance runbooks: [`docs/operations/`](docs/operations/)
 - Always-on API supervision runbook: [`docs/operations/api-service-supervision.md`](docs/operations/api-service-supervision.md)
 - Current implementation and verification status: [`docs/implementation-status.md`](docs/implementation-status.md)

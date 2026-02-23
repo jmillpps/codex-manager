@@ -2,113 +2,193 @@
 
 ## Purpose
 
-This runbook explains how to implement agent extensions under `agents/*` that subscribe to runtime events and enqueue queue jobs.
+This runbook explains how to build extension modules that integrate with the runtime event fanout contract and queue execution model.
 
 Primary question:
 
-- How do I add or modify event-driven agent workflows without hard-coding business logic in API core?
+- How do I add or modify event-driven workflows without hard-coding workflow logic into API core?
 
-## Runtime model
+## Authoring surfaces
 
-The API loads extension modules from:
+Use the runtime SDK package for extension contracts:
 
-- `agents/<agent>/events.ts`
-- `agents/<agent>/events.js`
-- `agents/<agent>/events.mjs`
+- `@codex-manager/agent-runtime-sdk`
 
-Repository baseline includes `agents/package.json` with `"type": "module"` so runtime-loaded extension modules are parsed as ESM in both `pnpm --filter @repo/api dev` and `pnpm --filter @repo/api start` paths.
-When authoring TypeScript extension files, use explicit `.ts` extensions for relative imports (for example `../runtime/events.ts`) to avoid runtime module-resolution failures in production start mode.
+Repository-local extensions can still import through:
 
-Ignored directories:
+- `agents/runtime/events.ts` (thin SDK re-export)
 
-- `agents/runtime`
-- `agents/lib`
-- dot-prefixed directories
+Core contract highlights:
 
-Each module registers handlers by event name and receives tools:
+- typed runtime events (`AgentRuntimeEvent`)
+- typed tools (`enqueueJob`, `logger`)
+- typed emit result envelopes (`enqueue_result`, `action_result`, `handler_result`, `handler_error`)
+- deterministic registration options (`priority`, `timeoutMs`)
 
-- `enqueueJob(input)` to push orchestrator jobs
-- `logger` for structured logs
+## Extension source layouts
 
-## Recommended agent directory layout
-
-Use this shape per agent:
+### Repo-local development extension
 
 ```txt
 agents/
   <agent>/
-    AGENTS.md
-    orientation.md
-    agent.config.json
+    extension.manifest.json
     events.ts
+    AGENTS.md
+    agent.config.json
     playbooks/
       ...
 ```
 
-File roles:
+### External/package-style extension
 
-- `AGENTS.md`: persistent instruction profile for the worker.
-- `orientation.md`: first-turn orientation message run once per worker session.
-- `agent.config.json`: model and turn policy for worker turns.
-- `events.ts`: subscriptions + job composition logic.
-- `playbooks/*`: focused API usage runbooks referenced from `AGENTS.md`.
+```txt
+<extension-root>/
+  extension.manifest.json
+  events.js|events.mjs|events.ts
+  AGENTS.md
+  agent.config.json
+```
 
-## Event module contract
+External roots are loaded through:
 
-Use `registerAgentEvents(registry)` and subscribe with `registry.on(eventType, handler)`.
+- `AGENT_EXTENSION_PACKAGE_ROOTS`
+- `AGENT_EXTENSION_CONFIGURED_ROOTS`
 
-Handler signature:
+See `docs/operations/agent-extension-lifecycle-and-conformance.md` for operational root wiring.
 
-- input:
-  - `event.type`
-  - `event.payload`
-- tools:
-  - `enqueueJob`
-  - `logger`
+## Required manifest fields
 
-Current event names emitted by API core:
+`extension.manifest.json` should include:
+
+- `name`
+- `version`
+- `agentId`
+- `displayName`
+- `runtime` compatibility:
+  - `coreApiVersion` and/or `coreApiVersionRange`
+  - `profiles[]` (`name`, `version` or `versionRange`)
+- `entrypoints.events`
+- `capabilities.events[]`
+- `capabilities.actions[]`
+
+Example:
+
+```json
+{
+  "name": "@acme/supervisor-agent",
+  "version": "1.0.0",
+  "agentId": "supervisor",
+  "displayName": "Supervisor",
+  "runtime": {
+    "coreApiVersion": 1,
+    "coreApiVersionRange": ">=1 <2",
+    "profiles": [
+      { "name": "codex-manager", "versionRange": ">=1 <2" }
+    ]
+  },
+  "entrypoints": {
+    "events": "./events.mjs"
+  },
+  "capabilities": {
+    "events": ["suggest_request.requested"],
+    "actions": ["queue.enqueue"]
+  }
+}
+```
+
+## Event registration contract
+
+Export `registerAgentEvents(registry)` and subscribe with:
+
+- `registry.on(eventType, handler, { priority, timeoutMs })`
+
+Runtime dispatch semantics:
+
+- fanout to all handlers for the event
+- deterministic order:
+  - `priority` ascending
+  - module name ascending
+  - registration index ascending
+- per-handler timeout isolation
+- one failing/timed-out handler does not block others
+
+Current API core event names:
 
 - `file_change.approval_requested`
 - `turn.completed`
 - `suggest_request.requested`
 
-## Queue enqueue contract
+## Handler output contract
 
-`enqueueJob` accepts:
+Handlers can return:
+
+- `AgentJobEnqueueResult` (`enqueued` or `already_queued`)
+- `AgentRuntimeActionRequest` (`kind: "action_request"`) for side effects
+- explicit `AgentEventEmitResult`
+- `void` / `null` / `undefined` for diagnostics-only handling
+
+Runtime executes action requests in API core; handlers cannot directly execute actions.
+Returning `action_result` directly is treated as invalid by runtime.
+
+Use stable capability/action names for `action_request.actionType`:
+
+- `queue.enqueue`
+- `transcript.upsert`
+- `approval.decide`
+- `turn.steer.create`
+
+## Trust and capability rules
+
+Runtime policy is configured with `AGENT_EXTENSION_TRUST_MODE`:
+
+- `disabled`: allow undeclared capabilities
+- `warn`: allow but log undeclared capability warnings
+- `enforced`: reject undeclared event/action capabilities
+
+In enforced mode:
+
+- undeclared event subscriptions can deny module activation
+- undeclared action attempts are denied with `status: "forbidden"` and `code: "undeclared_capability"`
+
+Declare capabilities accurately in the manifest to avoid activation/action failures.
+
+## Queue enqueue guidance
+
+Use `enqueueJob` with:
 
 - `type`
 - `projectId`
 - optional `sourceSessionId`
-- `payload` object
+- `payload`
 
-Current queue job types exposed by core:
+Core queue job types:
 
 - `agent_instruction`
 - `suggest_request`
 
-If no handler enqueues a job for an event, API endpoints depending on that event may return queue-conflict behavior (`409/503` depending on route).
+Dedupe and idempotency guidance:
 
-## Worker session behavior
+- define deterministic queue keys to prevent duplicate inflation
+- reuse stable transcript `messageId` values
+- include `supplementalTargets` on `agent_instruction` payload when queue-terminal reconciliation is required
+
+## Worker execution model
 
 Worker sessions are system-owned and owner-scoped:
 
-- mapping key: `${ownerId}::${agent}`
-- `ownerId` is either:
-  - project id (project-scoped worker)
-  - `session:<sessionId>` for unassigned-chat workflows that still need queue-backed workers
-- created lazily on first queued job
+- mapping key: `${ownerId}::${agentId}`
 - hidden from user session lists
-- blocked for user chat operations (`403 system_session`)
+- user chat operations against them return `403 system_session`
 
-Worker execution flow:
+Execution flow:
 
-1. resolve or create worker session
-2. run orientation turn once when `orientation.md` exists
-3. run instruction turn for each queued job
+1. resolve/create worker session
+2. run core queue-runner orientation once
+3. run optional extension bootstrap instruction once when provided by queue payload (`bootstrapInstruction`)
+4. run instruction turn for each queued job
 
-## Agent runtime policy (`agent.config.json`)
-
-Supported fields:
+Worker turn policy can be controlled by `agent.config.json`:
 
 - `model`
 - `turnPolicy`
@@ -116,56 +196,20 @@ Supported fields:
 - `instructionTurnPolicy`
 - `threadStartPolicy`
 
-Turn policy supports:
+## Validation checklist
 
-- `sandbox`
-- `networkAccess`
-- `approvalPolicy`
-- `effort`
+Before merging extension changes:
 
-If config is absent, API defaults are used.
-
-## Instruction text guidance
-
-Write instruction text as a deterministic contract for the worker:
-
-- include routing identifiers (`projectId`, `sourceSessionId`, `threadId`, `turnId`, item/approval ids when applicable)
-- include all context required to execute without lookups
-- specify strict execution order when order matters
-- specify exactly which API route to call and when
-- specify what must not happen when optional actions are disabled
-
-For transcript updates, use stable `messageId` conventions so retries and repeated writes remain idempotent.
-When queue-terminal reconciliation is needed, include `supplementalTargets` in `agent_instruction` payload so core can reconcile those rows to explicit terminal states without workflow-specific hard-coding.
-
-## Idempotency and dedupe guidance
-
-For each workflow, define:
-
-- queue dedupe key
-- transcript message ids
-- terminal reconciliation behavior
-
-Targets:
-
-- duplicate events should not create duplicate queued work
-- retries should upsert/replace the same transcript rows
-- terminal states should always be explicit for UI reconciliation
-
-## Validation checklist for extension changes
-
-Before merging extension updates:
-
-1. verify event payload parsing handles sparse/invalid input safely
-2. verify dedupe key shape prevents duplicate queue inflation
-3. verify queued job reaches terminal state on success/failure/cancel paths
-4. verify transcript rows are idempotent and anchor correctly
-5. verify websocket-visible state transitions match UI expectations
-6. verify stale worker session recovery path (thread not found) still converges
+1. manifest compatibility and capability declarations are valid
+2. handler payload parsing is defensive for sparse/invalid inputs
+3. queue dedupe behavior matches workflow requirements
+4. transcript message ids are stable/idempotent
+5. terminal states are explicit (`completed`/`failed`/`canceled`)
+6. behavior is verified under trust mode expected for deployment
 
 ## Related references
 
+- `docs/operations/agent-extension-lifecycle-and-conformance.md`
 - `docs/operations/agent-queue-framework.md`
 - `docs/protocol/harness-runtime-events.md`
-- `docs/operations/agent-queue-troubleshooting.md`
 - `docs/implementation-status.md`

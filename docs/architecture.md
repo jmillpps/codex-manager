@@ -88,7 +88,7 @@ The backend is a stateful protocol adapter.
 - Provide a stable REST surface to the UI
 - Implement product-level extensions that are outside native app-server methods (for example, hard-delete semantics with local artifact purge)
 - Persist and serve harness-owned session metadata (titles, project definitions, session-project mapping)
-- Load agent extension event modules from `agents/*/events.(ts|js|mjs)` and emit named runtime events into those handlers
+- Load agent extension modules from repo-local, installed-package, and configured source roots, enforce manifest compatibility, and emit named runtime events into handlers
 - Expose queue enqueue primitives to extension handlers so feature workflows are implemented in agent extension code instead of hard-coded API processors
 - Provision and manage system-owned agent sessions per project for queued worker turns
 
@@ -170,23 +170,11 @@ Backend must:
 
 # Agent Extension Runtime
 
-The API hosts a generic event runtime for `agents/*` modules:
+The API hosts a generic extension runtime that keeps workflow logic in extensions and keeps provider-specific behavior behind runtime profile adapters.
 
-- Each agent directory can provide `events.ts|events.js|events.mjs`.
-- Event modules register handlers by event name.
-- Handlers receive two tools: queue enqueue (`enqueueJob`) and logger.
-- Handlers transform runtime events into queue jobs (`agent_instruction`, `suggest_request`).
+For detailed source discovery, compatibility, dispatch, lifecycle, trust, RBAC, and audit semantics, see:
 
-This keeps API core behavior generic. Workflow-specific logic (prompt construction, routing strategy, transcript side effects, and optional auto actions) lives in agent extension code.
-
-Agent worker sessions are system-owned owner-scoped infrastructure:
-
-- They are mapped in metadata by `ownerId::agent`.
-- `ownerId` is either a real project id or `session:<sessionId>` for unassigned-chat workflows.
-- They are hidden from user chat lists.
-- User chat operations against them are rejected (`403 system_session`).
-- Optional one-time orientation is executed from `agents/<agent>/orientation.md`.
-- Turn runtime policy is read from `agents/<agent>/agent.config.json` when present.
+- `docs/architecture/agent-extension-runtime.md`
 
 ---
 
@@ -222,28 +210,31 @@ Agent worker sessions are system-owned owner-scoped infrastructure:
 
 `codex app-server` does not expose a dedicated suggest-request primitive, so the backend uses event-driven queue orchestration:
 
-1. `POST /api/sessions/:sessionId/suggested-request/jobs` emits `suggest_request.requested` and returns `202` with a queued job id.
+1. `POST /api/sessions/:sessionId/suggested-request/jobs` emits `suggest_request.requested` and returns `202` with queued job id plus `requestKey`.
 2. `POST /api/sessions/:sessionId/suggested-request` emits the same event, waits up to a bounded window, and returns either a completed suggestion (`200`) or queued status (`202`).
 3. Suggest jobs are single-flight per source chat; repeated clicks while one is queued/running return the existing job identity (`dedupe: "already_queued"`).
-4. Agent event modules convert that event into a `suggest_request` queue job with one text instruction turn on a hidden, system-owned agent chat.
-5. For unassigned chats, the queue owner id is `session:<sessionId>`, so suggestion jobs do not require a project assignment.
-6. If the queue is disabled/unavailable, queue-backed routes return structured `503` `job_conflict` errors.
-7. If a suggestion cannot be produced, the endpoint returns a deterministic fallback suggestion.
+4. Agent event modules convert that event into an `agent_instruction` queue job (`jobKind: suggest_request`) with one text instruction turn on a hidden, system-owned agent chat.
+5. Worker turns publish suggest-request progress and completion through `POST /api/sessions/:sessionId/suggested-request/upsert`; API pushes websocket delta `suggested_request_updated`.
+6. Queue execution is completion-signal based (`completionSignal.requestKey`) and deadline-bounded (`max(ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS, 45s)`): when no worker completion signal is observed in time, core writes deterministic fallback state and best-effort interrupts the worker turn before terminalizing the job.
+7. For unassigned chats, the queue owner id is `session:<sessionId>`, so suggestion jobs do not require a project assignment.
+8. If the queue is disabled/unavailable, queue-backed routes return structured `503` `job_conflict` errors.
+9. If a suggestion cannot be produced, the endpoint returns a deterministic fallback suggestion.
 
-Agent runtime permissions are agent-owned: if `agents/<agent>/agent.config.json` is present, orientation/job turns run with that declared policy (sandbox/network/approval); otherwise API defaults are used.
+Agent runtime permissions are agent-owned: if `agents/<agent>/agent.config.json` is present, orientation/job turns run with that declared policy (sandbox/network/approval); otherwise API defaults are used. Core always runs one system queue-runner orientation turn per agent session before queued work begins.
 
 ## File-Change Supervisor Pipeline (Best-Effort Event-Driven Queue)
 
 File-change supervision is executed as agent-driven queue work:
 
-1. Pending file-change approval requests emit `file_change.approval_requested` with normalized diff details plus turn/user context.
+1. Pending file-change approval requests emit `file_change.approval_requested` with normalized diff details plus turn/user context, and file-change turn activity is tracked by stable per-turn anchor ids.
 2. Supervisor event handlers enqueue one `agent_instruction` job per file-change event. The instruction requires ordered execution: diff explainability, supervisor insight, then optional auto actions.
-3. The supervisor writes explainability and insight rows through `POST /api/sessions/:sessionId/transcript/upsert`, anchored to the file-change item/approval for inline UI grouping.
-4. While `agent_instruction` jobs run, the API mirrors assistant output snapshots into supplemental transcript rows (`type: agent.jobOutput`, `messageId: agent-job-output::<jobId>`) for live queue observability in the source chat.
+3. Supervisor worker turns execute side effects live through CLI (`@repo/cli`) as they run (transcript upserts, approval decisions, optional steer).
+4. `assistant_text` jobs stream assistant snapshots into supplemental transcript rows (`type: agent.jobOutput`, `messageId: agent-job-output::<jobId>`); `none` response-mode jobs may still emit assistant output for observability but do not require structured result parsing.
 5. Worker turn completion for hidden agent chats is resolved from runtime notification streams (`turn/*`, `item/*`, agent-message deltas); `thread/read(includeTurns)` is kept as bounded fallback.
 6. Queue terminal reconciliation is payload-driven: extension handlers provide `supplementalTargets` (message id/type/placeholder/fallback contract), and core reconciles these to explicit terminal transcript states when needed.
-7. Turn completion emits `turn.completed` only when file-change approval activity occurred in that turn; supervisor handlers enqueue one turn-level `agent_instruction` review job.
-8. This pipeline is best-effort eventual and must not block foreground user turn streaming.
+7. Turn completion emits `turn.completed` only when file-change approval activity occurred in that turn; gating uses in-memory per-turn anchors with supplemental approval-row recovery after restart, and the emitted review context snapshot is assembled from canonical turn transcript (`thread/read(includeTurns)`) merged with supplemental ledger rows.
+8. `turn.completed` dispatch is best-effort with bounded in-flight dedupe and retry (`0ms`, `+60ms`, `+120ms`); if handlers are present but none returns actionable enqueue/action output, dispatch is treated as failed and retried instead of silently succeeding.
+9. This pipeline is best-effort eventual and must not block foreground user turn streaming.
 
 ---
 
@@ -461,7 +452,7 @@ These must always remain true:
 1. Backend never modifies Codex semantic output.
 2. Backend never synthesizes assistant content.
 3. UI never talks directly to Codex.
-4. Codex App Server is the only agent runtime.
+4. Codex App Server is the default production runtime profile in this repository; core extension/runtime contracts remain profile-agnostic.
 5. `item/completed` is authoritative state.
 6. Handshake is performed exactly once per connection.
 7. Experimental APIs require explicit opt-in.

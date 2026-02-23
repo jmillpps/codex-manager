@@ -13,12 +13,14 @@ Use this with:
 
 ## Last verified
 
-- Date: February 22, 2026
+- Date: February 23, 2026
 - Validation run:
   - `pnpm --filter @repo/api typecheck` (pass)
   - `pnpm --filter @repo/api test` (pass)
   - `pnpm --filter @repo/web typecheck` (pass)
   - `pnpm --filter @repo/web test` (pass)
+  - `pnpm smoke:runtime` (pass, with API running)
+  - `node scripts/run-agent-conformance.mjs` (pass)
 
 ## Current implemented scope
 
@@ -39,8 +41,9 @@ Use this with:
   - send message applies the persisted session-controls tuple (`model`, approval policy, network access, filesystem sandbox) and accepts optional per-turn overrides for compatibility.
   - thread lifecycle calls (`thread/start`, `thread/fork`, `thread/resume`) optimistically request `experimentalRawEvents` and automatically retry without it when unsupported (`requires experimentalApi capability`) so runtime compatibility is preserved across app-server versions.
   - queue-backed suggest-request APIs:
-    - `POST /api/sessions/:sessionId/suggested-request/jobs` enqueues `suggest_request` and returns `202` with queue dedupe status.
-    - `POST /api/sessions/:sessionId/suggested-request` enqueues the same job and waits briefly (`ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS`) before returning `200` suggested request text or `202 queued`.
+    - `POST /api/sessions/:sessionId/suggested-request/jobs` emits `suggest_request.requested`; repository supervisor enqueues one `agent_instruction` job (`jobKind: suggest_request`) and API returns `202` with queue dedupe status plus `requestKey`.
+    - `POST /api/sessions/:sessionId/suggested-request` emits the same event, waits briefly (`ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS`) for queued completion, and returns either `200` suggested request text or `202 queued`.
+    - `POST /api/sessions/:sessionId/suggested-request/upsert` updates streaming/terminal suggest-request state (`streaming|complete|error|canceled`) for a specific `requestKey` and emits websocket delta `suggested_request_updated`.
     - suggest-request jobs are single-flight per source chat (`already_queued` dedupe when one is queued/running).
     - unassigned-chat suggest-request jobs run under session-scoped owner ids (`session:<sessionId>`), so they do not require project assignment.
     - when no loaded agent event handler enqueues `suggest_request`, endpoints return structured queue conflict semantics instead of an unhandled server error.
@@ -49,31 +52,52 @@ Use this with:
   - suggest-request generation supports optional reasoning effort override (`effort`) for suggestion-generation turns.
   - queue workers propagate queue abort signals and running turn context so cancel/timeout behavior can interrupt active agent turns and avoid wedged shutdown lanes.
   - queue replay preserves unknown-type or schema-invalid persisted jobs as explicit terminal failures (`recovery_unknown_job_type:*`, `recovery_invalid_payload:*`) for observability and client reconciliation.
-  - core API runs a generic agent runtime:
-    - dynamically loads `agents/*/events.(ts|js|mjs)` (excluding `agents/runtime`, `agents/lib`, and dot-directories).
-    - emits named events into those handlers (for example `file_change.approval_requested`, `turn.completed`, `suggest_request.requested`).
-    - exposes queue + execution primitives only (`agent_instruction`, `suggest_request`), not domain-specific review logic.
+  - core API runs a generic extension runtime:
+    - dynamically loads extensions from deterministic source roots:
+      - repo-local `agents/*`
+      - `AGENT_EXTENSION_PACKAGE_ROOTS`
+      - `AGENT_EXTENSION_CONFIGURED_ROOTS`
+    - validates manifest/entrypoint/runtime compatibility before activation (including full semver range checks for core/profile ranges).
+    - emits named events (`file_change.approval_requested`, `turn.completed`, `suggest_request.requested`) with fanout deterministic dispatch (`priority`, module name, registration index).
+    - dispatch enforces first-wins action reconciliation per emitted event: after first `action_result(performed)`, later action requests are normalized as `not_eligible` without executing additional side effects.
+    - normalizes handler outputs to typed envelopes (`enqueue_result`, `action_result`, `handler_result`, `handler_error`) with per-handler timeout isolation.
+    - exposes queue/execution primitives without hard-coding workflow review logic in API core; repository supervisor workflows (including suggest-request) run through `agent_instruction`.
+  - extension lifecycle controls:
+    - `GET /api/agents/extensions` returns snapshot + module inventory (origin, compatibility, capability declaration, trust evaluation).
+    - `POST /api/agents/extensions/reload` supports atomic snapshot-swap reload with prior-snapshot preservation on failure.
+    - reload/list role control uses `AGENT_EXTENSION_RBAC_MODE=disabled|header|jwt` (`disabled` is loopback-only; header mode validates shared token `x-codex-rbac-token` and is loopback-guarded unless explicitly opted out).
+    - trust/capability behavior uses `AGENT_EXTENSION_TRUST_MODE=disabled|warn|enforced`.
+    - reload attempts are audit logged to `.data/agent-extension-audit.json` with success/failed/forbidden outcomes.
+  - runtime profile adapter boundary:
+    - turn start/read/interrupt and approval/steer actions execute through `RuntimeProfileAdapter` contracts.
+    - codex profile adapter is the default implementation; fixture profile adapter is used for portability tests.
   - each queued `agent_instruction` job executes one text instruction turn on an agent-owned system chat (owner + agent), one job at a time through the queue.
   - agent chats are created lazily and tracked in session metadata under `projectAgentSessionByKey`.
+  - core performs one mandatory system queue-runner orientation turn per agent session before any queued work is processed.
   - agent execution policy is agent-owned:
     - if `agents/<agent>/agent.config.json` exists, orientation/job turns use its declared policy (including optional `model`, `turnPolicy`, `orientationTurnPolicy`, `instructionTurnPolicy`, and `threadStartPolicy` overrides; turn policies also support optional reasoning `effort`).
     - if no config file exists, policy falls back to API defaults (`DEFAULT_SANDBOX_MODE`, `DEFAULT_NETWORK_ACCESS`, `DEFAULT_APPROVAL_POLICY`).
     - repository supervisor defaults are defined in `agents/supervisor/agent.config.json` (`model: gpt-5.3-codex-spark`, `sandbox: workspace-write`, `networkAccess: enabled`, `approvalPolicy: never`, `effort: medium`).
   - agent instruction execution auto-recovers one time from stale/missing mapped agent chats (`thread not found` / rollout-missing): mapping is cleared, session is reprovisioned, and the job retries once.
-  - queue retries for agent-driven jobs (`agent_instruction`, `suggest_request`) use an immediate-first linear backoff (`0ms`, then `+60ms` per subsequent retry attempt) for fast stale-session recovery on first-turn workloads.
+  - queue retries for agent-driven jobs (`agent_instruction`) use an immediate-first linear backoff (`0ms`, then `+60ms` per subsequent retry attempt) for fast stale-session recovery on first-turn workloads.
   - supervisor/agent worker turn tracking is event-driven for system-owned agent chats:
     - API observes runtime notifications (`turn/*`, `item/*`, agent-message deltas) for hidden agent sessions and settles worker waits from that stream first.
     - `thread/read(includeTurns)` remains a fallback path only (mainly for non-system sessions or missed event windows).
     - includeTurns fallback materialization is bounded by `ORCHESTRATOR_AGENT_INCLUDE_TURNS_GRACE_MS`; when the grace window is exceeded, the job fails retryable instead of burning the full turn-timeout window.
+    - completed-turn assistant-text waits now include an explicit post-completion grace window before failing when no assistant text is yet readable, reducing false negatives when final assistant output lands slightly after `turn/completed`.
     - failed worker turns are treated as job failures (not success) in both assistant-text and settle-only wait paths.
-  - if `agents/<agent>/orientation.md` exists, the API runs that orientation turn once before the first real job on that agent chat.
+  - queued jobs can provide optional extension bootstrap instructions (`bootstrapInstruction`) that core runs once per `(agent session, bootstrap key)` after system orientation and before normal job turns.
   - file-change approval requests enqueue agent workflows via event handlers; API core does not include built-in explainability/risk/review processors.
+  - `turn.completed` event context snapshots are built from canonical `thread/read(includeTurns)` turn content merged with supplemental ledger entries (supplemental-only fallback if canonical read is unavailable), so end-of-turn supervisor review receives the same transcript model users see.
   - default supervisor auto-action policy in `agents/supervisor/events.ts` is:
     - auto-approve enabled at `high` threshold (effectively always eligible).
     - auto-steer enabled at `med` threshold (ignores low/none risk).
     - auto-reject disabled.
     - all three remain environment-overridable via `SUPERVISOR_AUTO_*` flags and thresholds.
-  - turn-completed event emission for agent review is gated by observed file-change approval activity in that turn (best-effort event-driven handoff).
+  - turn-completed event emission for agent review is gated by observed per-turn file-change approval anchors (stable `anchorItemId` set), so approval-reconcile polling does not overcount and first-turn review gating remains deterministic.
+  - when in-memory turn anchor tracking is absent (for example after API restart), turn-completed gating recovers file-change activity from persisted supplemental approval transcript rows (`approval.request` where `details.method=item/fileChange/requestApproval`) to avoid silently skipping final review.
+  - turn-completed dispatch is in-flight deduped per `(threadId, turnId)` and retried up to three attempts (`0ms`, `+60ms`, `+120ms`) before terminal give-up; when handlers are present but no actionable enqueue/action result is returned, dispatch is treated as failed for retry instead of silently succeeding.
+  - file-change turn tracking is cleared on explicit turn terminalization and on session deletion paths to avoid stale-memory drift.
   - orchestrator queue inspection/cancel APIs:
     - `GET /api/orchestrator/jobs/:jobId`
     - `GET /api/projects/:projectId/orchestrator/jobs`
@@ -103,6 +127,7 @@ Use this with:
   - session/project metadata updates.
   - tool user-input requested/resolved.
   - orchestrator queue lifecycle events (`orchestrator_job_queued|started|progress|completed|failed|canceled`).
+  - suggested-request state deltas (`suggested_request_updated`).
   - plan/diff/token-usage updates.
   - app/account/mcp update notifications.
 - Error handling:
@@ -131,11 +156,25 @@ Use this with:
   - Supplemental transcript rows capture locally observed item timing (`startedAt`/`completedAt`) when Codex item payloads omit timestamps, and merge/upsert logic preserves earliest start plus latest completion per item id for stronger post-restart timing fidelity.
   - `POST /api/sessions/:sessionId/suggested-request` builds context from the same merged/canonicalized transcript pipeline as `GET /api/sessions/:sessionId`, keeping suggested-request context consistent with visible chat history after reload/restart.
   - `GET /api/health` exposes orchestrator queue availability and state counters (`enabled`, queued/running/completed/failed/canceled/projects).
-  - Explainability supplemental transcript rows (`type: fileChange.explainability`) are upserted by stable message id and anchored after the corresponding file-change item when present in-turn.
-  - `agent_instruction` orchestrator jobs stream assistant output snapshots into supplemental transcript rows (`type: agent.jobOutput`, stable `messageId: agent-job-output::<jobId>`) and continue updating that row through terminal completion/error/cancel states for queue-level observability.
-  - Queue terminal handlers reconcile supplemental rows from payload-declared `supplementalTargets` (message id/type/placeholder/fallback contract) to explicit terminal status when needed, so UI cards do not remain indefinitely pending after job completion/failure/cancel.
-  - Supplemental transcript upsert preserves terminal status against stale streaming regressions for the same message id, preventing late retry/duplicate streaming writes from downgrading already-finalized transcript rows.
-  - System-owned agent sessions remain harness metadata, are filtered from `GET /api/sessions` and forwarded stream traffic, and have server requests (approvals/tool-input) auto-declined/canceled with startup/request-path cleanup.
+- Explainability supplemental transcript rows (`type: fileChange.explainability`) are upserted by stable message id and anchored after the corresponding file-change item when present in-turn.
+- Supplemental supervisor placeholders (`fileChange.explainability`, `fileChange.supervisorInsight`) are replaced with explicit error/canceled fallback text on terminal failure/cancel when the content is still a placeholder, avoiding misleading perpetual queued/running copy.
+- `agent_instruction` orchestrator jobs support response modes:
+  - `assistant_text`: streams assistant output snapshots into supplemental transcript rows (`type: agent.jobOutput`, stable `messageId: agent-job-output::<jobId>`).
+  - `action_intents`: parses worker JSON action intents and executes them in API core with trust/capability checks, idempotency replay/conflict semantics, and project/session/turn scope locks.
+  - `none`: no structured response contract; worker is expected to perform side effects live (for example via CLI calls) while the turn runs.
+  - fallback idempotency keys for intents that omit `idempotencyKey` are derived from a SHA-256 digest of normalized action signatures (stable across JSON object key ordering and independent of intent array index).
+- repository supervisor extension currently runs `agent_instruction` in `expectResponse: "none"` mode and performs transcript/approval/steer actions through CLI commands (not JSON action-intent envelopes).
+- repository supervisor extension runs suggest-request as `agent_instruction` (`jobKind: suggest_request`) with CLI side-effect flows (`sessions suggest-request upsert`) and does not rely on assistant-text output as the delivery contract.
+- suggest-request `agent_instruction` jobs support completion-signal metadata (`completionSignal`) plus optional `model`/`effort` and `fallbackSuggestionDraft` payload fields.
+- suggest-request `agent_instruction` execution is deadline-bounded: if no completion signal is observed by the bounded window (`max(ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS, 45s)`), core writes a deterministic fallback suggestion via runtime state upsert, interrupts the worker turn best-effort, and completes the queue job without waiting for assistant-text output.
+- direct extension `action_request` execution in event fanout uses the same scoped-action executor; when event context is present, scope is derived from payload context and enforced for all action types (including `queue.enqueue` project/session constraints).
+- runtime turn wait loops for system-owned agent sessions reconcile with periodic `thread/read` polling when in-memory runtime updates go stale or settle without output, reducing false timeout/stuck states when websocket/runtime signals are delayed.
+- Queue terminal handlers reconcile supplemental rows from payload-declared `supplementalTargets` (message id/type/placeholder/fallback contract) to explicit terminal status when needed, so UI cards do not remain indefinitely pending after job completion/failure/cancel.
+- Supplemental transcript upsert preserves terminal status against stale streaming regressions for the same message id, preventing late retry/duplicate streaming writes from downgrading already-finalized transcript rows.
+- System-owned agent sessions remain harness metadata, are filtered from `GET /api/sessions` and forwarded stream traffic, and have server requests (approvals/tool-input) auto-declined/canceled with startup/request-path cleanup.
+  - extension portability/conformance gate:
+    - `node scripts/run-agent-conformance.mjs` generates `.data/agent-conformance-report.json`.
+    - portable extension fixture proves parity across `codex-manager` and `fixture-profile`.
 
 ### Web (`apps/web`)
 
@@ -208,6 +247,28 @@ Use this with:
 - Deleted active-session UX:
   - right pane blocks interaction and requires selecting/creating another chat.
 
+### CLI (`apps/cli`)
+
+- Operator CLI package is implemented as `@repo/cli` with binaries:
+  - `codex-manager`
+  - `cmgr`
+- Runtime/profile model:
+  - profile store at `~/.config/codex-manager/cli/config.json` (or `$XDG_CONFIG_HOME/codex-manager/cli/config.json`).
+  - profile defaults for `baseUrl`, `apiPrefix`, `timeoutMs`, base headers, and auth fields.
+  - runtime resolution order is flag > environment > profile.
+- Auth and RBAC headers are first-class globals:
+  - bearer token (`Authorization`)
+  - extension RBAC headers (`x-codex-rbac-token`, `x-codex-role`, `x-codex-actor`)
+- Command coverage:
+  - domain commands for system/models/apps/skills/mcp/account/config/runtime/feedback/extensions/orchestrator/projects/sessions.
+  - dedicated approval and tool-input decision commands.
+  - websocket stream command (`stream events`) for live event inspection.
+  - raw escape hatch (`api request`) for direct endpoint invocation.
+- Route coverage parity:
+  - explicit CLI route mapping in `apps/cli/src/lib/route-coverage.ts`.
+  - parity test compares CLI bindings to API route registrations in `apps/api/src/index.ts`.
+  - parity mismatch is treated as a release blocker for CLI endpoint coverage.
+
 ### API client and contracts
 
 - OpenAPI/client generation covers core session/settings/account/tool-input APIs, but currently does not yet model all newer orchestrator/session-control surfaces in generated helper signatures (for example `/sessions/:id/session-controls`, queue-backed suggested-request jobs endpoint, and orchestrator job inspection/cancel endpoints).
@@ -229,6 +290,8 @@ Use this with:
 - `pnpm --filter @repo/api test`
 - `pnpm --filter @repo/web typecheck`
 - `pnpm --filter @repo/web test`
+- `pnpm smoke:runtime` (with API running)
+- `node scripts/run-agent-conformance.mjs`
 
 ### Current validation limitations
 

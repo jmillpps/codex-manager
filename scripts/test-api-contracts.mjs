@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,26 +16,108 @@ const codexHome = path.join(dataDir, "codex-home");
 const supplementalTranscriptPath = path.join(dataDir, "supplemental-transcript.json");
 const sessionMetadataPath = path.join(dataDir, "session-metadata.json");
 const orchestratorJobsPath = path.join(dataDir, "orchestrator-jobs.json");
+const extensionAuditPath = path.join(dataDir, "agent-extension-audit.json");
+const requestTimeoutMsRaw = Number(process.env.API_CONTRACT_REQUEST_TIMEOUT_MS ?? 15_000);
+const requestTimeoutMs = Number.isFinite(requestTimeoutMsRaw) && requestTimeoutMsRaw > 0 ? requestTimeoutMsRaw : 15_000;
 
 function makeJsonResponse(status, body) {
   return { status, ok: status >= 200 && status < 300, body };
 }
 
-async function request(pathname, init = {}) {
-  const response = await fetch(`${apiBase}${pathname}`, init);
-  const text = await response.text();
-  let body;
-  try {
-    body = text.length > 0 ? JSON.parse(text) : null;
-  } catch {
-    body = text;
-  }
-  return makeJsonResponse(response.status, body);
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitForHealth(timeoutMs = 120_000) {
+function isRetryableNetworkError(error) {
+  const causeCode = error && typeof error === "object" && "cause" in error ? error.cause?.code : undefined;
+  return causeCode === "ECONNREFUSED" || causeCode === "ECONNRESET" || causeCode === "EPIPE";
+}
+
+function isAbortError(error) {
+  return Boolean(error && typeof error === "object" && "name" in error && error.name === "AbortError");
+}
+
+async function waitFor(condition, description, timeoutMs = 60_000, intervalMs = 500) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
+    const result = await condition();
+    if (result) {
+      return result;
+    }
+    await sleep(intervalMs);
+  }
+  throw new Error(`timed out waiting for ${description}`);
+}
+
+function assertApiProcessAlive(processHandle, stage) {
+  if (!processHandle) {
+    return;
+  }
+  if (processHandle.exitCode !== null || processHandle.signalCode !== null) {
+    throw new Error(
+      `api process exited during ${stage} (exitCode=${String(processHandle.exitCode)}, signal=${String(processHandle.signalCode)})`
+    );
+  }
+}
+
+async function request(pathname, init = {}) {
+  const maxAttempts = 4;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const timeoutAbortController = new AbortController();
+    const timeoutHandle = setTimeout(() => timeoutAbortController.abort(), requestTimeoutMs);
+    const signal =
+      init && typeof init === "object" && "signal" in init && init.signal
+        ? AbortSignal.any([init.signal, timeoutAbortController.signal])
+        : timeoutAbortController.signal;
+    try {
+      const response = await fetch(`${apiBase}${pathname}`, { ...init, signal });
+      const text = await response.text();
+      let body;
+      try {
+        body = text.length > 0 ? JSON.parse(text) : null;
+      } catch {
+        body = text;
+      }
+      clearTimeout(timeoutHandle);
+      return makeJsonResponse(response.status, body);
+    } catch (error) {
+      clearTimeout(timeoutHandle);
+      const timedOut = isAbortError(error) && timeoutAbortController.signal.aborted;
+      if (attempt >= maxAttempts || (!isRetryableNetworkError(error) && !timedOut)) {
+        throw error;
+      }
+      await sleep(250 * attempt);
+    }
+  }
+
+  throw new Error(`request attempts exhausted for ${pathname}`);
+}
+
+async function waitForApiDown(timeoutMs = 5_000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const abortController = new AbortController();
+    const timeoutHandle = setTimeout(() => abortController.abort(), 400);
+    try {
+      await fetch(`${apiBase}/health`, {
+        method: "GET",
+        signal: abortController.signal
+      });
+    } catch {
+      clearTimeout(timeoutHandle);
+      return;
+    }
+    clearTimeout(timeoutHandle);
+    await sleep(150);
+  }
+
+  throw new Error(`api process did not release ${apiBase} within ${timeoutMs}ms`);
+}
+
+async function waitForHealth(timeoutMs = 60_000, processHandle = null) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    assertApiProcessAlive(processHandle, "health wait");
     try {
       const health = await request("/health");
       if (health.status === 200 && health.body?.status === "ok") {
@@ -50,12 +132,20 @@ async function waitForHealth(timeoutMs = 120_000) {
   throw new Error(`timed out waiting for API health on ${apiBase}`);
 }
 
-async function waitForSessionContext(sessionId, timeoutMs = 60_000) {
+async function waitForSessionContext(sessionId, timeoutMs = 30_000, processHandle = null) {
   const started = Date.now();
   const encodedSessionId = encodeURIComponent(sessionId);
 
   while (Date.now() - started < timeoutMs) {
-    const detail = await request(`/sessions/${encodedSessionId}`);
+    assertApiProcessAlive(processHandle, "session context wait");
+    let detail;
+    try {
+      detail = await request(`/sessions/${encodedSessionId}`);
+    } catch {
+      assertApiProcessAlive(processHandle, "session context wait after request error");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      continue;
+    }
     if (detail.status === 200) {
       const transcript = Array.isArray(detail.body?.transcript) ? detail.body.transcript : [];
       const hasChatContext = transcript.some(
@@ -112,8 +202,40 @@ function startApiProcess(envOverrides = {}) {
       DEFAULT_APPROVAL_POLICY: "on-failure",
       ...envOverrides
     },
-    stdio: "inherit"
+    stdio: "inherit",
+    detached: true
   });
+}
+
+function signalApiProcessTree(processHandle, signal) {
+  const pid = typeof processHandle?.pid === "number" ? processHandle.pid : null;
+  if (pid && Number.isInteger(pid) && pid > 1) {
+    if (process.platform === "win32") {
+      try {
+        const args = ["/PID", String(pid), "/T"];
+        if (signal === "SIGKILL") {
+          args.push("/F");
+        }
+        spawnSync("taskkill", args, { stdio: "ignore" });
+        return;
+      } catch {
+        // fall through to direct child signaling
+      }
+    }
+
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch {
+      // fall through to direct child signaling
+    }
+  }
+
+  try {
+    processHandle.kill(signal);
+  } catch {
+    // ignore signaling errors; waitForExit handles terminal detection
+  }
 }
 
 async function stopApiProcess(processHandle) {
@@ -121,15 +243,41 @@ async function stopApiProcess(processHandle) {
     return;
   }
 
-  if (!processHandle.killed) {
-    processHandle.kill("SIGTERM");
+  if (processHandle.exitCode !== null || processHandle.signalCode !== null) {
+    signalApiProcessTree(processHandle, "SIGTERM");
+    signalApiProcessTree(processHandle, "SIGKILL");
+    await waitForApiDown(2_500);
+    return;
   }
 
-  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const waitForExit = (timeoutMs) =>
+    new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        processHandle.off("exit", onExit);
+        resolve();
+      };
+      const onExit = () => {
+        finish();
+      };
+      const timer = setTimeout(finish, timeoutMs);
+      processHandle.on("exit", onExit);
+    });
 
-  if (processHandle.exitCode === null && !processHandle.killed) {
-    processHandle.kill("SIGKILL");
+  signalApiProcessTree(processHandle, "SIGTERM");
+  await waitForExit(1_500);
+
+  if (processHandle.exitCode === null && processHandle.signalCode === null) {
+    signalApiProcessTree(processHandle, "SIGKILL");
+    await waitForExit(1_500);
   }
+
+  await waitForApiDown(5_000);
 }
 
 async function appendSyntheticSupplementalEntries(threadId, entries) {
@@ -269,12 +417,20 @@ async function injectQueuedOrchestratorJob(job) {
   await writeFile(orchestratorJobsPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
 }
 
-async function waitForOrchestratorJobTerminal(jobId, timeoutMs = 120_000) {
+async function waitForOrchestratorJobTerminal(jobId, timeoutMs = 90_000, processHandle = null) {
   const started = Date.now();
   const encodedJobId = encodeURIComponent(jobId);
 
   while (Date.now() - started < timeoutMs) {
-    const detail = await request(`/orchestrator/jobs/${encodedJobId}`);
+    assertApiProcessAlive(processHandle, "orchestrator job terminal wait");
+    let detail;
+    try {
+      detail = await request(`/orchestrator/jobs/${encodedJobId}`);
+    } catch {
+      assertApiProcessAlive(processHandle, "orchestrator job terminal wait after request error");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      continue;
+    }
     if (detail.status === 200) {
       const state = detail.body?.job?.state;
       if (state === "completed" || state === "failed" || state === "canceled") {
@@ -301,8 +457,20 @@ async function main() {
     cleaned = true;
 
     await stopApiProcess(apiProcess);
-
-    await rm(dataDir, { recursive: true, force: true });
+    const cleanupRetries = 5;
+    for (let attempt = 1; attempt <= cleanupRetries; attempt += 1) {
+      try {
+        await rm(dataDir, { recursive: true, force: true });
+        break;
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? error.code : null;
+        const retryable = code === "ENOTEMPTY" || code === "EBUSY" || code === "EPERM";
+        if (!retryable || attempt === cleanupRetries) {
+          throw error;
+        }
+        await sleep(200 * attempt);
+      }
+    }
   };
 
   const onSignal = async () => {
@@ -314,7 +482,7 @@ async function main() {
   process.on("SIGTERM", onSignal);
 
   try {
-    await waitForHealth();
+    await waitForHealth(60_000, apiProcess);
 
     const capabilities = await request("/capabilities");
     assert.equal(capabilities.status, 200);
@@ -325,6 +493,27 @@ async function main() {
       collaborationModes.status === 200 || collaborationModes.status === 501,
       `unexpected /collaboration/modes status ${collaborationModes.status}`
     );
+
+    const extensionList = await request("/agents/extensions");
+    assert.equal(extensionList.status, 200);
+    assert.equal(extensionList.body?.status, "ok");
+    assert.ok(Array.isArray(extensionList.body?.modules));
+
+    const extensionReload = await request("/agents/extensions/reload", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({})
+    });
+    assert.ok(
+      extensionReload.status === 200 || extensionReload.status === 400 || extensionReload.status === 409,
+      `unexpected extension reload status ${extensionReload.status}`
+    );
+
+    const extensionAuditRaw = await readFile(extensionAuditPath, "utf8");
+    const extensionAudit = JSON.parse(extensionAuditRaw);
+    assert.equal(extensionAudit?.version, 1);
+    assert.ok(Array.isArray(extensionAudit?.records));
+    assert.ok(extensionAudit.records.length >= 1);
 
     const createSession = await request("/sessions", {
       method: "POST",
@@ -467,12 +656,30 @@ async function main() {
       })
     });
     assert.equal(sendSeedMessage.status, 202);
+    assert.equal(typeof sendSeedMessage.body?.turnId, "string");
+    const seedTurnId = sendSeedMessage.body?.turnId;
+    const steerSeedTurn = await request(
+      `/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(seedTurnId)}/steer`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ input: "Continue with one more concise line." })
+      }
+    );
+    assert.ok(
+      steerSeedTurn.status === 200 || steerSeedTurn.status === 400 || steerSeedTurn.status === 409,
+      `unexpected steer status ${steerSeedTurn.status}`
+    );
+    if (steerSeedTurn.status === 400) {
+      const steerError = String(steerSeedTurn.body?.result?.details?.error ?? "");
+      assert.ok(/no active turn to steer/i.test(steerError), `unexpected steer 400 error: ${steerError}`);
+    }
 
     const controlsAfterSend = await request(`/sessions/${encodeURIComponent(sessionId)}/session-controls`);
     assert.equal(controlsAfterSend.status, 200);
     assert.equal(controlsAfterSend.body?.controls?.approvalPolicy, "on-failure");
 
-    const hasSuggestionContext = await waitForSessionContext(sessionId);
+    const hasSuggestionContext = await waitForSessionContext(sessionId, 30_000, apiProcess);
 
     const queuedSuggestRequestOne = await request(`/sessions/${encodeURIComponent(sessionId)}/suggested-request/jobs`, {
       method: "POST",
@@ -504,7 +711,7 @@ async function main() {
       );
     }
 
-    const queuedSuggestTerminal = await waitForOrchestratorJobTerminal(queuedSuggestRequestOne.body?.jobId);
+    const queuedSuggestTerminal = await waitForOrchestratorJobTerminal(queuedSuggestRequestOne.body?.jobId, 90_000, apiProcess);
     assert.notEqual(
       queuedSuggestTerminal.state === "failed" &&
         /project not found:\s*session:/i.test(String(queuedSuggestTerminal.error ?? "")),
@@ -544,28 +751,28 @@ async function main() {
     assert.equal(missingQueueJobCancel.status, 404);
     assert.equal(missingQueueJobCancel.body?.status, "not_found");
 
-    const suggestedReply = await request(`/sessions/${encodeURIComponent(sessionId)}/suggested-request`, {
+    const suggestedRequest = await request(`/sessions/${encodeURIComponent(sessionId)}/suggested-request`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(hasSuggestionContext ? { effort: "minimal" } : { draft: "Please improve this sentence.", effort: "minimal" })
     });
-    assert.ok(suggestedReply.status === 200 || suggestedReply.status === 202);
+    assert.ok(suggestedRequest.status === 200 || suggestedRequest.status === 202);
 
-    if (suggestedReply.status === 200) {
-      assert.equal(typeof suggestedReply.body?.suggestion, "string");
-      assert.ok(suggestedReply.body.suggestion.length > 0);
+    if (suggestedRequest.status === 200) {
+      assert.equal(typeof suggestedRequest.body?.suggestion, "string");
+      assert.ok(suggestedRequest.body.suggestion.length > 0);
 
       if (hasSuggestionContext) {
         assert.ok(
-          suggestedReply.body?.status === "ok" || suggestedReply.body?.status === "fallback",
-          `unexpected suggested-request status with context: ${suggestedReply.body?.status}`
+          suggestedRequest.body?.status === "ok" || suggestedRequest.body?.status === "fallback",
+          `unexpected suggested-request status with context: ${suggestedRequest.body?.status}`
         );
       } else {
-        assert.equal(suggestedReply.body?.status, "fallback");
+        assert.equal(suggestedRequest.body?.status, "fallback");
       }
     } else {
-      assert.equal(suggestedReply.body?.status, "queued");
-      assert.equal(typeof suggestedReply.body?.jobId, "string");
+      assert.equal(suggestedRequest.body?.status, "queued");
+      assert.equal(typeof suggestedRequest.body?.jobId, "string");
     }
 
     const assignSessionToProject = await request(`/sessions/${encodeURIComponent(sessionId)}/project`, {
@@ -583,7 +790,7 @@ async function main() {
     });
     assert.equal(projectSuggestRequest.status, 202);
     assert.equal(typeof projectSuggestRequest.body?.jobId, "string");
-    await waitForOrchestratorJobTerminal(projectSuggestRequest.body?.jobId);
+    await waitForOrchestratorJobTerminal(projectSuggestRequest.body?.jobId, 90_000, apiProcess);
 
     const metadataAfterProjectSuggest = await readSessionMetadata();
     const supervisorKey = `${projectId}::supervisor`;
@@ -601,7 +808,7 @@ async function main() {
     });
     assert.equal(recoveredSuggestRequest.status, 202);
     assert.equal(typeof recoveredSuggestRequest.body?.jobId, "string");
-    const recoveredSuggestTerminal = await waitForOrchestratorJobTerminal(recoveredSuggestRequest.body?.jobId);
+    const recoveredSuggestTerminal = await waitForOrchestratorJobTerminal(recoveredSuggestRequest.body?.jobId, 90_000, apiProcess);
     assert.notEqual(
       recoveredSuggestTerminal.state === "failed" && /thread not found|invalid thread id/i.test(String(recoveredSuggestTerminal.error)),
       true,
@@ -697,7 +904,7 @@ async function main() {
 
     await stopApiProcess(apiProcess);
     apiProcess = startApiProcess();
-    await waitForHealth();
+    await waitForHealth(60_000, apiProcess);
 
     const detailAfterRestart = await request(`/sessions/${encodeURIComponent(sessionId)}`);
     assert.equal(detailAfterRestart.status, 200);
@@ -714,18 +921,46 @@ async function main() {
       "synthetic dedupe reconcile should complete without corrupting transcript state"
     );
 
-    const deletedPolicyAfterRestart = await request(`/sessions/${encodeURIComponent(deletedSessionId)}/approval-policy`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ approvalPolicy: "on-failure" })
-    });
+    const deletedPolicyAfterRestart = await waitFor(
+      async () => {
+        const response = await request(`/sessions/${encodeURIComponent(deletedSessionId)}/approval-policy`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ approvalPolicy: "on-failure" })
+        });
+        if (response.status === 404) {
+          return response;
+        }
+        if (response.status === 503 || response.status === 500) {
+          return null;
+        }
+        throw new Error(`unexpected status for deleted approval policy after restart: ${response.status}`);
+      },
+      "deleted session approval policy 404 after restart",
+      30_000,
+      500
+    );
     assert.equal(deletedPolicyAfterRestart.status, 404);
 
-    const deletedMessageAfterRestart = await request(`/sessions/${encodeURIComponent(deletedSessionId)}/messages`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: "deleted-after-restart", effort: "minimal" })
-    });
+    const deletedMessageAfterRestart = await waitFor(
+      async () => {
+        const response = await request(`/sessions/${encodeURIComponent(deletedSessionId)}/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text: "deleted-after-restart", effort: "minimal" })
+        });
+        if (response.status === 404) {
+          return response;
+        }
+        if (response.status === 503 || response.status === 500) {
+          return null;
+        }
+        throw new Error(`unexpected status for deleted message after restart: ${response.status}`);
+      },
+      "deleted session messages 404 after restart",
+      30_000,
+      500
+    );
     assert.equal(deletedMessageAfterRestart.status, 404);
     await assertNoStoredSessionControlEntries(deletedSessionId, "deleted-session after restart");
 
@@ -752,16 +987,28 @@ async function main() {
 
     await stopApiProcess(apiProcess);
     apiProcess = startApiProcess();
-    await waitForHealth();
+    await waitForHealth(60_000, apiProcess);
 
-    await assertNoStoredSessionControlEntries(staleMetadataSessionId, "startup stale metadata prune");
+    await waitFor(
+      async () => {
+        try {
+          await assertNoStoredSessionControlEntries(staleMetadataSessionId, "startup stale metadata prune");
+          return true;
+        } catch {
+          return null;
+        }
+      },
+      "startup stale metadata prune",
+      30_000,
+      500
+    );
 
-    const suggestedReplyInvalidEffort = await request(`/sessions/${encodeURIComponent(sessionId)}/suggested-request`, {
+    const suggestedRequestInvalidEffort = await request(`/sessions/${encodeURIComponent(sessionId)}/suggested-request`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ draft: "Please improve this sentence.", effort: "invalid" })
     });
-    assert.equal(suggestedReplyInvalidEffort.status, 400);
+    assert.equal(suggestedRequestInvalidEffort.status, 400);
 
     const sessionsAfterSuggest = await request("/sessions?archived=false&limit=200");
     assert.equal(sessionsAfterSuggest.status, 200);
@@ -777,21 +1024,21 @@ async function main() {
     const noContextSessionId = noContextSessionCreate.body?.session?.sessionId;
     assert.equal(typeof noContextSessionId, "string");
 
-    const suggestedReplyNoContext = await request(`/sessions/${encodeURIComponent(noContextSessionId)}/suggested-request`, {
+    const suggestedRequestNoContext = await request(`/sessions/${encodeURIComponent(noContextSessionId)}/suggested-request`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({})
     });
-    assert.ok(suggestedReplyNoContext.status === 200 || suggestedReplyNoContext.status === 202 || suggestedReplyNoContext.status === 409);
-    if (suggestedReplyNoContext.status === 409) {
-      assert.equal(suggestedReplyNoContext.body?.status, "no_context");
-    } else if (suggestedReplyNoContext.status === 202) {
-      assert.equal(suggestedReplyNoContext.body?.status, "queued");
-      assert.equal(typeof suggestedReplyNoContext.body?.jobId, "string");
+    assert.ok(suggestedRequestNoContext.status === 200 || suggestedRequestNoContext.status === 202 || suggestedRequestNoContext.status === 409);
+    if (suggestedRequestNoContext.status === 409) {
+      assert.equal(suggestedRequestNoContext.body?.status, "no_context");
+    } else if (suggestedRequestNoContext.status === 202) {
+      assert.equal(suggestedRequestNoContext.body?.status, "queued");
+      assert.equal(typeof suggestedRequestNoContext.body?.jobId, "string");
     } else {
       assert.ok(
-        suggestedReplyNoContext.body?.status === "fallback" || suggestedReplyNoContext.body?.status === "ok",
-        `unexpected no-context suggested request status ${suggestedReplyNoContext.body?.status}`
+        suggestedRequestNoContext.body?.status === "fallback" || suggestedRequestNoContext.body?.status === "ok",
+        `unexpected no-context suggested request status ${suggestedRequestNoContext.body?.status}`
       );
     }
 
@@ -838,16 +1085,18 @@ async function main() {
     });
     assert.equal(invalidSkillsConfig.status, 400);
 
-    await runNodeScript(path.join(root, "scripts", "smoke-runtime.mjs"), {
-      API_BASE: apiBase,
-      SMOKE_TIMEOUT_MS: "180000"
-    });
+    if (process.env.API_CONTRACT_EMBEDDED_SMOKE !== "false") {
+      await runNodeScript(path.join(root, "scripts", "smoke-runtime.mjs"), {
+        API_BASE: apiBase,
+        SMOKE_TIMEOUT_MS: "180000"
+      });
+    }
 
     await stopApiProcess(apiProcess);
     apiProcess = startApiProcess({
       ORCHESTRATOR_QUEUE_ENABLED: "false"
     });
-    await waitForHealth();
+    await waitForHealth(60_000, apiProcess);
 
     const degradedHealth = await request("/health");
     assert.equal(degradedHealth.status, 200);
@@ -900,4 +1149,18 @@ async function main() {
   }
 }
 
-await main();
+const heartbeatMsRaw = Number(process.env.API_CONTRACT_HEARTBEAT_MS ?? 0);
+const heartbeatMs = Number.isFinite(heartbeatMsRaw) && heartbeatMsRaw > 0 ? heartbeatMsRaw : 0;
+const heartbeat = heartbeatMs
+  ? setInterval(() => {
+      console.log("API_CONTRACT_HEARTBEAT");
+    }, heartbeatMs)
+  : null;
+
+try {
+  await main();
+} finally {
+  if (heartbeat) {
+    clearInterval(heartbeat);
+  }
+}

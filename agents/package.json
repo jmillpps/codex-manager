@@ -1,4 +1,8 @@
 {
+  "name": "@repo/agents",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "@codex-manager/agent-runtime-sdk": "workspace:*"
+  }
 }

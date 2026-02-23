@@ -1,5 +1,8 @@
 {
   "model": "gpt-5.3-codex-spark",
+  "orientationTurnPolicy": {
+    "effort": "minimal"
+  },
   "turnPolicy": {
     "sandbox": "workspace-write",
     "networkAccess": "enabled",

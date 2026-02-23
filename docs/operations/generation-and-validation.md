@@ -81,7 +81,14 @@ Current behavior:
 - Runs active workspace test suites:
   - API contract/runtime validation (`scripts/test-api-contracts.mjs`)
   - web integration tests (Vitest)
+  - CLI route parity tests (`apps/cli/src/route-parity.test.ts`)
   - API-client compile checks
+
+### Run CLI tests only
+
+```bash
+pnpm --filter @repo/cli test
+```
 
 ### Run API tests only
 
@@ -137,6 +144,12 @@ Behavior:
 pnpm build
 ```
 
+### Build CLI only
+
+```bash
+pnpm --filter @repo/cli build
+```
+
 ### Runtime smoke (API + WebSocket lifecycle)
 
 Run:
@@ -152,6 +165,21 @@ This exercises a live API instance for:
 - websocket subscription and streamed event delivery
 - thread action endpoints and cleanup behavior
 
+### Runtime portability conformance
+
+Run:
+
+```bash
+node scripts/run-agent-conformance.mjs
+```
+
+Behavior:
+
+- Executes the conformance harness in `apps/api/src/agent-conformance.ts`
+- Verifies one portable extension fixture across at least two runtime profiles
+- Writes a report artifact to `.data/agent-conformance-report.json`
+- Exits non-zero when `portableExtension` conformance fails
+
 ---
 
 ## Required pre-PR checklist
@@ -165,9 +193,14 @@ pnpm typecheck
 pnpm test
 pnpm build
 pnpm smoke:runtime
+node scripts/run-agent-conformance.mjs
 pnpm test:e2e
 ```
 
 If any command changes generated artifacts, commit those changes in the same PR.
+
+For release sign-off, also complete:
+
+- `docs/operations/release-gate-checklist.md`
 
 ---

@@ -1,0 +1,30 @@
+{
+  "name": "@codex-manager/supervisor",
+  "version": "1.0.0",
+  "agentId": "supervisor",
+  "displayName": "Project Supervisor",
+  "runtime": {
+    "coreApiVersion": 1,
+    "coreApiVersionRange": ">=1 <2",
+    "profiles": [
+      {
+        "name": "codex-manager",
+        "versionRange": ">=1 <2"
+      }
+    ]
+  },
+  "entrypoints": {
+    "events": "./events.ts",
+    "config": "./agent.config.json"
+  },
+  "capabilities": {
+    "events": [
+      "file_change.approval_requested",
+      "turn.completed",
+      "suggest_request.requested"
+    ],
+    "actions": [
+      "queue.enqueue"
+    ]
+  }
+}

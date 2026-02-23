@@ -8,8 +8,8 @@ The previous single-file reference was split into focused documents so protocol 
 
 ## Last verified
 
-- Codex Manager API surface: February 22, 2026
-- Codex Manager web integration: February 22, 2026
+- Codex Manager API surface: February 23, 2026
+- Codex Manager web integration: February 23, 2026
 - Codex protocol source in repo: `packages/codex-protocol/generated/stable/*`
 
 ## Protocol knowledge tree
@@ -27,7 +27,13 @@ The previous single-file reference was split into focused documents so protocol 
 - `docs/protocol/config-security-and-client-rules.md`
   - MCP config semantics, sandbox/approval policy semantics, UI checklist, and non-negotiable client rules.
 - `docs/protocol/harness-runtime-events.md`
-  - Harness-level runtime contracts: agent event payloads, queue websocket events, transcript deltas, and transcript upsert endpoint semantics.
+  - Harness-level runtime contracts: lifecycle surfaces, queue websocket events, transcript deltas, and transcript upsert semantics.
+- `docs/protocol/agent-runtime-sdk.md`
+  - Canonical extension SDK surface (events, tools, emit envelopes, helper contracts).
+- `docs/protocol/agent-dispatch-and-reconciliation.md`
+  - Deterministic fanout dispatch, winner/reconciled action semantics, and queue winner selection rules.
+- `docs/protocol/agent-extension-packaging.md`
+  - Extension package layout, manifest compatibility fields, source-origin model, and conformance expectations.
 
 ## How this maps to this repo
 
@@ -58,7 +64,7 @@ The previous single-file reference was split into focused documents so protocol 
   - session ids are tracked in metadata by owner+agent mapping (`<ownerId>::<agent>`, where owner can be project id or `session:<sessionId>`),
   - system-owned worker notifications/server-requests are not forwarded as user chat activity,
   - system-owned sessions are filtered from session-list responses and denied for user chat operations.
-- Agent extension event modules under `agents/*/events.(ts|js|mjs)` translate runtime events into queue jobs (`agent_instruction`, `suggest_request`) while protocol transport remains in API core.
+- Agent extension modules loaded from repo-local + configured/package roots translate runtime events into queue jobs (repository workflows currently enqueue `agent_instruction`, including `jobKind: suggest_request`) while protocol transport remains in API core.
 
 ## Updating protocol docs
 

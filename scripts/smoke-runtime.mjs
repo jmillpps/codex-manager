@@ -105,6 +105,8 @@ async function main() {
     await api("/config/requirements", {}, [200, 501]);
     await api("/models", {}, [200, 501]);
     await api("/mcp/servers", {}, [200, 501]);
+    await api("/agents/extensions", {}, [200, 401, 403, 404]);
+    await api("/agents/extensions/reload", { method: "POST", body: {} }, [200, 400, 401, 403, 404, 409]);
 
     const projectName = `Smoke Project ${Date.now()}`;
     const createProject = await api("/projects", { method: "POST", body: { name: projectName } }, [200]);
@@ -139,6 +141,20 @@ async function main() {
     if (sendMessage.status === 202) {
       turnId = sendMessage.json?.turnId ?? null;
 
+      if (turnId) {
+        const steerResponse = await api(
+          `/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}/steer`,
+          { method: "POST", body: { input: "Continue." } },
+          [200, 400, 409]
+        );
+        if (steerResponse.status === 400) {
+          const errorMessage = String(steerResponse.json?.result?.details?.error ?? "");
+          if (!/no active turn to steer/i.test(errorMessage)) {
+            throw new Error(`turn steer failed with unexpected 400 error: ${errorMessage}`);
+          }
+        }
+      }
+
       await waitFor(
         async () => {
           const details = await api(`/sessions/${encodeURIComponent(sessionId)}`, {}, [200]);
@@ -164,14 +180,6 @@ async function main() {
       await api(`/sessions/${encodeURIComponent(sessionId)}/rollback`, { method: "POST", body: {} }, permissiveStatuses);
       await api(`/sessions/${encodeURIComponent(sessionId)}/background-terminals/clean`, { method: "POST", body: {} }, permissiveStatuses);
       await api(`/sessions/${encodeURIComponent(sessionId)}/review`, { method: "POST", body: {} }, permissiveStatuses);
-
-      if (turnId) {
-        await api(
-          `/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}/steer`,
-          { method: "POST", body: { input: "Continue." } },
-          permissiveStatuses
-        );
-      }
     }
 
     await api(

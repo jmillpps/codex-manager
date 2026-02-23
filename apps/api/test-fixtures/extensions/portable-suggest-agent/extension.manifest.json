@@ -1,0 +1,33 @@
+{
+  "name": "@fixture/portable-suggest-agent",
+  "version": "1.0.0",
+  "agentId": "portable-suggest",
+  "displayName": "Portable Suggest Agent",
+  "runtime": {
+    "coreApiVersion": 1,
+    "coreApiVersionRange": ">=1 <2",
+    "profiles": [
+      {
+        "name": "codex-manager",
+        "versionRange": ">=1 <2"
+      },
+      {
+        "name": "fixture-profile",
+        "versionRange": ">=1 <2"
+      }
+    ]
+  },
+  "entrypoints": {
+    "events": "./events.mjs",
+    "orientation": "./orientation.md",
+    "instructions": "./AGENTS.md"
+  },
+  "capabilities": {
+    "events": [
+      "suggest_request.requested"
+    ],
+    "actions": [
+      "queue.enqueue"
+    ]
+  }
+}

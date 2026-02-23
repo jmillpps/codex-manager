@@ -13,10 +13,7 @@ Primary API/runtime references:
 
 ## Queue Job Types
 
-The API queue executes two job types for supervisor workflows:
-
-- `agent_instruction`
-- `suggest_request`
+The API queue executes `agent_instruction` for supervisor workflows.
 
 `agent_instruction` payload fields:
 
@@ -26,22 +23,10 @@ The API queue executes two job types for supervisor workflows:
 - `sourceSessionId`
 - `threadId`
 - `turnId`
+- optional `bootstrapInstruction` (`key`, `instructionText`) run once per agent session after core system orientation
 - `instructionText`
 - optional `dedupeKey`
-- optional `expectResponse` (`none` or `assistant_text`)
-
-`suggest_request` payload fields:
-
-- `requestKey`
-- `sessionId`
-- `projectId`
-- `agent`
-- `sourceThreadId`
-- `sourceTurnId`
-- `instructionText`
-- optional `model`
-- optional `effort`
-- optional `draft`
+- optional `expectResponse` (`none`, `assistant_text`, or `action_intents`)
 
 ## Supervisor Job Kinds
 
@@ -49,8 +34,7 @@ Within `agent_instruction`, supervisor handlers use these `jobKind` values:
 
 - `file_change_supervisor_review`
 - `turn_supervisor_review`
-
-`suggest_request` queue jobs carry suggest-request instructions directly and return one suggestion string result.
+- `suggest_request`
 
 ## Core Execution Contracts
 
@@ -60,17 +44,21 @@ For `file_change_supervisor_review` instructions:
   - diff explainability upsert
   - supervisor insight upsert
   - optional auto actions (approve/reject/steer) only if enabled and eligible
-- if auto actions are disabled, do not call decision/steer routes
-- if user already resolved approval and API returns `404 not_found`, treat as reconciled
+- execute side effects through CLI commands (no raw HTTP and no required JSON response envelope)
+- if auto actions are disabled, do not run decision/steer commands
+- if user already resolved approval, treat as reconciled
 
 For `turn_supervisor_review` instructions:
 
-- upsert one turn-level supervisor review row
+- run CLI transcript upserts for streaming + complete review rows
 - keep synthesis concise and actionable
 
 For `suggest_request` instructions:
 
-- return exactly one concise user-to-agent request text
+- set streaming state via `sessions suggest-request upsert`
+- synthesize one concise user-to-agent request text
+- set complete state via `sessions suggest-request upsert --status complete --suggestion...`
+- do not rely on assistant-text output as the delivery contract
 
 ## Queue States and Events
 
@@ -90,11 +78,13 @@ Websocket events:
 - `orchestrator_job_completed`
 - `orchestrator_job_failed`
 - `orchestrator_job_canceled`
+- `suggested_request_updated`
 
 ## Queue API Endpoints
 
 - `POST /api/sessions/:sessionId/suggested-request/jobs`
 - `POST /api/sessions/:sessionId/suggested-request`
+- `POST /api/sessions/:sessionId/suggested-request/upsert`
 - `GET /api/orchestrator/jobs/:jobId`
 - `GET /api/projects/:projectId/orchestrator/jobs`
 - `POST /api/orchestrator/jobs/:jobId/cancel`
@@ -103,4 +93,4 @@ Websocket events:
 
 - Suggested request is single-flight per source chat.
 - File-change and turn-completed supervisor workflows are triggered by agent events and enqueue `agent_instruction`.
-- Transcript visibility is driven by `POST /api/sessions/:sessionId/transcript/upsert` from supervisor job actions, not by queue result payloads.
+- Transcript visibility is driven by supervisor CLI side effects (`sessions transcript upsert`) as the worker turn runs.

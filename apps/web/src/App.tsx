@@ -174,6 +174,7 @@ type NotificationEnvelope = {
     | "account_updated"
     | "account_login_completed"
     | "account_rate_limits_updated"
+    | "suggested_request_updated"
     | "transcript_updated"
     | "orchestrator_job_queued"
     | "orchestrator_job_started"
@@ -240,6 +241,7 @@ type SessionControlsSummaryParts = {
 
 type PendingSuggestRequestJob = {
   jobId: string;
+  requestKey: string;
   sessionId: string;
   draftAtStart: string;
   requestId: number;
@@ -2192,7 +2194,7 @@ export function App() {
   const [toolInputDraftById, setToolInputDraftById] = useState<Record<string, Record<string, string>>>({});
   const [toolInputActionRequestId, setToolInputActionRequestId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
-  const [enqueueingSuggestedReply, setEnqueueingSuggestedReply] = useState(false);
+  const [enqueueingSuggestedRequest, setEnqueueingSuggestedRequest] = useState(false);
   const [pendingSuggestRequestJob, setPendingSuggestRequestJob] = useState<PendingSuggestRequestJob | null>(null);
   const [steerDraft, setSteerDraft] = useState("");
   const [submittingSteer, setSubmittingSteer] = useState(false);
@@ -2281,8 +2283,8 @@ export function App() {
   const transcriptReconcileTimersRef = useRef<Record<string, number>>({});
   const threadMenuRef = useRef<HTMLDivElement | null>(null);
   const threadMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const suggestedReplyAbortRef = useRef<AbortController | null>(null);
-  const suggestedReplyRequestIdRef = useRef(0);
+  const suggestedRequestAbortRef = useRef<AbortController | null>(null);
+  const suggestedRequestRequestIdRef = useRef(0);
   const pendingSuggestRequestJobRef = useRef<PendingSuggestRequestJob | null>(null);
   const transcriptLoadRequestIdRef = useRef(0);
   const approvalsLoadRequestIdRef = useRef(0);
@@ -2338,13 +2340,13 @@ export function App() {
         if (
           suggestion.length > 0 &&
           selectedSessionIdRef.current === pending.sessionId &&
-          suggestedReplyRequestIdRef.current === pending.requestId &&
+          suggestedRequestRequestIdRef.current === pending.requestId &&
           draftRef.current.trim() === pending.draftAtStart
         ) {
           setDraft(suggestion);
         }
         setPendingSuggestRequestJob((current) => (current && current.jobId === pending.jobId ? null : current));
-        setEnqueueingSuggestedReply(false);
+        setEnqueueingSuggestedRequest(false);
         return;
       }
 
@@ -2355,7 +2357,7 @@ export function App() {
           setError(message);
         }
         setPendingSuggestRequestJob((current) => (current && current.jobId === pending.jobId ? null : current));
-        setEnqueueingSuggestedReply(false);
+        setEnqueueingSuggestedRequest(false);
       }
     };
 
@@ -2379,7 +2381,7 @@ export function App() {
         if (!response.ok) {
           if (response.status === 404) {
             setPendingSuggestRequestJob((current) => (current && current.jobId === pending.jobId ? null : current));
-            setEnqueueingSuggestedReply(false);
+            setEnqueueingSuggestedRequest(false);
             return;
           }
           schedulePoll(4_000);
@@ -2414,7 +2416,7 @@ export function App() {
     () => sessions.find((session) => session.sessionId === selectedSessionId) ?? null,
     [sessions, selectedSessionId]
   );
-  const loadingSuggestedReply = enqueueingSuggestedReply || Boolean(pendingSuggestRequestJob && pendingSuggestRequestJob.sessionId === selectedSessionId);
+  const loadingSuggestedRequest = enqueueingSuggestedRequest || Boolean(pendingSuggestRequestJob && pendingSuggestRequestJob.sessionId === selectedSessionId);
   const sessionsByProjectId = useMemo(() => {
     const byProjectId = new Map<string, Array<SessionSummary>>();
     for (const project of projects) {
@@ -3339,6 +3341,7 @@ export function App() {
         return;
       }
 
+      const transcriptEntriesById = new Map(payload.transcript.map((entry) => [entry.messageId, entry]));
       const nextTranscriptMessages: Array<ChatMessage> = payload.transcript.map((entry) => ({
         id: entry.messageId,
         turnId: entry.turnId,
@@ -3349,30 +3352,34 @@ export function App() {
         status: entry.status
       }));
       setMessages((current) => {
-        const preserved = current.filter((message) => {
+        const byId = new Map(nextTranscriptMessages.map((message) => [message.id, message]));
+        for (const message of current) {
+          const incoming = transcriptEntriesById.get(message.id);
+          if (incoming) {
+            byId.set(message.id, mergeChatMessageFromTranscriptDelta(message, incoming));
+            continue;
+          }
+
           if (message.id.startsWith("local-user-")) {
             const sendState = localSendStateByMessageIdRef.current[message.id];
-            return sendState === "sending" || sendState === "sent" || sendState === "failed";
+            if (sendState === "sending" || sendState === "sent" || sendState === "failed") {
+              byId.set(message.id, message);
+            }
+            continue;
           }
 
           if (message.id.startsWith("approval-") && message.type === "approval.request") {
-            return true;
+            byId.set(message.id, message);
+            continue;
           }
 
           if (message.id.startsWith("tool-input-") && message.type === "tool_input.request") {
-            return true;
+            byId.set(message.id, message);
+            continue;
           }
 
-          return false;
-        });
-
-        if (preserved.length === 0) {
-          return nextTranscriptMessages;
-        }
-
-        const byId = new Map(nextTranscriptMessages.map((message) => [message.id, message]));
-        for (const message of preserved) {
-          if (!byId.has(message.id)) {
+          // Keep in-flight websocket entries while REST transcript catches up.
+          if (message.status === "streaming") {
             byId.set(message.id, message);
           }
         }
@@ -4708,7 +4715,7 @@ export function App() {
     await dispatchMessage(retryPrompt);
   };
 
-  const loadSuggestedReply = async (): Promise<void> => {
+  const loadSuggestedRequest = async (): Promise<void> => {
     if (!selectedSessionId) {
       setError("create or select a session first");
       return;
@@ -4721,14 +4728,14 @@ export function App() {
 
     const sessionIdAtStart = selectedSessionId;
     const draftAtStart = draft.trim();
-    suggestedReplyAbortRef.current?.abort();
+    suggestedRequestAbortRef.current?.abort();
     const controller = new AbortController();
-    suggestedReplyAbortRef.current = controller;
-    const requestId = suggestedReplyRequestIdRef.current + 1;
-    suggestedReplyRequestIdRef.current = requestId;
+    suggestedRequestAbortRef.current = controller;
+    const requestId = suggestedRequestRequestIdRef.current + 1;
+    suggestedRequestRequestIdRef.current = requestId;
 
     setError(null);
-    setEnqueueingSuggestedReply(true);
+    setEnqueueingSuggestedRequest(true);
     try {
       const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(sessionIdAtStart)}/suggested-request/jobs`, {
         method: "POST",
@@ -4750,17 +4757,21 @@ export function App() {
         throw new Error(`failed to load suggested request (${response.status})`);
       }
 
-      const payload = (await response.json()) as { jobId?: string };
+      const payload = (await response.json()) as { jobId?: string; requestKey?: string };
       if (typeof payload.jobId !== "string" || payload.jobId.trim().length === 0) {
         throw new Error("suggested request queue request did not return a job id");
       }
+      if (typeof payload.requestKey !== "string" || payload.requestKey.trim().length === 0) {
+        throw new Error("suggested request queue request did not return a request key");
+      }
 
-      if (controller.signal.aborted || suggestedReplyRequestIdRef.current !== requestId) {
+      if (controller.signal.aborted || suggestedRequestRequestIdRef.current !== requestId) {
         return;
       }
 
       setPendingSuggestRequestJob({
         jobId: payload.jobId,
+        requestKey: payload.requestKey,
         sessionId: sessionIdAtStart,
         draftAtStart,
         requestId
@@ -4771,9 +4782,9 @@ export function App() {
       }
       setError(err instanceof Error ? err.message : "failed to load suggested request");
     } finally {
-      if (suggestedReplyRequestIdRef.current === requestId) {
-        setEnqueueingSuggestedReply(false);
-        suggestedReplyAbortRef.current = null;
+      if (suggestedRequestRequestIdRef.current === requestId) {
+        setEnqueueingSuggestedRequest(false);
+        suggestedRequestAbortRef.current = null;
       }
     }
   };
@@ -5776,9 +5787,9 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    suggestedReplyAbortRef.current?.abort();
-    suggestedReplyAbortRef.current = null;
-    suggestedReplyRequestIdRef.current += 1;
+    suggestedRequestAbortRef.current?.abort();
+    suggestedRequestAbortRef.current = null;
+    suggestedRequestRequestIdRef.current += 1;
     clearPendingSendAck();
     stopApprovalSnapBack();
     clearAllApprovalReconcileTimers();
@@ -5796,7 +5807,7 @@ export function App() {
       setFollowTranscriptTail(true);
       setShowJumpToBottom(false);
       setRetryPrompt(null);
-      setEnqueueingSuggestedReply(false);
+      setEnqueueingSuggestedRequest(false);
       setSteerDraft("");
       setSessionControlsSnapshot(null);
       setSessionControlsDraft(null);
@@ -5816,7 +5827,7 @@ export function App() {
     optimisticMessageIdByTurnIdRef.current = {};
     setApprovalActionById({});
     setRetryPrompt(null);
-    setEnqueueingSuggestedReply(false);
+    setEnqueueingSuggestedRequest(false);
     setSessionControlsSnapshot(null);
     setSessionControlsDraft(null);
     setSessionControlsError(null);
@@ -5829,9 +5840,9 @@ export function App() {
 
   useEffect(() => {
     return () => {
-      suggestedReplyAbortRef.current?.abort();
-      suggestedReplyAbortRef.current = null;
-      suggestedReplyRequestIdRef.current += 1;
+      suggestedRequestAbortRef.current?.abort();
+      suggestedRequestAbortRef.current = null;
+      suggestedRequestRequestIdRef.current += 1;
       stopApprovalSnapBack();
       clearAllApprovalReconcileTimers();
       clearAllTranscriptReconcileTimers();
@@ -6337,6 +6348,45 @@ export function App() {
           return;
         }
 
+        if (envelope.type === "suggested_request_updated") {
+          const payload = asRecord(envelope.payload);
+          const requestKey = payload && typeof payload.requestKey === "string" ? payload.requestKey.trim() : "";
+          const status = payload && typeof payload.status === "string" ? payload.status.trim().toLowerCase() : "";
+          const suggestion = payload && typeof payload.suggestion === "string" ? payload.suggestion.trim() : "";
+          const errorMessage = payload && typeof payload.error === "string" ? payload.error.trim() : "";
+          const sessionId = payload && typeof payload.sessionId === "string" ? payload.sessionId : null;
+          const pending = pendingSuggestRequestJobRef.current;
+          if (!pending || !requestKey || pending.requestKey !== requestKey) {
+            return;
+          }
+          if (sessionId && sessionId !== pending.sessionId) {
+            return;
+          }
+
+          if (status === "complete") {
+            if (
+              suggestion.length > 0 &&
+              selectedSessionIdRef.current === pending.sessionId &&
+              suggestedRequestRequestIdRef.current === pending.requestId &&
+              draftRef.current.trim() === pending.draftAtStart
+            ) {
+              setDraft(suggestion);
+            }
+            setPendingSuggestRequestJob((current) => (current && current.requestKey === requestKey ? null : current));
+            setEnqueueingSuggestedRequest(false);
+            return;
+          }
+
+          if (status === "error" || status === "canceled") {
+            if (selectedSessionIdRef.current === pending.sessionId) {
+              setError(errorMessage || "suggested request job failed");
+            }
+            setPendingSuggestRequestJob((current) => (current && current.requestKey === requestKey ? null : current));
+            setEnqueueingSuggestedRequest(false);
+          }
+          return;
+        }
+
         if (
           envelope.type === "orchestrator_job_queued" ||
           envelope.type === "orchestrator_job_started" ||
@@ -6354,8 +6404,10 @@ export function App() {
               : typeof envelope.threadId === "string"
                 ? envelope.threadId
                 : null;
+          const pending = pendingSuggestRequestJobRef.current;
+          const isPendingSuggestJob = Boolean(jobId && pending && pending.jobId === jobId);
 
-          if (jobType === "agent_instruction") {
+          if (jobType === "agent_instruction" && !isPendingSuggestJob) {
             if (sourceSessionId && selectedSessionIdRef.current === sourceSessionId) {
               const terminalEvent =
                 envelope.type === "orchestrator_job_completed" ||
@@ -6366,9 +6418,7 @@ export function App() {
             return;
           }
 
-          const pending = pendingSuggestRequestJobRef.current;
-
-          if (!jobId || !pending || pending.jobId !== jobId || jobType !== "suggest_request") {
+          if (!isPendingSuggestJob || !pending) {
             return;
           }
 
@@ -6379,14 +6429,13 @@ export function App() {
             if (
               suggestion.length > 0 &&
               selectedSessionIdRef.current === pending.sessionId &&
-              suggestedReplyRequestIdRef.current === pending.requestId &&
+              suggestedRequestRequestIdRef.current === pending.requestId &&
               draftRef.current.trim() === pending.draftAtStart
             ) {
               setDraft(suggestion);
+              setPendingSuggestRequestJob((current) => (current && current.jobId === jobId ? null : current));
+              setEnqueueingSuggestedRequest(false);
             }
-
-            setPendingSuggestRequestJob((current) => (current && current.jobId === jobId ? null : current));
-            setEnqueueingSuggestedReply(false);
             return;
           }
 
@@ -6399,7 +6448,7 @@ export function App() {
               setError(errorMessage);
             }
             setPendingSuggestRequestJob((current) => (current && current.jobId === jobId ? null : current));
-            setEnqueueingSuggestedReply(false);
+            setEnqueueingSuggestedRequest(false);
             return;
           }
 
@@ -8844,8 +8893,8 @@ export function App() {
                   Retry Last Prompt
                 </button>
               ) : null}
-              <button type="button" className="ghost" onClick={() => void loadSuggestedReply()} disabled={!selectedSessionId || loadingSuggestedReply}>
-                {loadingSuggestedReply ? "Suggesting request..." : "Suggest Request"}
+              <button type="button" className="ghost" onClick={() => void loadSuggestedRequest()} disabled={!selectedSessionId || loadingSuggestedRequest}>
+                {loadingSuggestedRequest ? "Suggesting request..." : "Suggest Request"}
               </button>
               <button type="button" onClick={() => void sendMessage()} disabled={!selectedSessionId || !draft.trim()}>
                 Send

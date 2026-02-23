@@ -29,10 +29,45 @@ const envSchema = z.object({
   ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS: z.coerce.number().int().positive().default(12_000),
   ORCHESTRATOR_AGENT_TURN_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
   ORCHESTRATOR_AGENT_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(350),
-  ORCHESTRATOR_AGENT_INCLUDE_TURNS_GRACE_MS: z.coerce.number().int().positive().default(3_000)
+  ORCHESTRATOR_AGENT_INCLUDE_TURNS_GRACE_MS: z.coerce.number().int().positive().default(3_000),
+  AGENT_EXTENSION_RBAC_MODE: z.enum(["disabled", "header", "jwt"]).default("disabled"),
+  AGENT_EXTENSION_ALLOW_INSECURE_HEADER_MODE: z.enum(["true", "false"]).default("false"),
+  AGENT_EXTENSION_RBAC_HEADER_SECRET: z.string().optional(),
+  AGENT_EXTENSION_RBAC_JWT_SECRET: z.string().optional(),
+  AGENT_EXTENSION_RBAC_JWT_ISSUER: z.string().optional(),
+  AGENT_EXTENSION_RBAC_JWT_AUDIENCE: z.string().optional(),
+  AGENT_EXTENSION_RBAC_JWT_ROLE_CLAIM: z.string().default("role"),
+  AGENT_EXTENSION_RBAC_JWT_ACTOR_CLAIM: z.string().default("sub"),
+  AGENT_EXTENSION_TRUST_MODE: z.enum(["disabled", "warn", "enforced"]).default("warn"),
+  AGENT_EXTENSION_CONFIGURED_ROOTS: z.string().default(""),
+  AGENT_EXTENSION_PACKAGE_ROOTS: z.string().default("")
 });
 
 const parsed = envSchema.parse(process.env);
+
+function isLoopbackHost(host: string): boolean {
+  return host === "127.0.0.1" || host === "::1" || host === "localhost";
+}
+
+if (parsed.AGENT_EXTENSION_RBAC_MODE === "header") {
+  if (parsed.AGENT_EXTENSION_ALLOW_INSECURE_HEADER_MODE !== "true" && !isLoopbackHost(parsed.HOST)) {
+    throw new Error(
+      `AGENT_EXTENSION_RBAC_MODE=header requires loopback HOST or AGENT_EXTENSION_ALLOW_INSECURE_HEADER_MODE=true (received HOST=${parsed.HOST})`
+    );
+  }
+  if (
+    parsed.AGENT_EXTENSION_ALLOW_INSECURE_HEADER_MODE !== "true" &&
+    (!parsed.AGENT_EXTENSION_RBAC_HEADER_SECRET || parsed.AGENT_EXTENSION_RBAC_HEADER_SECRET.trim().length === 0)
+  ) {
+    throw new Error(
+      "AGENT_EXTENSION_RBAC_MODE=header requires AGENT_EXTENSION_RBAC_HEADER_SECRET unless AGENT_EXTENSION_ALLOW_INSECURE_HEADER_MODE=true"
+    );
+  }
+}
+
+if (parsed.AGENT_EXTENSION_RBAC_MODE === "jwt" && (!parsed.AGENT_EXTENSION_RBAC_JWT_SECRET || parsed.AGENT_EXTENSION_RBAC_JWT_SECRET.trim().length === 0)) {
+  throw new Error("AGENT_EXTENSION_RBAC_MODE=jwt requires AGENT_EXTENSION_RBAC_JWT_SECRET");
+}
 
 function findWorkspaceRoot(startDir: string): string {
   let current = startDir;
@@ -59,6 +94,11 @@ function resolveFromWorkspaceRoot(value: string): string {
 
 export const env = {
   ...parsed,
+  AGENT_EXTENSION_ALLOW_INSECURE_HEADER_MODE: parsed.AGENT_EXTENSION_ALLOW_INSECURE_HEADER_MODE === "true",
+  AGENT_EXTENSION_RBAC_HEADER_SECRET:
+    typeof parsed.AGENT_EXTENSION_RBAC_HEADER_SECRET === "string" && parsed.AGENT_EXTENSION_RBAC_HEADER_SECRET.trim().length > 0
+      ? parsed.AGENT_EXTENSION_RBAC_HEADER_SECRET.trim()
+      : undefined,
   SESSION_DEFAULTS_LOCKED: parsed.SESSION_DEFAULTS_LOCKED === "true",
   ORCHESTRATOR_QUEUE_ENABLED: parsed.ORCHESTRATOR_QUEUE_ENABLED === "true",
   ORCHESTRATOR_SUGGEST_REQUEST_ENABLED: parsed.ORCHESTRATOR_SUGGEST_REQUEST_ENABLED === "true",

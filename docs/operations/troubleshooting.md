@@ -191,6 +191,87 @@ Checklist:
 - Or delete project chats (`POST /api/projects/:projectId/chats/delete-all`).
 - If moving to archive fails with `status: "not_materialized_sessions"`, send a first message in those chats before archiving, or move to `unassigned` instead.
 
+#### Extension reload fails with `reload_failed`
+
+Symptoms:
+
+- `POST /api/agents/extensions/reload` returns `status: "error"` with `code: "reload_failed"`.
+
+Checklist:
+
+- Inspect `errors[]` in reload response for deterministic failure category:
+  - `invalid_manifest`
+  - `missing_entrypoint`
+  - `incompatible_runtime`
+  - `missing_register`
+  - `registration_failed`
+  - `trust_denied`
+  - `agent_id_conflict`
+- Verify `extension.manifest.json` core/profile compatibility declarations match active runtime values.
+- Verify events entrypoint path exists and exports `registerAgentEvents`.
+- Check for duplicate `agentId` collisions across loaded modules.
+- Confirm trust mode (`AGENT_EXTENSION_TRUST_MODE`) aligns with extension capability declarations.
+- Verify prior snapshot remains active by comparing `snapshotVersion` before/after failed reload.
+
+#### Extension lifecycle endpoints return auth errors
+
+Symptoms:
+
+- `GET /api/agents/extensions` or `POST /api/agents/extensions/reload` returns:
+  - `403 rbac_disabled_remote_forbidden`
+  - `401 missing_header_token`
+  - `401 invalid_header_token`
+  - `401 missing_role`
+  - `400 invalid_role`
+  - `401 missing_bearer_token`
+  - `401 invalid_bearer_token`
+  - `403 invalid_role_claim`
+  - `403 insufficient_role`
+
+Checklist:
+
+- Verify `AGENT_EXTENSION_RBAC_MODE` (`disabled`, `header`, or `jwt`).
+- In `disabled` mode, lifecycle endpoints are loopback-only. Remote callers receive `403 rbac_disabled_remote_forbidden`.
+- In `header` mode, provide `x-codex-role` with one of:
+  - `member`, `admin`, `owner`, `system`
+- In `header` mode, provide `x-codex-rbac-token` matching `AGENT_EXTENSION_RBAC_HEADER_SECRET` (unless `AGENT_EXTENSION_ALLOW_INSECURE_HEADER_MODE=true`).
+- In `jwt` mode:
+  - ensure `Authorization: Bearer <token>` is present
+  - verify token signature with `AGENT_EXTENSION_RBAC_JWT_SECRET`
+  - verify issuer/audience constraints if configured
+  - verify role claim key/value (`AGENT_EXTENSION_RBAC_JWT_ROLE_CLAIM`)
+- In `header` mode on non-loopback host, set `AGENT_EXTENSION_ALLOW_INSECURE_HEADER_MODE=true` only when a trusted identity proxy is enforcing caller authentication.
+- For reload, role must be:
+  - `admin`, `owner`, or `system`
+- Optionally include `x-codex-actor` for audit identity tracing.
+
+#### Extension actions fail with `undeclared_capability`
+
+Symptoms:
+
+- Event dispatch produces `forbidden` action results with `code: "undeclared_capability"`.
+
+Checklist:
+
+- Check `AGENT_EXTENSION_TRUST_MODE` (especially `enforced` mode).
+- Verify extension manifest declares required action capability names under `capabilities.actions[]`.
+- Verify declared event capability names under `capabilities.events[]` include subscribed events.
+- Inspect `/api/agents/extensions` trust/capability diagnostics for the affected module.
+
+#### Conformance gate fails (`portableExtension: false`)
+
+Symptoms:
+
+- `node scripts/run-agent-conformance.mjs` exits non-zero or reports `portableExtension: false`.
+
+Checklist:
+
+- Inspect `.data/agent-conformance-report.json` profile runs for failing profile and errors.
+- Verify fixture extension manifest declares compatibility for both active profiles.
+- Verify extension event handler emits expected queue enqueue result in each profile.
+- Re-run API tests for profile compatibility coverage:
+  - `pnpm --filter @repo/api test`
+
 #### MCP server not available inside Codex
 
 Symptoms:

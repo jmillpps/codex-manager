@@ -74,6 +74,7 @@ Until CI is added, treat the local gate set as required before opening or mergin
 - `pnpm test`
 - `pnpm build`
 - `pnpm smoke:runtime`
+- `node scripts/run-agent-conformance.mjs`
 - `pnpm test:e2e`
 
 When CI is introduced, mirror this exact gate set in workflow configuration.

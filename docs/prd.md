@@ -67,7 +67,7 @@ Non-goals include multi-tenant SaaS or enterprise user management in v1.
 - Hosting Codex remotely or supporting external clients (v1).
 - Re-implementing Codex capabilities in the backend (the backend is a protocol adapter).
 - “IDE-grade” file explorers, diff editors, or repo management UI (v1).
-- Complex workflow orchestration / multi-agent coordination (v1).
+- Autonomous multi-agent planning loops outside event-driven extension workflows (v1).
 
 ---
 
@@ -100,6 +100,7 @@ Non-goals include multi-tenant SaaS or enterprise user management in v1.
 - Backend exposes:
   - REST endpoints for session management
   - WebSocket streaming for turn events
+  - extension runtime lifecycle and conformance controls for event-driven workflows
 
 Codex App Server is the source of truth for:
 
@@ -288,6 +289,10 @@ Acceptance criteria:
 - User can see which MCP servers are enabled and healthy.
 - No secrets displayed.
 
+For agent extension platform functional requirements and acceptance criteria, see:
+
+- `docs/product/agent-platform-requirements.md`
+
 ---
 
 ## Technical requirements
@@ -325,6 +330,10 @@ Codex’s own rollout persistence may be used; the backend can store additional 
 
 - All secrets remain backend-side or in OS credential stores.
 - MCP credentials are not transmitted to the browser.
+
+For agent extension platform technical requirements, see:
+
+- `docs/product/agent-platform-requirements.md`
 
 ---
 
@@ -426,6 +435,8 @@ Errors should provide:
 - 99% of sessions resume correctly after restart in normal usage
 - No transcript corruption (no duplicated/missing delta text) in manual testing
 - Approval flows succeed without requiring refresh
+- Extension reload/list RBAC + audit paths pass in API tests
+- Portable extension conformance succeeds across at least two runtime profiles
 
 ---
 
@@ -482,4 +493,3 @@ Every feature described here must map to:
 - tests that validate streaming + approvals
 
 Any change to behavior requires updating this document in the same PR.
-

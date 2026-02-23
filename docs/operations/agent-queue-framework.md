@@ -19,7 +19,7 @@ The API core runs a generic queue and generic agent runtime. Workflow logic live
 
 Core responsibilities:
 
-- load `agents/*/events.(ts|js|mjs)` modules at startup
+- load extension event modules from repo-local + configured/package roots at startup
 - emit named runtime events to registered handlers
 - allow handlers to enqueue queue jobs
 - run queue jobs with retries, cancelation, and terminal reconciliation
@@ -74,18 +74,26 @@ Primary files:
 
 Module loading contract:
 
-- API scans `agents/*` directories.
-- Directories named `runtime`, `lib`, or dot-prefixed are ignored for event module loading.
-- A module is loaded when one of these files exists:
+- Source roots include:
+  - repo-local `agents/`
+  - `AGENT_EXTENSION_PACKAGE_ROOTS`
+  - `AGENT_EXTENSION_CONFIGURED_ROOTS`
+- For repo-local scanning, directories named `runtime`, `lib`, or dot-prefixed are ignored.
+- A module is loadable when one of these files exists:
   - `events.ts`
   - `events.js`
   - `events.mjs`
+- Optional `extension.manifest.json` compatibility/capability declarations are enforced at load/reload.
 - Module must export `registerAgentEvents(registry)` (directly or via default export).
+- Dispatch is fanout and deterministic (`priority`, module name, registration order) with per-handler timeout isolation.
 
 Event handler tool contract:
 
 - `enqueueJob(input)` queues work through orchestrator queue
 - `logger` exposes structured log methods
+- handler output is normalized to typed envelopes (`enqueue_result`, `action_result`, `handler_result`, `handler_error`)
+- direct `action_request` execution is constrained by event-derived scope when available (`projectId`, `sourceSessionId`, `turnId`)
+- handler tool access is invocation-scoped; once a handler times out or finishes, late tool calls are rejected to prevent delayed enqueue side effects
 
 ## Worker Session Model
 
@@ -103,7 +111,8 @@ Worker session lifecycle:
 
 - created lazily on first queued job for `(ownerId, agent)`
 - `thread/start` uses project working directory when configured, else workspace root
-- optional one-time orientation turn from `agents/<agent>/orientation.md`
+- mandatory one-time core system orientation turn (queue-runner posture + CLI usage guidance)
+- optional one-time extension bootstrap turn from queue payload `bootstrapInstruction` (`key`, `instructionText`)
 - turn policy comes from `agents/<agent>/agent.config.json` when present
 - stale mapped worker session is recovered once by clearing mapping and reprovisioning
 
@@ -141,6 +150,7 @@ Payload contract:
 
 Handler behavior:
 
+- records file-change activity for the turn by stable anchor id (`anchorItemId`) before dispatch, so repeated approval-reconcile polling cannot inflate turn counters
 - builds one `file_change_supervisor_review` instruction
 - enqueues one `agent_instruction` job
 - dedupe key:
@@ -165,6 +175,10 @@ Payload contract:
 Handler behavior:
 
 - returns without enqueue when `hadFileChangeRequests` is `false`
+- turn transcript snapshot input is sourced from canonical turn content (`thread/read(includeTurns)`) merged with supplemental ledger rows, with supplemental-only fallback when canonical read is temporarily unavailable
+- if in-memory per-turn file-change anchors are absent (for example post-restart), turn-completed gating recovers file-change activity from supplemental `approval.request` transcript rows that carry `details.method=item/fileChange/requestApproval`
+- event dispatch is de-duplicated per `(threadId, turnId)` while in-flight and retried with bounded linear backoff (`0ms`, `+60ms`, `+120ms`) before giving up
+- if handlers are present but none returns actionable enqueue/action output, dispatch is treated as failed and retried (prevents silent loss of expected turn-review work)
 - otherwise builds one `turn_supervisor_review` instruction
 - enqueues one `agent_instruction` job
 - dedupe key:
@@ -187,40 +201,36 @@ Payload contract:
 
 Handler behavior:
 
-- builds one `suggest_request` instruction
-- enqueues one `suggest_request` queue job
+- builds one suggest-request instruction
+- enqueues one `agent_instruction` queue job with `jobKind: suggest_request`
 
 ## Queue Job Types
 
-### Job: `suggest_request`
+### Job Kind: `suggest_request` (via `agent_instruction`)
 
-Payload schema:
+Payload fields are carried inside `agent_instruction.instructionText` plus routing ids:
 
-- `requestKey`
-- `sessionId`
 - `projectId`
-- `agent`
-- `sourceThreadId`
-- `sourceTurnId`
-- `instructionText`
-- optional `model`
-- optional `effort`
-- optional `draft`
-
-Dedupe:
-
-- single-flight key: `${projectId}:${sessionId}:suggest_request`
-
-Result schema:
-
-- `suggestion`
-- `requestKey`
+- `sourceSessionId`
+- `threadId`
+- `turnId`
+- `jobKind: suggest_request`
+- `dedupeKey: suggest_request:<sourceSessionId>` (single-flight per source chat)
+- optional per-job worker overrides:
+  - `model`
+  - `effort`
+  - `fallbackSuggestionDraft`
+- completion metadata:
+  - `completionSignal.kind: suggested_request`
+  - `completionSignal.requestKey`
 
 Execution:
 
-- runs one agent instruction turn with `expectResponse: assistant_text`
-- returns assistant text when present
-- uses deterministic fallback suggestion when assistant text is empty
+- runs one instruction turn with `expectResponse: none`
+- worker publishes `streaming|complete|error|canceled` suggestion state via `POST /api/sessions/:sessionId/suggested-request/upsert`
+- API emits websocket `suggested_request_updated` for each upsert
+- request routes and client flow reconcile by `requestKey`
+- execution is deadline-bounded (`max(ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS, 45s)`); when no completion signal is observed in time, core writes a deterministic fallback suggestion, interrupts the worker turn best-effort, and completes the queue job
 
 ### Job: `agent_instruction`
 
@@ -235,9 +245,10 @@ Payload schema:
 - optional `itemId`
 - optional `approvalId`
 - optional `anchorItemId`
+- optional `bootstrapInstruction` (`key`, `instructionText`)
 - `instructionText`
 - optional `dedupeKey`
-- optional `expectResponse`: `none | assistant_text`
+- optional `expectResponse`: `none | assistant_text | action_intents`
 
 Dedupe:
 
@@ -249,13 +260,19 @@ Result schema:
 
 - `status: "ok"`
 - optional `outputText`
+- optional `actionIntents[]`
+- optional `actionResults[]`
 
 Execution:
 
 - resolves/creates project agent session
-- runs orientation turn once per worker session when configured
+- runs core orientation turn once per worker session
+- runs extension bootstrap turn once per worker session/bootstrap-key when provided
 - runs instruction turn
-- streams assistant output snapshots into transcript row type `agent.jobOutput`
+- when `expectResponse=assistant_text`, streams assistant output snapshots into transcript row type `agent.jobOutput`
+- when `expectResponse=none`, no structured output contract is required; side effects may occur live during the worker turn (for example via CLI commands)
+- when `expectResponse=action_intents`, parses structured JSON intents, validates scope/capability/idempotency in API core, then executes intents server-side
+- action scope locks include `projectId`, `sourceSessionId`, and `turnId` when available; `queue.enqueue` intents cannot target a different project and inherit `sourceSessionId` from scope when omitted
 - reconciles expected supplemental entries for supervisor job kinds at terminal state
 
 ## Supervisor Instruction Contract
@@ -279,7 +296,7 @@ File-change instruction structure includes:
 
 - diff details
 - explicit deterministic auto-action rules
-- explicit API actions in required order
+- explicit ordered CLI side effects in required order
 
 Mandatory execution order for file-change supervision:
 
@@ -289,11 +306,17 @@ Mandatory execution order for file-change supervision:
 4. upsert supervisor insight `complete`
 5. evaluate and execute eligible auto actions
 
+Worker execution contract for supervisor jobs:
+
+- execute transcript/approval/steer side effects through CLI during turn execution
+- do not depend on structured JSON output parsing for side effects
+- keep transcript message ids and job dedupe keys deterministic for idempotent replay behavior
+
 Auto-action precedence:
 
 - reject wins when both approve and reject conditions match
 - user decisions are authoritative in races
-- `404 not_found` on approval decision is reconciliation, not retryable failure
+- `already_resolved` approval action status is reconciliation, not retryable failure
 
 ## Transcript Contracts
 
@@ -412,7 +435,9 @@ To add a new workflow:
 2. subscribe to one or more runtime event names
 3. construct deterministic markdown instruction text with full routing/context payload
 4. enqueue `agent_instruction` or another registered queue job type
-5. use transcript upsert and/or other API actions from worker instructions
+5. choose a side-effect execution contract:
+   - CLI/live actions with `expectResponse=none`, or
+   - structured `action_intents` output executed by API core
 6. define stable dedupe and transcript message id keys
 7. add unit/contract coverage for dedupe, retry, and terminal reconciliation
 

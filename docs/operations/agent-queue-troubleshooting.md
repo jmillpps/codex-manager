@@ -106,7 +106,7 @@ Meaning:
 
 Behavior:
 
-- `agent_instruction` and `suggest_request` retry classification marks this as retryable
+- `agent_instruction` retry classification marks this as retryable
 - worker session mapping is cleared and reprovisioned once
 
 Actions:

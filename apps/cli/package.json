@@ -1,0 +1,28 @@
+{
+  "name": "@repo/cli",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "codex-manager": "./dist/main.js",
+    "cmgr": "./dist/main.js"
+  },
+  "scripts": {
+    "dev": "tsx src/main.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "echo 'lint not configured for @repo/cli yet'",
+    "test": "tsx --test src/*.test.ts"
+  },
+  "dependencies": {
+    "@repo/api-client": "workspace:*",
+    "commander": "^14.0.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
