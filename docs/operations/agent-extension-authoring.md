@@ -178,15 +178,16 @@ Dedupe and idempotency guidance:
 Worker sessions are system-owned and owner-scoped:
 
 - mapping key: `${ownerId}::${agentId}`
-- hidden from user session lists
-- user chat operations against them return `403 system_session`
+- hidden from default user session lists (`GET /api/sessions`), with operator visibility via `GET /api/sessions?includeSystemOwned=true` and `GET /api/projects/:projectId/agent-sessions`
+- worker sessions are readable (`GET /api/sessions/:sessionId`), while mutating user-chat operations still return `403 system_session`
 
 Execution flow:
 
 1. resolve/create worker session
-2. run core queue-runner orientation once
-3. run optional extension bootstrap instruction once when provided by queue payload (`bootstrapInstruction`)
-4. run instruction turn for each queued job
+2. run startup preflight once for the worker session before executing instruction turns
+3. startup preflight runs core queue-runner orientation once
+4. startup preflight runs optional extension bootstrap once per session/bootstrap-key when provided by queue payload (`bootstrapInstruction`)
+5. run exactly one instruction turn per queued job
 
 Worker turn policy can be controlled by `agent.config.json`:
 

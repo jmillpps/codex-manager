@@ -49,7 +49,7 @@ test("suggested request response does not overwrite draft after switching sessio
     });
   });
 
-  await page.getByRole("button", { name: "Suggest Request" }).click();
+  await page.locator(".composer").getByRole("button", { name: "Suggest Request", exact: true }).click();
   await page.getByRole("button", { name: secondTitle, exact: true }).click();
   await textarea.fill("draft for session B");
 

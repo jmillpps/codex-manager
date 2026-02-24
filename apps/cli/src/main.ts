@@ -169,6 +169,24 @@ function parseKeyValuePairs(entries: Array<string>): Record<string, string> {
   return output;
 }
 
+function parseOptionalPositiveInt(value: string | undefined, fieldName: string): number | undefined {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`--${fieldName} must be a positive number`);
+  }
+  return Math.floor(parsed);
+}
+
+function asObjectRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
 function buildProgram(): Command {
   const program = new Command();
 
@@ -835,10 +853,24 @@ function buildProgram(): Command {
     .command("list")
     .requiredOption("--project-id <id>")
     .option("--state <state>", "queued|running|completed|failed|canceled")
+    .option("--source-session-id <id>")
+    .option("--job-kind <kind>")
+    .option("--agent <name>")
+    .option("--sort <order>", "asc|desc", "asc")
+    .option("--limit <n>")
     .action(
       withRuntime("orchestrator jobs list", async (ctx, args) => {
-        const options = args[0] as { projectId: string; state?: string };
-        await runApiCall(ctx, {
+        const options = args[0] as {
+          projectId: string;
+          state?: string;
+          sourceSessionId?: string;
+          jobKind?: string;
+          agent?: string;
+          sort?: string;
+          limit?: string;
+        };
+
+        const result = await invokeApi(ctx, {
           command: "orchestrator jobs list",
           method: "GET",
           pathTemplate: "/api/projects/:projectId/orchestrator/jobs",
@@ -847,6 +879,60 @@ function buildProgram(): Command {
           },
           query: {
             state: options.state
+          }
+        });
+
+        const responseBody = asObjectRecord(result.response.body);
+        const data = Array.isArray(responseBody?.data) ? responseBody.data : null;
+        if (!responseBody || !data) {
+          printSuccess(ctx, result);
+          return;
+        }
+
+        let jobs = data.filter((entry): entry is Record<string, unknown> => asObjectRecord(entry) !== null);
+
+        if (options.sourceSessionId) {
+          jobs = jobs.filter((job) => job.sourceSessionId === options.sourceSessionId);
+        }
+        if (options.jobKind) {
+          jobs = jobs.filter((job) => {
+            const payload = asObjectRecord(job.payload);
+            return payload?.jobKind === options.jobKind;
+          });
+        }
+        if (options.agent) {
+          jobs = jobs.filter((job) => {
+            const payload = asObjectRecord(job.payload);
+            return payload?.agent === options.agent;
+          });
+        }
+
+        const sortOrder = (options.sort ?? "asc").toLowerCase();
+        if (sortOrder !== "asc" && sortOrder !== "desc") {
+          throw new Error("--sort must be asc or desc");
+        }
+        jobs.sort((left, right) => {
+          const leftCreated = Date.parse(String(left.createdAt ?? ""));
+          const rightCreated = Date.parse(String(right.createdAt ?? ""));
+          if (!Number.isFinite(leftCreated) || !Number.isFinite(rightCreated)) {
+            return 0;
+          }
+          return sortOrder === "asc" ? leftCreated - rightCreated : rightCreated - leftCreated;
+        });
+
+        const limit = parseOptionalPositiveInt(options.limit, "limit");
+        if (limit) {
+          jobs = jobs.slice(0, limit);
+        }
+
+        printSuccess(ctx, {
+          ...result,
+          response: {
+            ...result.response,
+            body: {
+              ...responseBody,
+              data: jobs
+            }
           }
         });
       })
@@ -1049,9 +1135,15 @@ function buildProgram(): Command {
     .option("--archived <boolean>")
     .option("--cursor <cursor>")
     .option("--limit <n>")
+    .option("--include-system-owned <boolean>")
     .action(
       withRuntime("sessions list", async (ctx, args) => {
-        const options = args[0] as { archived?: string; cursor?: string; limit?: string };
+        const options = args[0] as {
+          archived?: string;
+          cursor?: string;
+          limit?: string;
+          includeSystemOwned?: string;
+        };
         await runApiCall(ctx, {
           command: "sessions list",
           method: "GET",
@@ -1059,7 +1151,8 @@ function buildProgram(): Command {
           query: {
             archived: parseMaybeBoolean(options.archived),
             cursor: options.cursor,
-            limit: options.limit ? Number(options.limit) : undefined
+            limit: options.limit ? Number(options.limit) : undefined,
+            includeSystemOwned: parseMaybeBoolean(options.includeSystemOwned)
           }
         });
       })
@@ -1110,6 +1203,112 @@ function buildProgram(): Command {
             sessionId: options.sessionId
           },
           allowStatuses: [200, 410]
+        });
+      })
+    );
+
+  sessions
+    .command("inspect")
+    .requiredOption("--session-id <id>")
+    .option("--transcript-tail <n>", "Tail entry count after filtering", "12")
+    .option("--types <csv>", "Filter transcript entry types")
+    .option("--statuses <csv>", "Filter transcript statuses")
+    .option("--roles <csv>", "Filter transcript roles")
+    .option("--contains <text>", "Substring filter against transcript content")
+    .option("--content-chars <n>", "Truncate content preview length", "220")
+    .action(
+      withRuntime("sessions inspect", async (ctx, args) => {
+        const options = args[0] as {
+          sessionId: string;
+          transcriptTail?: string;
+          types?: string;
+          statuses?: string;
+          roles?: string;
+          contains?: string;
+          contentChars?: string;
+        };
+        const transcriptTail = parseOptionalPositiveInt(options.transcriptTail, "transcript-tail") ?? 12;
+        const contentChars = parseOptionalPositiveInt(options.contentChars, "content-chars") ?? 220;
+        const types = new Set(parseCsvList(options.types) ?? []);
+        const statuses = new Set(parseCsvList(options.statuses) ?? []);
+        const roles = new Set(parseCsvList(options.roles) ?? []);
+        const contains = options.contains?.trim().toLowerCase();
+
+        const result = await invokeApi(ctx, {
+          command: "sessions inspect",
+          method: "GET",
+          pathTemplate: "/api/sessions/:sessionId",
+          pathParams: {
+            sessionId: options.sessionId
+          },
+          allowStatuses: [200, 410]
+        });
+
+        const responseBody = asObjectRecord(result.response.body);
+        if (!responseBody) {
+          printSuccess(ctx, result);
+          return;
+        }
+
+        const session = asObjectRecord(responseBody.session);
+        const thread = asObjectRecord(responseBody.thread);
+        const transcript = Array.isArray(responseBody.transcript) ? responseBody.transcript : [];
+        const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+        const lastTurn = turns.length > 0 ? asObjectRecord(turns.at(-1)) : null;
+
+        const filteredTranscript = transcript
+          .map((entry) => asObjectRecord(entry))
+          .filter((entry): entry is Record<string, unknown> => entry !== null)
+          .filter((entry) => (types.size > 0 ? types.has(String(entry.type ?? "")) : true))
+          .filter((entry) => (statuses.size > 0 ? statuses.has(String(entry.status ?? "")) : true))
+          .filter((entry) => (roles.size > 0 ? roles.has(String(entry.role ?? "")) : true))
+          .filter((entry) => {
+            if (!contains) {
+              return true;
+            }
+            const content = String(entry.content ?? "").toLowerCase();
+            return content.includes(contains);
+          });
+
+        const transcriptTailEntries = filteredTranscript.slice(-transcriptTail).map((entry) => ({
+          messageId: entry.messageId ?? null,
+          turnId: entry.turnId ?? null,
+          role: entry.role ?? null,
+          type: entry.type ?? null,
+          status: entry.status ?? null,
+          startedAt: entry.startedAt ?? null,
+          completedAt: entry.completedAt ?? null,
+          content: String(entry.content ?? "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, contentChars)
+        }));
+
+        printSuccess(ctx, {
+          ...result,
+          response: {
+            ...result.response,
+            body: {
+              session,
+              thread: thread
+                ? {
+                    id: thread.id ?? null,
+                    preview: thread.preview ?? null,
+                    updatedAt: thread.updatedAt ?? null
+                  }
+                : null,
+              latestTurn: lastTurn
+                ? {
+                    id: lastTurn.id ?? null,
+                    status: lastTurn.status ?? null,
+                    error: lastTurn.error ?? null
+                  }
+                : null,
+              transcriptCount: transcript.length,
+              filteredTranscriptCount: filteredTranscript.length,
+              transcriptTail: transcriptTailEntries
+            }
+          }
         });
       })
     );
@@ -1578,7 +1777,7 @@ function buildProgram(): Command {
     .requiredOption("--session-id <id>")
     .requiredOption("--message-id <id>")
     .requiredOption("--turn-id <id>")
-    .requiredOption("--role <role>")
+    .requiredOption("--entry-role <role>")
     .requiredOption("--type <type>")
     .option("--content <content>")
     .option("--content-file <path>")
@@ -1593,7 +1792,7 @@ function buildProgram(): Command {
           sessionId: string;
           messageId: string;
           turnId: string;
-          role: "user" | "assistant" | "system";
+          entryRole: "user" | "assistant" | "system";
           type: string;
           content?: string;
           contentFile?: string;
@@ -1624,7 +1823,7 @@ function buildProgram(): Command {
           body: {
             messageId: options.messageId,
             turnId: options.turnId,
-            role: options.role,
+            role: options.entryRole,
             type: options.type,
             content,
             status: options.status,

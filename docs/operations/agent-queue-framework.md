@@ -104,8 +104,8 @@ Worker sessions are owner-scoped and agent-scoped:
   - real `projectId`
   - `session:<sessionId>` for unassigned-chat queue workflows
 - persisted in metadata `projectAgentSessionByKey`
-- hidden from session lists
-- user chat operations on these sessions are rejected (`403 system_session`)
+- hidden from default session lists (`GET /api/sessions`) but visible with `includeSystemOwned=true` and owner-mapping lookup (`GET /api/projects/:projectId/agent-sessions`)
+- worker sessions are readable (`GET /api/sessions/:sessionId`); mutating user chat operations remain rejected (`403 system_session`)
 
 Worker session lifecycle:
 
@@ -194,7 +194,7 @@ Payload contract:
 - `threadId`
 - `turnId`
 - `userRequest`
-- `turnTranscript`
+- `turnTranscript` (full user+assistant chat history context for the source session)
 - optional `model`
 - optional `effort`
 - optional `draft`
@@ -202,6 +202,7 @@ Payload contract:
 Handler behavior:
 
 - builds one suggest-request instruction
+- instruction contract tells worker to run suggestion synthesis immediately using provided payload context (no additional transcript lookup required)
 - enqueues one `agent_instruction` queue job with `jobKind: suggest_request`
 
 ## Queue Job Types
@@ -230,7 +231,7 @@ Execution:
 - worker publishes `streaming|complete|error|canceled` suggestion state via `POST /api/sessions/:sessionId/suggested-request/upsert`
 - API emits websocket `suggested_request_updated` for each upsert
 - request routes and client flow reconcile by `requestKey`
-- execution is deadline-bounded (`max(ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS, 45s)`); when no completion signal is observed in time, core writes a deterministic fallback suggestion, interrupts the worker turn best-effort, and completes the queue job
+- execution is deadline-bounded (`ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS`); when no completion signal is observed in time, core writes a deterministic fallback suggestion, interrupts the worker turn best-effort, and completes the queue job
 
 ### Job: `agent_instruction`
 
@@ -266,8 +267,9 @@ Result schema:
 Execution:
 
 - resolves/creates project agent session
-- runs core orientation turn once per worker session
-- runs extension bootstrap turn once per worker session/bootstrap-key when provided
+- runs startup preflight once per worker session before executing job instruction turns
+- startup preflight includes one core orientation turn per worker session
+- startup preflight includes one extension bootstrap turn per worker session/bootstrap-key when provided
 - runs instruction turn
 - when `expectResponse=assistant_text`, streams assistant output snapshots into transcript row type `agent.jobOutput`
 - when `expectResponse=none`, no structured output contract is required; side effects may occur live during the worker turn (for example via CLI commands)
@@ -387,6 +389,8 @@ Agent turn timing controls:
 - `ORCHESTRATOR_AGENT_TURN_TIMEOUT_MS`
 - `ORCHESTRATOR_AGENT_POLL_INTERVAL_MS`
 - `ORCHESTRATOR_AGENT_INCLUDE_TURNS_GRACE_MS`
+- `ORCHESTRATOR_AGENT_UNTRUSTED_TERMINAL_GRACE_MS`
+- `ORCHESTRATOR_AGENT_EMPTY_TURN_GRACE_MS`
 
 Queue timing controls:
 
@@ -399,6 +403,8 @@ Runtime behavior:
 - `thread/read(includeTurns)` polling is fallback
 - include-turns non-materialized windows are bounded by grace timer
 - grace overflow throws retryable error instead of waiting full turn timeout
+- if fallback reads report terminal state while active-turn tracking still marks the same turn active, core requires stable no-progress observation for `ORCHESTRATOR_AGENT_UNTRUSTED_TERMINAL_GRACE_MS` before self-healing the active-turn marker
+- running turns that remain empty (no materialized turn items) longer than `ORCHESTRATOR_AGENT_EMPTY_TURN_GRACE_MS` fail retryable to avoid multi-minute phantom in-progress stalls
 
 Recovery behavior:
 

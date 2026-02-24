@@ -145,6 +145,19 @@ Actions:
 2. inspect codex log for backend/runtime stalls
 3. tune timeout if workload/model consistently exceeds budget
 
+### Job failed with `agent turn ... made no item progress before ...ms`
+
+Meaning:
+
+- worker turn entered running state but no turn items materialized before `ORCHESTRATOR_AGENT_EMPTY_TURN_GRACE_MS`
+- this is treated as a retryable stall guard (commonly from phantom in-progress turn starts)
+
+Actions:
+
+1. inspect codex log around the worker turn id for `turn/started` without follow-on `item/started`
+2. confirm retry succeeded on the next attempt
+3. if your runtime is consistently slow to materialize first items, increase `ORCHESTRATOR_AGENT_EMPTY_TURN_GRACE_MS` modestly
+
 ### Job completed with no assistant output
 
 Meaning:
@@ -177,6 +190,8 @@ Worker turn observation:
 - `ORCHESTRATOR_AGENT_TURN_TIMEOUT_MS`
 - `ORCHESTRATOR_AGENT_POLL_INTERVAL_MS`
 - `ORCHESTRATOR_AGENT_INCLUDE_TURNS_GRACE_MS`
+- `ORCHESTRATOR_AGENT_UNTRUSTED_TERMINAL_GRACE_MS`
+- `ORCHESTRATOR_AGENT_EMPTY_TURN_GRACE_MS`
 
 Supervisor policy:
 

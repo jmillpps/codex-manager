@@ -8,7 +8,7 @@ test("message can be sent and transcript updates", async ({ page }) => {
   const prompt = `Reply with exactly OK ${nonce}`;
   const textarea = page.getByPlaceholder("Type your message...");
   await textarea.fill(prompt);
-  await page.getByRole("button", { name: "Send" }).click();
+  await page.locator(".composer").getByRole("button", { name: "Send", exact: true }).click();
 
   const transcript = page.locator(".chat-transcript-inner");
   const latestTurnBeforeIdle = transcript.locator(".turn-group").last();
@@ -24,7 +24,7 @@ test("active turn returns to idle and does not stay in working state", async ({ 
   const prompt = `Return exactly OK ${nonce}`;
   const textarea = page.getByPlaceholder("Type your message...");
   await textarea.fill(prompt);
-  await page.getByRole("button", { name: "Send" }).click();
+  await page.locator(".composer").getByRole("button", { name: "Send", exact: true }).click();
 
   const transcript = page.locator(".chat-transcript-inner");
   const latestTurnBeforeIdle = transcript.locator(".turn-group").last();

@@ -391,7 +391,8 @@ const sessionApprovalPolicyBodySchema = z.object({
 const listSessionsQuerySchema = z.object({
   archived: z.enum(["true", "false"]).optional(),
   cursor: z.string().min(1).optional(),
-  limit: z.coerce.number().int().min(1).max(200).optional()
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  includeSystemOwned: z.enum(["true", "false"]).optional()
 });
 
 const listQuerySchema = z.object({
@@ -691,6 +692,8 @@ const fileChangeEventAnchorsByTurn = new Map<string, Set<string>>();
 const turnCompletedEventDispatchInFlight = new Set<string>();
 const coreQueueWorkerOrientationCompletedBySession = new Set<string>();
 const agentExtensionBootstrapCompletedBySession = new Map<string, Set<string>>();
+const coreQueueWorkerOrientationInFlightBySession = new Map<string, Promise<void>>();
+const agentExtensionBootstrapInFlightByKey = new Map<string, Promise<void>>();
 const runtimeObservedTurnsByKey = new Map<string, RuntimeObservedTurnState>();
 const runtimeTurnSignalWaitersByKey = new Map<string, Set<() => void>>();
 const suggestedRequestStateByRequestKey = new Map<string, SuggestedRequestRuntimeState>();
@@ -1178,6 +1181,37 @@ function upsertSupplementalTranscriptEntry(threadId: string, entry: TranscriptEn
   }
 
   requestSupplementalTranscriptPersistence();
+}
+
+function upsertAgentWorkerLifecycleEntry(input: {
+  sessionId: string;
+  messageId: string;
+  turnId: string;
+  status: TranscriptEntry["status"];
+  content: string;
+  details?: Record<string, unknown>;
+  startedAt?: number;
+}): void {
+  const now = Date.now();
+  const detailsText = input.details ? stringifyDetails(input.details) : undefined;
+  const entry: TranscriptEntry = {
+    messageId: input.messageId,
+    turnId: input.turnId,
+    role: "system",
+    type: "agent.worker.lifecycle",
+    content: input.content,
+    ...(detailsText ? { details: detailsText } : {}),
+    status: input.status,
+    ...(typeof input.startedAt === "number" ? { startedAt: input.startedAt } : {}),
+    ...(input.status === "streaming" ? { startedAt: input.startedAt ?? now } : { completedAt: now })
+  };
+  upsertSupplementalTranscriptEntry(input.sessionId, entry);
+  publishTranscriptUpdated(input.sessionId, {
+    turnId: entry.turnId,
+    messageId: entry.messageId,
+    type: entry.type,
+    entry
+  });
 }
 
 function listSupplementalTranscriptEntries(threadId: string): Array<SupplementalTranscriptEntry> {
@@ -2343,6 +2377,24 @@ function listProjectAgentSessionIds(projectId: string): Array<string> {
   return Array.from(sessionIds);
 }
 
+function listProjectAgentSessionMappings(projectId: string): Array<{ agent: string; sessionId: string }> {
+  const mappings: Array<{ agent: string; sessionId: string }> = [];
+  for (const [key, sessionId] of Object.entries(sessionMetadata.projectAgentSessionByKey)) {
+    const parsed = parseProjectAgentSessionKey(key);
+    if (!parsed || parsed.projectId !== projectId) {
+      continue;
+    }
+    if (typeof sessionId !== "string" || sessionId.trim().length === 0) {
+      continue;
+    }
+    mappings.push({
+      agent: parsed.agent,
+      sessionId
+    });
+  }
+  return mappings;
+}
+
 function clearProjectAgentSessionMappingsForProject(projectId: string): boolean {
   let changed = false;
   for (const key of Object.keys(sessionMetadata.projectAgentSessionByKey)) {
@@ -2603,6 +2655,12 @@ async function clearProjectAgentSessionMapping(projectId: string, agent: string,
 
   coreQueueWorkerOrientationCompletedBySession.delete(expectedSessionId);
   agentExtensionBootstrapCompletedBySession.delete(expectedSessionId);
+  coreQueueWorkerOrientationInFlightBySession.delete(expectedSessionId);
+  for (const inFlightKey of agentExtensionBootstrapInFlightByKey.keys()) {
+    if (inFlightKey.startsWith(`${expectedSessionId}::`)) {
+      agentExtensionBootstrapInFlightByKey.delete(inFlightKey);
+    }
+  }
 
   if (metadataChanged) {
     await persistSessionMetadata();
@@ -2927,7 +2985,20 @@ async function delayWithSignal(ms: number, signal?: AbortSignal): Promise<void> 
 }
 
 function isTurnStillRunning(status: string): boolean {
-  return status === "in_progress" || status === "pending" || status === "running";
+  const normalized = status.trim().toLowerCase();
+  if (!normalized) {
+    // Unknown status should be treated as still running so we never advance early.
+    return true;
+  }
+
+  return (
+    normalized !== "completed" &&
+    normalized !== "failed" &&
+    normalized !== "error" &&
+    normalized !== "interrupted" &&
+    normalized !== "cancelled" &&
+    normalized !== "canceled"
+  );
 }
 
 function latestAgentMessageFromTurn(turn: CodexTurn): string | null {
@@ -3477,8 +3548,7 @@ function buildFallbackSuggestedRequest(contextEntries: Array<TranscriptEntry>, d
 
 function suggestionContextEntriesFromTranscript(transcript: Array<TranscriptEntry>): Array<TranscriptEntry> {
   return transcript
-    .filter((entry) => (entry.role === "user" || entry.role === "assistant") && entry.content.trim().length > 0)
-    .slice(-20);
+    .filter((entry) => (entry.role === "user" || entry.role === "assistant") && entry.content.trim().length > 0);
 }
 
 async function loadSuggestionContext(sessionId: string): Promise<Array<TranscriptEntry>> {
@@ -3773,6 +3843,19 @@ function runtimeTurnStateFromStore(threadId: string, turnId: string): RuntimeObs
   return runtimeObservedTurnsByKey.get(runtimeObservedTurnKey(threadId, turnId)) ?? null;
 }
 
+function canTrustThreadReadTerminalStatus(threadId: string, turnId: string): boolean {
+  if (!isSystemOwnedSession(threadId)) {
+    return true;
+  }
+
+  const activeTurnId = activeTurnByThread.get(threadId);
+  if (!activeTurnId) {
+    return true;
+  }
+
+  return activeTurnId !== turnId;
+}
+
 function shouldPollThreadForRuntimeTurn(threadId: string, observed: RuntimeObservedTurnState | null): boolean {
   if (!isSystemOwnedSession(threadId)) {
     return true;
@@ -3986,6 +4069,12 @@ async function waitForAssistantText(
   let completedTurnWithoutOutputAt: number | null = null;
   let lastOutputText: string | null = null;
   let lastOutputStatus: AgentOutputUpdate["status"] | null = null;
+  let lastProgressAt = Date.now();
+  let lastObservedRuntimeUpdatedAt = 0;
+  let lastThreadReadAssistantText = "";
+  let lastThreadReadItemCount = -1;
+  let untrustedCompletedSince: number | null = null;
+  let runningWithoutItemsSince: number | null = null;
 
   const emitOutput = (text: string, status: AgentOutputUpdate["status"]): void => {
     const normalizedText = normalizeAgentOutputText(text);
@@ -4007,6 +4096,10 @@ async function waitForAssistantText(
     throwIfAborted(signal);
     const observed = runtimeTurnStateFromStore(threadId, turnId);
     if (observed) {
+      if (observed.updatedAt > lastObservedRuntimeUpdatedAt) {
+        lastObservedRuntimeUpdatedAt = observed.updatedAt;
+        lastProgressAt = Date.now();
+      }
       const observedText = normalizeAgentOutputText(observed.assistantText);
       if (observedText.length > 0) {
         emitOutput(observedText, observed.status === "completed" ? "complete" : "streaming");
@@ -4041,16 +4134,61 @@ async function waitForAssistantText(
         const turn = turns.find((entry) => entry.id === turnId);
         if (turn) {
           const runtimeStatus = runtimeStatusFromTurnStatus(turn.status);
-          markRuntimeTurnSettled(threadId, turnId, runtimeStatus);
+          let trustTerminalStatus =
+            runtimeStatus === "running" || runtimeStatus === "failed"
+              ? true
+              : canTrustThreadReadTerminalStatus(threadId, turnId);
+          const turnItems = Array.isArray(turn.items) ? turn.items : [];
+          const itemCount = turnItems.length;
+          if (itemCount !== lastThreadReadItemCount) {
+            lastThreadReadItemCount = itemCount;
+            lastProgressAt = Date.now();
+          }
+          if (runtimeStatus === "running" && itemCount === 0) {
+            if (runningWithoutItemsSince === null) {
+              runningWithoutItemsSince = Date.now();
+            } else if (Date.now() - runningWithoutItemsSince >= env.ORCHESTRATOR_AGENT_EMPTY_TURN_GRACE_MS) {
+              throw new Error(`agent turn ${turnId} made no item progress before ${env.ORCHESTRATOR_AGENT_EMPTY_TURN_GRACE_MS}ms`);
+            }
+          } else {
+            runningWithoutItemsSince = null;
+          }
+
+          if (runtimeStatus === "completed" && !trustTerminalStatus) {
+            if (untrustedCompletedSince === null) {
+              untrustedCompletedSince = Date.now();
+            }
+            const noProgressForMs = Date.now() - lastProgressAt;
+            const untrustedCompletedForMs = Date.now() - untrustedCompletedSince;
+            if (
+              noProgressForMs >= env.ORCHESTRATOR_AGENT_UNTRUSTED_TERMINAL_GRACE_MS &&
+              untrustedCompletedForMs >= env.ORCHESTRATOR_AGENT_UNTRUSTED_TERMINAL_GRACE_MS
+            ) {
+              activeTurnByThread.delete(threadId);
+              trustTerminalStatus = true;
+            }
+          } else {
+            untrustedCompletedSince = null;
+          }
+
+          markRuntimeTurnSettled(threadId, turnId, trustTerminalStatus ? runtimeStatus : "running");
           const assistantText = latestAgentMessageFromTurn(turn);
           if (assistantText) {
+            const normalizedAssistantText = normalizeAgentOutputText(assistantText);
+            if (normalizedAssistantText.length > 0 && normalizedAssistantText !== lastThreadReadAssistantText) {
+              lastThreadReadAssistantText = normalizedAssistantText;
+              lastProgressAt = Date.now();
+            }
             setRuntimeTurnAssistantText(threadId, turnId, assistantText);
-            emitOutput(assistantText, runtimeStatus === "completed" ? "complete" : "streaming");
+            emitOutput(
+              assistantText,
+              runtimeStatus === "completed" && trustTerminalStatus ? "complete" : "streaming"
+            );
           }
           if (runtimeStatus === "failed") {
             throw agentTurnFailedError(assistantText);
           }
-          if (runtimeStatus === "completed") {
+          if (runtimeStatus === "completed" && trustTerminalStatus) {
             if (assistantText) {
               return normalizeAgentOutputText(assistantText);
             }
@@ -4094,6 +4232,12 @@ async function waitForTurnToSettle(
   let latestOutputText: string | null = null;
   let lastOutputText: string | null = null;
   let lastOutputStatus: AgentOutputUpdate["status"] | null = null;
+  let lastProgressAt = Date.now();
+  let lastObservedRuntimeUpdatedAt = 0;
+  let lastThreadReadAssistantText = "";
+  let lastThreadReadItemCount = -1;
+  let untrustedCompletedSince: number | null = null;
+  let runningWithoutItemsSince: number | null = null;
 
   const emitOutput = (text: string, status: AgentOutputUpdate["status"]): void => {
     const normalizedText = normalizeAgentOutputText(text);
@@ -4115,6 +4259,10 @@ async function waitForTurnToSettle(
     throwIfAborted(signal);
     const observed = runtimeTurnStateFromStore(threadId, turnId);
     if (observed) {
+      if (observed.updatedAt > lastObservedRuntimeUpdatedAt) {
+        lastObservedRuntimeUpdatedAt = observed.updatedAt;
+        lastProgressAt = Date.now();
+      }
       const observedText = normalizeAgentOutputText(observed.assistantText);
       if (observedText.length > 0) {
         latestOutputText = observedText;
@@ -4144,18 +4292,63 @@ async function waitForTurnToSettle(
         const turn = turns.find((entry) => entry.id === turnId);
         if (turn) {
           const runtimeStatus = runtimeStatusFromTurnStatus(turn.status);
-          markRuntimeTurnSettled(threadId, turnId, runtimeStatus);
+          let trustTerminalStatus =
+            runtimeStatus === "running" || runtimeStatus === "failed"
+              ? true
+              : canTrustThreadReadTerminalStatus(threadId, turnId);
+          const turnItems = Array.isArray(turn.items) ? turn.items : [];
+          const itemCount = turnItems.length;
+          if (itemCount !== lastThreadReadItemCount) {
+            lastThreadReadItemCount = itemCount;
+            lastProgressAt = Date.now();
+          }
+          if (runtimeStatus === "running" && itemCount === 0) {
+            if (runningWithoutItemsSince === null) {
+              runningWithoutItemsSince = Date.now();
+            } else if (Date.now() - runningWithoutItemsSince >= env.ORCHESTRATOR_AGENT_EMPTY_TURN_GRACE_MS) {
+              throw new Error(`agent turn ${turnId} made no item progress before ${env.ORCHESTRATOR_AGENT_EMPTY_TURN_GRACE_MS}ms`);
+            }
+          } else {
+            runningWithoutItemsSince = null;
+          }
+
+          if (runtimeStatus === "completed" && !trustTerminalStatus) {
+            if (untrustedCompletedSince === null) {
+              untrustedCompletedSince = Date.now();
+            }
+            const noProgressForMs = Date.now() - lastProgressAt;
+            const untrustedCompletedForMs = Date.now() - untrustedCompletedSince;
+            if (
+              noProgressForMs >= env.ORCHESTRATOR_AGENT_UNTRUSTED_TERMINAL_GRACE_MS &&
+              untrustedCompletedForMs >= env.ORCHESTRATOR_AGENT_UNTRUSTED_TERMINAL_GRACE_MS
+            ) {
+              activeTurnByThread.delete(threadId);
+              trustTerminalStatus = true;
+            }
+          } else {
+            untrustedCompletedSince = null;
+          }
+
+          markRuntimeTurnSettled(threadId, turnId, trustTerminalStatus ? runtimeStatus : "running");
           const assistantText = latestAgentMessageFromTurn(turn);
           if (assistantText) {
+            const normalizedAssistantText = normalizeAgentOutputText(assistantText);
+            if (normalizedAssistantText.length > 0 && normalizedAssistantText !== lastThreadReadAssistantText) {
+              lastThreadReadAssistantText = normalizedAssistantText;
+              lastProgressAt = Date.now();
+            }
             setRuntimeTurnAssistantText(threadId, turnId, assistantText);
             latestOutputText = normalizeAgentOutputText(assistantText);
-            emitOutput(assistantText, runtimeStatus === "completed" ? "complete" : "streaming");
+            emitOutput(
+              assistantText,
+              runtimeStatus === "completed" && trustTerminalStatus ? "complete" : "streaming"
+            );
           }
           if (runtimeStatus === "failed") {
             throw agentTurnFailedError(assistantText);
           }
 
-          if (runtimeStatus === "completed") {
+          if (runtimeStatus === "completed" && trustTerminalStatus) {
             return latestOutputText;
           }
         }
@@ -4183,7 +4376,7 @@ async function waitForTurnOrSuggestedRequestCompletion(
 ): Promise<void> {
   throwIfAborted(params.signal);
   const startedAt = Date.now();
-  const timeoutMs = Math.max(env.ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS, 45_000);
+  const timeoutMs = env.ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS;
 
   while (Date.now() - startedAt < timeoutMs) {
     throwIfAborted(params.signal);
@@ -4225,27 +4418,36 @@ function buildCoreQueueWorkerOrientationText(agent: string): string {
   return [
     "# System Queue-Runner Orientation",
     "",
+    "Before doing anything else, read and follow queue-runner guidance in:",
+    "- `docs/queue-runner.md`",
+    "",
     `You are booting as a hidden system-owned worker for agent "${agent}".`,
     "This is a control-plane queue processor session, not a user-facing chat.",
     "",
     "Core operating posture:",
     "- process one queue job at a time, in the order jobs are delivered by core",
+    "- prioritize liveness: publish initial live status signaling immediately when job execution begins",
+    "- do not delay live signaling for reads; gather additional context only when it is needed for the next safe mutation",
+    "- keep reads minimal and action-scoped; in most jobs, provided routing context is sufficient to begin execution",
     "- treat routing ids in each job as authoritative (`projectId`, `sourceSessionId`, `threadId`, `turnId`, and optional item/approval ids)",
+    "- execute mutations only inside the intended `projectId + sourceSessionId + turnId` scope unless the instruction explicitly requires otherwise",
     "- execute real side effects during the turn using CLI commands; do not depend on returning structured JSON output",
+    "- do not perform steering unless the job enables steering and the assessed risk is at or above the configured auto-steer threshold",
+    "- verify state after each mutation phase and always at terminal completion",
     "- if a user action races and resolves first, accept reconciliation and continue deterministically",
     "",
     "Queue job shape you will receive:",
     "- `agent_instruction`: includes `jobKind`, routing ids, and markdown `instructionText`",
     "- in this runtime, suggest-request work is also delivered as `agent_instruction` with `jobKind: suggest_request`",
     "",
-    "Use the full operator CLI surface documented at:",
+    "For full CLI command reference, use:",
     "- `docs/operations/cli.md`",
     "",
     "Primary CLI commands for queue-runner side effects:",
     "- transcript updates: `pnpm --filter @repo/cli dev sessions transcript upsert ...`",
     "- suggested-request updates: `pnpm --filter @repo/cli dev sessions suggest-request upsert ...`",
     "- approval actions: `pnpm --filter @repo/cli dev approvals decide ...`",
-    "- steering actions: `pnpm --filter @repo/cli dev sessions steer ...`",
+    "- steering actions: `pnpm --filter @repo/cli dev sessions steer ...` (only when auto-steer is enabled and risk >= configured threshold)",
     "",
     "After this orientation turn completes, expect extension-specific bootstrap instructions and then live queue jobs.",
     "Acknowledge readiness briefly and stay in queue-runner mode."
@@ -4276,22 +4478,106 @@ async function ensureCoreQueueWorkerOrientation(
     return;
   }
 
-  const turn = await runtimeProfileAdapter.startTurn({
-    threadId: sessionId,
-    model: runtimePolicy.model ?? undefined,
-    effort: runtimePolicy.orientationTurnPolicy.effort ?? undefined,
-    sandboxPolicy: toTurnSandboxPolicy(
-      runtimePolicy.orientationTurnPolicy.sandbox,
-      runtimePolicy.orientationTurnPolicy.networkAccess
-    ),
-    approvalPolicy: runtimePolicy.orientationTurnPolicy.approvalPolicy,
-    inputText: buildCoreQueueWorkerOrientationText(agent)
-  });
-  options?.onTurnStarted?.(sessionId, turn.id);
-  markRuntimeTurnStarted(sessionId, turn.id);
-  await waitForTurnToSettle(sessionId, turn.id, options?.signal);
-  coreQueueWorkerOrientationCompletedBySession.add(sessionId);
-  app.log.info({ projectId, agent, sessionId }, "completed core queue-runner orientation turn");
+  const existing = coreQueueWorkerOrientationInFlightBySession.get(sessionId);
+  if (existing) {
+    throwIfAborted(options?.signal);
+    await existing;
+    throwIfAborted(options?.signal);
+    return;
+  }
+
+  const work = (async () => {
+    if (coreQueueWorkerOrientationCompletedBySession.has(sessionId)) {
+      return;
+    }
+
+    const turn = await runtimeProfileAdapter.startTurn({
+      threadId: sessionId,
+      model: runtimePolicy.model ?? undefined,
+      effort: runtimePolicy.orientationTurnPolicy.effort ?? undefined,
+      sandboxPolicy: toTurnSandboxPolicy(
+        runtimePolicy.orientationTurnPolicy.sandbox,
+        runtimePolicy.orientationTurnPolicy.networkAccess
+      ),
+      approvalPolicy: runtimePolicy.orientationTurnPolicy.approvalPolicy,
+      inputText: buildCoreQueueWorkerOrientationText(agent)
+    });
+    activeTurnByThread.set(sessionId, turn.id);
+    options?.onTurnStarted?.(sessionId, turn.id);
+    markRuntimeTurnStarted(sessionId, turn.id);
+    const lifecycleMessageId = `agent-worker-lifecycle::core-orientation::${turn.id}`;
+    const lifecycleStartedAt = Date.now();
+    upsertAgentWorkerLifecycleEntry({
+      sessionId,
+      messageId: lifecycleMessageId,
+      turnId: turn.id,
+      status: "streaming",
+      content: "Running core queue-runner orientation turn.",
+      details: {
+        phase: "core_orientation",
+        projectId,
+        agent
+      },
+      startedAt: lifecycleStartedAt
+    });
+    try {
+      await waitForTurnToSettle(sessionId, turn.id, options?.signal);
+      upsertAgentWorkerLifecycleEntry({
+        sessionId,
+        messageId: lifecycleMessageId,
+        turnId: turn.id,
+        status: "complete",
+        content: "Core queue-runner orientation completed.",
+        details: {
+          phase: "core_orientation",
+          projectId,
+          agent,
+          durationMs: Math.max(0, Date.now() - lifecycleStartedAt)
+        },
+        startedAt: lifecycleStartedAt
+      });
+      coreQueueWorkerOrientationCompletedBySession.add(sessionId);
+      app.log.info({ projectId, agent, sessionId }, "completed core queue-runner orientation turn");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isAbortError(error) || options?.signal?.aborted) {
+        try {
+          await runtimeProfileAdapter.interruptTurn({
+            threadId: sessionId,
+            turnId: turn.id
+          });
+        } catch {
+          // Best-effort interrupt to avoid lingering in-progress worker turns.
+        }
+      }
+      upsertAgentWorkerLifecycleEntry({
+        sessionId,
+        messageId: lifecycleMessageId,
+        turnId: turn.id,
+        status: isAbortError(error) ? "canceled" : "error",
+        content: isAbortError(error)
+          ? "Core queue-runner orientation canceled."
+          : `Core queue-runner orientation failed: ${message}`,
+        details: {
+          phase: "core_orientation",
+          projectId,
+          agent,
+          error: message
+        },
+        startedAt: lifecycleStartedAt
+      });
+      throw error;
+    }
+  })();
+
+  coreQueueWorkerOrientationInFlightBySession.set(sessionId, work);
+  try {
+    await work;
+  } finally {
+    if (coreQueueWorkerOrientationInFlightBySession.get(sessionId) === work) {
+      coreQueueWorkerOrientationInFlightBySession.delete(sessionId);
+    }
+  }
 }
 
 async function ensureAgentExtensionBootstrapInstruction(
@@ -4320,22 +4606,141 @@ async function ensureAgentExtensionBootstrapInstruction(
     return;
   }
 
-  const turn = await runtimeProfileAdapter.startTurn({
-    threadId: sessionId,
-    model: runtimePolicy.model ?? undefined,
-    effort: runtimePolicy.orientationTurnPolicy.effort ?? undefined,
-    sandboxPolicy: toTurnSandboxPolicy(
-      runtimePolicy.orientationTurnPolicy.sandbox,
-      runtimePolicy.orientationTurnPolicy.networkAccess
-    ),
-    approvalPolicy: runtimePolicy.orientationTurnPolicy.approvalPolicy,
-    inputText: instructionText
-  });
-  options?.onTurnStarted?.(sessionId, turn.id);
-  markRuntimeTurnStarted(sessionId, turn.id);
-  await waitForTurnToSettle(sessionId, turn.id, options?.signal);
-  completedKeys.add(key);
-  app.log.info({ projectId, agent, sessionId, bootstrapKey: key }, "completed agent extension bootstrap turn");
+  const inFlightKey = `${sessionId}::${key}`;
+  const existing = agentExtensionBootstrapInFlightByKey.get(inFlightKey);
+  if (existing) {
+    throwIfAborted(options?.signal);
+    await existing;
+    throwIfAborted(options?.signal);
+    return;
+  }
+
+  const work = (async () => {
+    if (completedKeys.has(key)) {
+      return;
+    }
+
+    const turn = await runtimeProfileAdapter.startTurn({
+      threadId: sessionId,
+      model: runtimePolicy.model ?? undefined,
+      effort: runtimePolicy.orientationTurnPolicy.effort ?? undefined,
+      sandboxPolicy: toTurnSandboxPolicy(
+        runtimePolicy.orientationTurnPolicy.sandbox,
+        runtimePolicy.orientationTurnPolicy.networkAccess
+      ),
+      approvalPolicy: runtimePolicy.orientationTurnPolicy.approvalPolicy,
+      inputText: instructionText
+    });
+    activeTurnByThread.set(sessionId, turn.id);
+    options?.onTurnStarted?.(sessionId, turn.id);
+    markRuntimeTurnStarted(sessionId, turn.id);
+    const lifecycleMessageId = `agent-worker-lifecycle::extension-bootstrap::${key}::${turn.id}`;
+    const lifecycleStartedAt = Date.now();
+    upsertAgentWorkerLifecycleEntry({
+      sessionId,
+      messageId: lifecycleMessageId,
+      turnId: turn.id,
+      status: "streaming",
+      content: `Running extension bootstrap instruction (${key}).`,
+      details: {
+        phase: "extension_bootstrap",
+        projectId,
+        agent,
+        bootstrapKey: key
+      },
+      startedAt: lifecycleStartedAt
+    });
+    try {
+      await waitForTurnToSettle(sessionId, turn.id, options?.signal);
+      upsertAgentWorkerLifecycleEntry({
+        sessionId,
+        messageId: lifecycleMessageId,
+        turnId: turn.id,
+        status: "complete",
+        content: `Extension bootstrap instruction completed (${key}).`,
+        details: {
+          phase: "extension_bootstrap",
+          projectId,
+          agent,
+          bootstrapKey: key,
+          durationMs: Math.max(0, Date.now() - lifecycleStartedAt)
+        },
+        startedAt: lifecycleStartedAt
+      });
+      completedKeys.add(key);
+      app.log.info({ projectId, agent, sessionId, bootstrapKey: key }, "completed agent extension bootstrap turn");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isAbortError(error) || options?.signal?.aborted) {
+        try {
+          await runtimeProfileAdapter.interruptTurn({
+            threadId: sessionId,
+            turnId: turn.id
+          });
+        } catch {
+          // Best-effort interrupt to avoid lingering in-progress worker turns.
+        }
+      }
+      upsertAgentWorkerLifecycleEntry({
+        sessionId,
+        messageId: lifecycleMessageId,
+        turnId: turn.id,
+        status: isAbortError(error) ? "canceled" : "error",
+        content: isAbortError(error)
+          ? `Extension bootstrap instruction canceled (${key}).`
+          : `Extension bootstrap instruction failed (${key}): ${message}`,
+        details: {
+          phase: "extension_bootstrap",
+          projectId,
+          agent,
+          bootstrapKey: key,
+          error: message
+        },
+        startedAt: lifecycleStartedAt
+      });
+      throw error;
+    }
+  })();
+
+  agentExtensionBootstrapInFlightByKey.set(inFlightKey, work);
+  try {
+    await work;
+  } finally {
+    if (agentExtensionBootstrapInFlightByKey.get(inFlightKey) === work) {
+      agentExtensionBootstrapInFlightByKey.delete(inFlightKey);
+    }
+  }
+}
+
+async function ensureAgentSessionStartupReady(
+  params: {
+    sessionId: string;
+    projectId: string;
+    agent: string;
+    runtimePolicy: AgentRuntimePolicyConfig;
+    bootstrapInstruction?: { key: string; instructionText: string };
+  },
+  options?: {
+    signal?: AbortSignal;
+    onTurnStarted?: (threadId: string, turnId: string) => void;
+  }
+): Promise<void> {
+  await ensureCoreQueueWorkerOrientation(
+    params.sessionId,
+    params.projectId,
+    params.agent,
+    params.runtimePolicy,
+    options
+  );
+
+  await ensureAgentExtensionBootstrapInstruction(
+    params.sessionId,
+    params.projectId,
+    params.agent,
+    params.runtimePolicy,
+    params.bootstrapInstruction,
+    options
+  );
 }
 
 async function resolveAgentSession(
@@ -4409,6 +4814,7 @@ async function runAgentInstructionJob(
   payload: AgentInstructionJobPayload,
   options?: {
     signal?: AbortSignal;
+    jobId?: string;
     onTurnStarted?: (threadId: string, turnId: string) => void;
     onOutputUpdate?: (update: AgentOutputUpdate) => void;
   }
@@ -4424,14 +4830,52 @@ async function runAgentInstructionJob(
       runtimePolicy,
       payload.sourceSessionId
     );
+    let lifecycleMessageId: string | null = null;
+    let lifecycleTurnId: string | null = null;
+    let lifecycleStartedAt: number | null = null;
+    const upsertLifecycle = (
+      status: TranscriptEntry["status"],
+      content: string,
+      details?: Record<string, unknown>
+    ): void => {
+      if (!lifecycleMessageId || !lifecycleTurnId || lifecycleStartedAt === null) {
+        return;
+      }
+      upsertAgentWorkerLifecycleEntry({
+        sessionId: agentSessionId,
+        messageId: lifecycleMessageId,
+        turnId: lifecycleTurnId,
+        status,
+        content,
+        details: {
+          phase: "job_execution",
+          agent: payload.agent,
+          jobKind: payload.jobKind,
+          projectId: payload.projectId,
+          sourceSessionId: payload.sourceSessionId,
+          sourceTurnId: payload.turnId,
+          ...(payload.approvalId ? { approvalId: payload.approvalId } : {}),
+          ...(payload.itemId ? { itemId: payload.itemId } : {}),
+          ...(payload.anchorItemId ? { anchorItemId: payload.anchorItemId } : {}),
+          ...(options?.jobId ? { queueJobId: options.jobId } : {}),
+          ...(details ?? {})
+        },
+        startedAt: lifecycleStartedAt
+      });
+    };
+    const lifecycleDurationMs = (): number => {
+      const startedAt = lifecycleStartedAt ?? Date.now();
+      return Math.max(0, Date.now() - startedAt);
+    };
     try {
-      await ensureCoreQueueWorkerOrientation(agentSessionId, payload.projectId, payload.agent, runtimePolicy, options);
-      await ensureAgentExtensionBootstrapInstruction(
-        agentSessionId,
-        payload.projectId,
-        payload.agent,
-        runtimePolicy,
-        payload.bootstrapInstruction,
+      await ensureAgentSessionStartupReady(
+        {
+          sessionId: agentSessionId,
+          projectId: payload.projectId,
+          agent: payload.agent,
+          runtimePolicy,
+          bootstrapInstruction: payload.bootstrapInstruction
+        },
         options
       );
       throwIfAborted(options?.signal);
@@ -4447,8 +4891,15 @@ async function runAgentInstructionJob(
         approvalPolicy: runtimePolicy.instructionTurnPolicy.approvalPolicy,
         inputText: payload.instructionText
       });
+      activeTurnByThread.set(agentSessionId, turn.id);
       options?.onTurnStarted?.(agentSessionId, turn.id);
       markRuntimeTurnStarted(agentSessionId, turn.id);
+      lifecycleMessageId = `agent-worker-lifecycle::job::${options?.jobId ?? payload.jobKind}::${turn.id}`;
+      lifecycleTurnId = turn.id;
+      lifecycleStartedAt = Date.now();
+      upsertLifecycle("streaming", `Processing queue job "${payload.jobKind}".`, {
+        responseExpectation: payload.expectResponse
+      });
 
       if (payload.expectResponse === "assistant_text") {
         const outputText = await waitForAssistantText(
@@ -4457,6 +4908,9 @@ async function runAgentInstructionJob(
           options?.signal,
           options?.onOutputUpdate
         );
+        upsertLifecycle("complete", `Queue job "${payload.jobKind}" completed.`, {
+          durationMs: lifecycleDurationMs()
+        });
         return {
           status: "ok",
           ...(outputText.trim().length > 0 ? { outputText } : {})
@@ -4471,6 +4925,10 @@ async function runAgentInstructionJob(
           options?.onOutputUpdate
         );
         const actionIntents = parseAgentInstructionActionIntentsOutput(outputText);
+        upsertLifecycle("complete", `Queue job "${payload.jobKind}" completed.`, {
+          durationMs: lifecycleDurationMs(),
+          actionIntentCount: actionIntents.length
+        });
         return {
           status: "ok",
           outputText,
@@ -4514,6 +4972,9 @@ async function runAgentInstructionJob(
             // Best-effort interrupt only; job completion no longer depends on the worker turn settling.
           }
         }
+        upsertLifecycle("complete", `Queue job "${payload.jobKind}" completed.`, {
+          durationMs: lifecycleDurationMs()
+        });
         return {
           status: "ok"
         };
@@ -4525,14 +4986,48 @@ async function runAgentInstructionJob(
         options?.signal,
         options?.onOutputUpdate
       );
+      upsertLifecycle("complete", `Queue job "${payload.jobKind}" completed.`, {
+        durationMs: lifecycleDurationMs()
+      });
       return {
         status: "ok",
         ...(outputText && outputText.trim().length > 0 ? { outputText } : {})
       };
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       if (isAbortError(error) || options?.signal?.aborted) {
+        if (lifecycleTurnId) {
+          try {
+            await runtimeProfileAdapter.interruptTurn({
+              threadId: agentSessionId,
+              turnId: lifecycleTurnId
+            });
+          } catch {
+            // Best-effort interrupt only.
+          }
+        }
+        upsertLifecycle("canceled", `Queue job "${payload.jobKind}" canceled.`, {
+          error: message,
+          durationMs: lifecycleDurationMs()
+        });
         throw error;
       }
+
+      if (lifecycleTurnId) {
+        try {
+          await runtimeProfileAdapter.interruptTurn({
+            threadId: agentSessionId,
+            turnId: lifecycleTurnId
+          });
+        } catch {
+          // Best-effort interrupt only; this prevents stuck turns from lingering after non-abort failures.
+        }
+      }
+
+      upsertLifecycle("error", `Queue job "${payload.jobKind}" failed: ${message}`, {
+        error: message,
+        durationMs: lifecycleDurationMs()
+      });
 
       const recoverableMissingSession = isMissingThreadError(error) || isNoRolloutFoundError(error);
       if (!recoverableMissingSession || recoveredMissingSession) {
@@ -4559,11 +5054,12 @@ async function runAgentInstructionJobWithSuggestedRequestDeadline(
   payload: AgentInstructionJobPayload,
   options?: {
     signal?: AbortSignal;
+    jobId?: string;
     onTurnStarted?: (threadId: string, turnId: string) => void;
     onOutputUpdate?: (update: AgentOutputUpdate) => void;
   }
 ): Promise<AgentInstructionJobResult> {
-  const deadlineMs = Math.max(env.ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS, 45_000);
+  const deadlineMs = env.ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS;
   let latestThreadId: string | null = null;
   let latestTurnId: string | null = null;
   let timeoutTriggered = false;
@@ -5711,6 +6207,7 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
   clearPendingToolInputsForThread(sessionId);
   purgedSessionIds.add(sessionId);
 
+  const wasSystemOwned = isSystemOwnedSession(sessionId);
   const sessionScopedAgentMappingChanged = clearSessionScopedAgentSessionMappingsForSourceSession(sessionId);
   const titleMetadataChanged = setSessionTitleOverride(sessionId, null);
   const projectMetadataChanged = setSessionProjectAssignment(sessionId, null);
@@ -5729,7 +6226,10 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
   }
 
   const payload = deletedSessionPayload(sessionId, knownTitle);
-  publishToSockets("session_deleted", payload, sessionId, { broadcastToAll: true });
+  publishToSockets("session_deleted", payload, sessionId, {
+    broadcastToAll: true,
+    ...(wasSystemOwned ? { forceThreadFilter: true } : {})
+  });
 
   return {
     status: "deleted",
@@ -5760,15 +6260,25 @@ function socketMessageToString(raw: unknown): string | null {
   return null;
 }
 
-function publishToSockets(type: string, payload: unknown, threadId?: string, options?: { broadcastToAll?: boolean }): void {
+function publishToSockets(
+  type: string,
+  payload: unknown,
+  threadId?: string,
+  options?: { broadcastToAll?: boolean; forceThreadFilter?: boolean }
+): void {
   const envelope = JSON.stringify({
     type,
     threadId: threadId ?? null,
     payload
   });
+  const isSystemThreadEvent =
+    options?.forceThreadFilter === true || (typeof threadId === "string" && isSystemOwnedSession(threadId));
 
   for (const socket of sockets) {
     const filter = socketThreadFilter.get(socket) ?? null;
+    if (isSystemThreadEvent && filter !== threadId) {
+      continue;
+    }
     if (!options?.broadcastToAll) {
       if (filter && threadId && filter !== threadId) {
         continue;
@@ -6272,6 +6782,7 @@ async function enqueueJobForAgentEvent(input: EnqueueJobInput): Promise<EnqueueJ
   if (!orchestratorQueue) {
     throw new Error("orchestrator queue is unavailable");
   }
+
   return orchestratorQueue.enqueue(input);
 }
 
@@ -6715,6 +7226,7 @@ function buildOrchestratorJobDefinitions(): JobDefinitionsMap {
             message.includes("invalid conversation id") ||
             message.includes("no rollout found for thread id") ||
             message.includes("no rollout found for conversation id") ||
+            message.includes("made no item progress") ||
             message.includes("temporarily unavailable")
           ) {
             return "retryable";
@@ -6773,6 +7285,7 @@ function buildOrchestratorJobDefinitions(): JobDefinitionsMap {
           message.includes("invalid conversation id") ||
           message.includes("no rollout found for thread id") ||
           message.includes("no rollout found for conversation id") ||
+          message.includes("made no item progress") ||
           message.includes("includeturns is unavailable before first user message") ||
           (message.includes("not materialized yet") && message.includes("includeturns"))
         ) {
@@ -6804,6 +7317,7 @@ function buildOrchestratorJobDefinitions(): JobDefinitionsMap {
 
       const result = await runner(payload, {
         signal: ctx.signal,
+        jobId: ctx.jobId,
         onTurnStarted: (threadId, turnId) => {
           ctx.setRunningContext({ threadId, turnId });
         },
@@ -7176,9 +7690,6 @@ function clearPendingApprovalsForTurn(threadId: string, turnId: string): void {
 codexRuntime.on("notification", (notification: JsonRpcNotification) => {
   const threadId = extractThreadId(notification.params);
   observeRuntimeTurnNotification(notification, threadId);
-  if (threadId && isSystemOwnedSession(threadId)) {
-    return;
-  }
   if (threadId && isSessionPurged(threadId)) {
     return;
   }
@@ -7198,7 +7709,11 @@ codexRuntime.on("notification", (notification: JsonRpcNotification) => {
   if (notification.method === "turn/started") {
     const params = notification.params as { threadId?: unknown; turn?: { id?: unknown } } | undefined;
     if (typeof params?.threadId === "string" && typeof params.turn?.id === "string") {
-      activeTurnByThread.set(params.threadId, params.turn.id);
+      const activeTurnId = activeTurnByThread.get(params.threadId);
+      const incomingTurnId = params.turn.id;
+      if (!activeTurnId || activeTurnId === incomingTurnId || incomingTurnId.localeCompare(activeTurnId) >= 0) {
+        activeTurnByThread.set(params.threadId, incomingTurnId);
+      }
       const turnRecord = params.turn as Record<string, unknown>;
       const startedAt =
         coerceEpochMs(turnRecord.startedAt) ??
@@ -7217,7 +7732,10 @@ codexRuntime.on("notification", (notification: JsonRpcNotification) => {
   if (notification.method === "turn/completed" || notification.method === "turn/failed") {
     const params = notification.params as { threadId?: unknown; turn?: { id?: unknown } } | undefined;
     if (typeof params?.threadId === "string") {
-      activeTurnByThread.delete(params.threadId);
+      const completedTurnId = typeof params.turn?.id === "string" ? params.turn.id : null;
+      if (!completedTurnId || activeTurnByThread.get(params.threadId) === completedTurnId) {
+        activeTurnByThread.delete(params.threadId);
+      }
 
       if (typeof params.turn?.id === "string") {
         const turnRecord = params.turn as Record<string, unknown>;
@@ -7247,7 +7765,7 @@ codexRuntime.on("notification", (notification: JsonRpcNotification) => {
         clearPendingApprovalsForTurn(params.threadId, params.turn.id);
         clearPendingToolInputsForTurn(params.threadId, params.turn.id);
 
-        if (notification.method === "turn/completed") {
+        if (notification.method === "turn/completed" && !isSystemOwnedSession(params.threadId)) {
           maybeEmitTurnCompletedAgentEvent(params.threadId, params.turn.id);
         }
       }
@@ -7319,8 +7837,23 @@ codexRuntime.on("notification", (notification: JsonRpcNotification) => {
 codexRuntime.on("serverRequest", (serverRequest: JsonRpcServerRequest) => {
   const requestThreadId = extractThreadId(serverRequest.params);
   if (requestThreadId && isSystemOwnedSession(requestThreadId)) {
+    const lifecycleTurnId = extractTurnId(serverRequest.params) ?? activeTurnByThread.get(requestThreadId) ?? "turn";
+    const lifecycleMessageId = `agent-worker-lifecycle::system-request::${String(serverRequest.id)}`;
     const approval = createPendingApproval(serverRequest);
     if (approval) {
+      upsertAgentWorkerLifecycleEntry({
+        sessionId: requestThreadId,
+        messageId: lifecycleMessageId,
+        turnId: lifecycleTurnId,
+        status: "complete",
+        content: "Auto-declined approval request in system-owned session.",
+        details: {
+          phase: "system_request_reconciliation",
+          requestId: String(serverRequest.id),
+          method: serverRequest.method,
+          decision: "decline"
+        }
+      });
       const payload = approvalDecisionPayload(approval, "decline", "turn");
       void codexRuntime
         .respond(serverRequest.id, payload)
@@ -7332,6 +7865,19 @@ codexRuntime.on("serverRequest", (serverRequest: JsonRpcServerRequest) => {
 
     const toolInput = createPendingToolUserInput(serverRequest);
     if (toolInput) {
+      upsertAgentWorkerLifecycleEntry({
+        sessionId: requestThreadId,
+        messageId: lifecycleMessageId,
+        turnId: lifecycleTurnId,
+        status: "complete",
+        content: "Auto-canceled tool user-input request in system-owned session.",
+        details: {
+          phase: "system_request_reconciliation",
+          requestId: String(serverRequest.id),
+          method: serverRequest.method,
+          decision: "cancel"
+        }
+      });
       const payload = toolUserInputResponsePayload({
         decision: "cancel"
       });
@@ -7343,6 +7889,20 @@ codexRuntime.on("serverRequest", (serverRequest: JsonRpcServerRequest) => {
       return;
     }
 
+    upsertAgentWorkerLifecycleEntry({
+      sessionId: requestThreadId,
+      messageId: lifecycleMessageId,
+      turnId: lifecycleTurnId,
+      status: "error",
+      content: "Rejected unsupported server request in system-owned session.",
+      details: {
+        phase: "system_request_reconciliation",
+        requestId: String(serverRequest.id),
+        method: serverRequest.method,
+        decision: "error",
+        code: -32600
+      }
+    });
     void codexRuntime
       .respondError(serverRequest.id, {
         code: -32600,
@@ -8131,6 +8691,29 @@ app.get("/api/projects", async () => ({
   data: listProjectSummaries()
 }));
 
+app.get("/api/projects/:projectId/agent-sessions", async (request, reply) => {
+  const params = z.object({ projectId: z.string().min(1) }).parse(request.params);
+  const isKnownProject = params.projectId in sessionMetadata.projects || parseSessionScopedAgentOwnerId(params.projectId) !== null;
+  if (!isKnownProject) {
+    reply.code(404);
+    return {
+      status: "not_found",
+      projectId: params.projectId
+    };
+  }
+
+  const data = listProjectAgentSessionMappings(params.projectId).map((entry) => ({
+    agent: entry.agent,
+    sessionId: entry.sessionId,
+    systemOwned: isSystemOwnedSession(entry.sessionId)
+  }));
+  return {
+    status: "ok",
+    projectId: params.projectId,
+    data
+  };
+});
+
 app.post("/api/projects", async (request, reply) => {
   const body = upsertProjectBodySchema.parse(request.body);
 
@@ -8440,6 +9023,7 @@ app.get("/api/sessions", async (request) => {
   const archived = query.archived === "true";
   const cursor = query.cursor;
   const limit = query.limit ?? 100;
+  const includeSystemOwned = query.includeSystemOwned === "true";
 
   const response = await codexRuntime.call<{ data: Array<CodexThread>; nextCursor: string | null }>("thread/list", {
     limit,
@@ -8447,7 +9031,9 @@ app.get("/api/sessions", async (request) => {
     cursor
   });
 
-  const threads = response.data.filter((thread) => !isSessionPurged(thread.id) && !isSystemOwnedSession(thread.id));
+  const threads = response.data.filter(
+    (thread) => !isSessionPurged(thread.id) && (includeSystemOwned || !isSystemOwnedSession(thread.id))
+  );
   const materializedByThreadId = new Map<string, boolean>();
   for (const thread of threads) {
     materializedByThreadId.set(thread.id, true);
@@ -8458,7 +9044,10 @@ app.get("/api/sessions", async (request) => {
       const loaded = await codexRuntime.call<{ data: Array<string> }>("thread/loaded/list", {});
       const existingIds = new Set(threads.map((thread) => thread.id));
       const missingThreadIds = loaded.data.filter(
-        (threadId) => !existingIds.has(threadId) && !isSessionPurged(threadId) && !isSystemOwnedSession(threadId)
+        (threadId) =>
+          !existingIds.has(threadId) &&
+          !isSessionPurged(threadId) &&
+          (includeSystemOwned || !isSystemOwnedSession(threadId))
       );
 
       if (missingThreadIds.length > 0) {
@@ -8559,11 +9148,6 @@ app.get("/api/sessions/:sessionId", async (request, reply) => {
   if (isSessionPurged(params.sessionId)) {
     reply.code(410);
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
-  }
-
-  if (isSystemOwnedSession(params.sessionId)) {
-    reply.code(403);
-    return systemSessionPayload(params.sessionId);
   }
 
   let response: { thread: CodexThread };
@@ -9733,6 +10317,8 @@ app.addHook("onClose", async () => {
   turnCompletedEventDispatchInFlight.clear();
   coreQueueWorkerOrientationCompletedBySession.clear();
   agentExtensionBootstrapCompletedBySession.clear();
+  coreQueueWorkerOrientationInFlightBySession.clear();
+  agentExtensionBootstrapInFlightByKey.clear();
   runtimeObservedTurnsByKey.clear();
   runtimeTurnSignalWaitersByKey.clear();
   projectAgentSessionEnsureInFlightByKey.clear();

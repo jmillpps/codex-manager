@@ -159,6 +159,25 @@ test("extension lifecycle endpoints enforce RBAC and write audit records", async
     assert.equal((listWithMember.body as { status?: string }).status, "ok");
     assert.ok(Array.isArray((listWithMember.body as { modules?: unknown }).modules));
 
+    const projectCreate = await requestJson(baseUrl, "/projects", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        name: "agent-endpoint-test-project"
+      })
+    });
+    assert.equal(projectCreate.status, 200);
+    const projectId = (projectCreate.body as { project?: { projectId?: string } }).project?.projectId;
+    assert.ok(typeof projectId === "string" && projectId.length > 0);
+
+    const projectAgentSessions = await requestJson(baseUrl, `/projects/${encodeURIComponent(String(projectId))}/agent-sessions`);
+    assert.equal(projectAgentSessions.status, 200);
+    assert.equal((projectAgentSessions.body as { status?: string }).status, "ok");
+    assert.equal((projectAgentSessions.body as { projectId?: string }).projectId, projectId);
+    assert.deepEqual((projectAgentSessions.body as { data?: unknown }).data, []);
+
     const reloadForbidden = await requestJson(baseUrl, "/agents/extensions/reload", {
       method: "POST",
       headers: {

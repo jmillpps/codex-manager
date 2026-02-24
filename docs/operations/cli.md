@@ -105,7 +105,7 @@ The CLI is organized by endpoint domains:
 
 Supervisor-oriented helper flags:
 
-- `sessions transcript upsert` supports `--content` or `--content-file`, and `--details` or `--details-file`.
+- `sessions transcript upsert` uses `--entry-role <user|assistant|system>` for transcript row role, and supports `--content` or `--content-file`, plus `--details` or `--details-file`.
 - `sessions steer` supports `--input` or `--input-file`.
 - `sessions suggest-request upsert` supports `--suggestion` or `--suggestion-file` (suggestion required when `--status complete`).
 
@@ -116,8 +116,47 @@ Supervisor-oriented helper flags:
 ```bash
 pnpm --filter @repo/cli dev sessions create --title "CLI test"
 pnpm --filter @repo/cli dev sessions send --session-id <sessionId> --text "Summarize this project."
-pnpm --filter @repo/cli dev sessions get --session-id <sessionId> --include-transcript true
+pnpm --filter @repo/cli dev sessions get --session-id <sessionId>
 ```
+
+### Worker/session troubleshooting workflows
+
+Use these commands when debugging hidden agent worker behavior, queue stalls, or delayed UI state updates:
+
+```bash
+# 1) Verify API/service health first.
+pnpm --filter @repo/cli dev system health
+
+# 2) Include system-owned worker sessions in listing output.
+pnpm --filter @repo/cli dev sessions list --include-system-owned true
+
+# 3) Inspect a worker session transcript directly.
+pnpm --filter @repo/cli dev sessions get --session-id <workerSessionId>
+
+# 4) Monitor queue state for running/stuck jobs.
+pnpm --filter @repo/cli dev orchestrator jobs list --project-id <projectId> --state running --limit 50
+pnpm --filter @repo/cli dev orchestrator jobs get --job-id <jobId>
+pnpm --filter @repo/cli dev orchestrator jobs wait --job-id <jobId> --timeout-ms 30000 --poll-ms 250
+
+# 5) Watch live websocket events for one chat while reproducing.
+pnpm --filter @repo/cli dev stream events --session-id <sessionId>
+
+# 6) Enumerate pending approval/tool-input requests before deciding.
+pnpm --filter @repo/cli dev sessions approvals list --session-id <sessionId>
+pnpm --filter @repo/cli dev sessions tool-input list --session-id <sessionId>
+
+# 7) Query project->agent worker mappings (currently via raw fallback).
+pnpm --filter @repo/cli dev api request \
+  --method GET \
+  --path /api/projects/<projectId>/agent-sessions
+```
+
+Operational guidance:
+
+- Prefer `sessions list --include-system-owned true` + `sessions get` before assuming a worker is idle; many issues are visibility/routing rather than execution failure.
+- Use `orchestrator jobs wait` for bounded checks, then `jobs get` for terminal diagnostics (`error`, `attempt`, `runningContext`).
+- Keep `stream events` open during reproduction to distinguish backend lag from UI reconcile lag.
+- Use `api request` only when no first-class CLI command exists for the route; if repeatedly needed, promote it to a dedicated CLI subcommand.
 
 ### Decide pending approvals
 

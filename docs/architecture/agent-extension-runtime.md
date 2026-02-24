@@ -94,14 +94,14 @@ Worker sessions are system-owned and owner-scoped:
 
 - key: `${ownerId}::${agent}`
 - `ownerId` is project id or `session:<sessionId>` for unassigned-chat workflows
-- hidden from user session list APIs
-- denied for normal user chat operations (`403 system_session`)
+- hidden from default user session list APIs (`GET /api/sessions`), with operator opt-in listing via `GET /api/sessions?includeSystemOwned=true` and owner mapping discovery via `GET /api/projects/:projectId/agent-sessions`
+- readable through `GET /api/sessions/:sessionId`; mutating user-chat operations remain denied (`403 system_session`)
 
 Worker provisioning behavior:
 
-- session created lazily on first queued job
-- mandatory one-time core system orientation turn (queue-runner posture + CLI-surface guidance)
-- optional one-time extension bootstrap instruction supplied by queue payload (`bootstrapInstruction`)
+- session created lazily when the first `agent_instruction` enqueue path resolves the worker
+- mandatory one-time core system orientation turn (queue-runner posture + CLI-surface guidance) during startup preflight
+- optional one-time extension bootstrap instruction supplied by queue payload (`bootstrapInstruction`) during startup preflight
 - worker turn policy can be read from extension `agent.config.json`
 
 ## Lifecycle control surfaces

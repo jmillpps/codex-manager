@@ -215,7 +215,7 @@ For detailed source discovery, compatibility, dispatch, lifecycle, trust, RBAC, 
 3. Suggest jobs are single-flight per source chat; repeated clicks while one is queued/running return the existing job identity (`dedupe: "already_queued"`).
 4. Agent event modules convert that event into an `agent_instruction` queue job (`jobKind: suggest_request`) with one text instruction turn on a hidden, system-owned agent chat.
 5. Worker turns publish suggest-request progress and completion through `POST /api/sessions/:sessionId/suggested-request/upsert`; API pushes websocket delta `suggested_request_updated`.
-6. Queue execution is completion-signal based (`completionSignal.requestKey`) and deadline-bounded (`max(ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS, 45s)`): when no worker completion signal is observed in time, core writes deterministic fallback state and best-effort interrupts the worker turn before terminalizing the job.
+6. Queue execution is completion-signal based (`completionSignal.requestKey`) and deadline-bounded (`ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS`): when no worker completion signal is observed in time, core writes deterministic fallback state and best-effort interrupts the worker turn before terminalizing the job.
 7. For unassigned chats, the queue owner id is `session:<sessionId>`, so suggestion jobs do not require a project assignment.
 8. If the queue is disabled/unavailable, queue-backed routes return structured `503` `job_conflict` errors.
 9. If a suggestion cannot be produced, the endpoint returns a deterministic fallback suggestion.

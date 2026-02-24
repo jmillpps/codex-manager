@@ -39,6 +39,12 @@ export type ProjectSummary = {
   updatedAt: string;
 };
 
+export type ProjectAgentSessionSummary = {
+  agent: string;
+  sessionId: string;
+  systemOwned: boolean;
+};
+
 export type TranscriptEntry = {
   messageId: string;
   turnId: string;
@@ -453,6 +459,17 @@ export async function renameProject(
   );
 }
 
+export async function listProjectAgentSessions(
+  projectId: string,
+  baseUrl = "/api"
+): Promise<{ status: string; projectId: string; data: Array<ProjectAgentSessionSummary> }> {
+  return requestJson<{ status: string; projectId: string; data: Array<ProjectAgentSessionSummary> }>(
+    baseUrl + "/projects/" + encodeURIComponent(projectId) + "/agent-sessions",
+    {},
+    "list project agent sessions failed"
+  );
+}
+
 export async function deleteProject(
   projectId: string,
   baseUrl = "/api"
@@ -513,7 +530,7 @@ export async function deleteProjectChats(
 
 export async function listSessions(
   baseUrl = "/api",
-  options: { archived?: boolean; cursor?: string; limit?: number } = {}
+  options: { archived?: boolean; cursor?: string; limit?: number; includeSystemOwned?: boolean } = {}
 ): Promise<{ data: Array<SessionSummary>; nextCursor: string | null; archived: boolean }> {
   const path = withQuery(baseUrl + "/sessions", options);
   return requestJson<{ data: Array<SessionSummary>; nextCursor: string | null; archived: boolean }>(

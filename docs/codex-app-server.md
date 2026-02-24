@@ -62,8 +62,8 @@ The previous single-file reference was split into focused documents so protocol 
   - `account_rate_limits_updated`
 - Harness-managed system-owned agent sessions are treated as internal runtime threads:
   - session ids are tracked in metadata by owner+agent mapping (`<ownerId>::<agent>`, where owner can be project id or `session:<sessionId>`),
-  - system-owned worker notifications/server-requests are not forwarded as user chat activity,
-  - system-owned sessions are filtered from session-list responses and denied for user chat operations.
+  - system-owned worker events are scoped to explicit thread subscribers (not forwarded into global/user stream traffic),
+  - system-owned sessions are filtered from default session-list responses (opt-in via `includeSystemOwned=true`) and remain denied for mutating user chat operations.
 - Agent extension modules loaded from repo-local + configured/package roots translate runtime events into queue jobs (repository workflows currently enqueue `agent_instruction`, including `jobKind: suggest_request`) while protocol transport remains in API core.
 
 ## Updating protocol docs

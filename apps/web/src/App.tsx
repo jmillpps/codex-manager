@@ -387,6 +387,17 @@ function preferredReasoningEffortForModel(model: ModelOption | null): ReasoningE
   return supported[0] ?? "";
 }
 
+function preferredSuggestRequestEffortForModel(model: ModelOption | null): ReasoningEffortSelection {
+  const supported = reasoningEffortsForModel(model);
+  const preferredOrder: Array<ReasoningEffort> = ["minimal", "low", "none", "medium", "high", "xhigh"];
+  for (const candidate of preferredOrder) {
+    if (supported.includes(candidate)) {
+      return candidate;
+    }
+  }
+  return supported[0] ?? "";
+}
+
 type McpServerSummary = {
   name: string;
   status: string;
@@ -2533,6 +2544,23 @@ export function App() {
 
     return availableReasoningEfforts[0] ?? "medium";
   }, [selectedReasoningEffort, selectedModelOption, availableReasoningEfforts]);
+  const suggestRequestThinkingLevel = useMemo<ReasoningEffortSelection>(() => {
+    if (
+      selectedReasoningEffort &&
+      isReasoningEffort(selectedReasoningEffort) &&
+      availableReasoningEfforts.includes(selectedReasoningEffort) &&
+      (selectedReasoningEffort === "none" || selectedReasoningEffort === "minimal" || selectedReasoningEffort === "low")
+    ) {
+      return selectedReasoningEffort;
+    }
+
+    const preferred = preferredSuggestRequestEffortForModel(selectedModelOption);
+    if (preferred && isReasoningEffort(preferred) && availableReasoningEfforts.includes(preferred)) {
+      return preferred;
+    }
+
+    return selectedThinkingLevel;
+  }, [availableReasoningEfforts, selectedModelOption, selectedReasoningEffort, selectedThinkingLevel]);
   const thinkingLevelDisabled =
     !selectedSessionId ||
     sessionControlsLoading ||
@@ -4744,7 +4772,7 @@ export function App() {
         },
         body: JSON.stringify({
           model: (effectiveSessionControlsForChat.model ?? selectedModelId) || undefined,
-          effort: selectedReasoningEffort || undefined,
+          effort: suggestRequestThinkingLevel || undefined,
           draft: draftAtStart || undefined
         }),
         signal: controller.signal
@@ -8575,7 +8603,7 @@ export function App() {
                 <small>
                   {sessionControlsScope === "default"
                     ? "Thinking level applies per chat. Switch scope to This chat to edit."
-                    : "Per-chat reasoning effort used for Send and Suggest Request."}
+                    : "Per-chat reasoning effort used for Send; Suggest Request uses a fast effort profile."}
                 </small>
               </label>
               <label className="session-control-field">

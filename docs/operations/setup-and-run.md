@@ -41,7 +41,7 @@ Key runtime semantics operators should know:
 - Session hard delete is a harness extension (`DELETE /api/sessions/:sessionId`) because app-server has no native `thread/delete`.
 - Suggested-request is queue-backed: `POST /api/sessions/:sessionId/suggested-request/jobs` emits `suggest_request.requested`, and repository supervisor enqueues one `agent_instruction` job (`jobKind: suggest_request`) that returns `requestKey`; `POST /api/sessions/:sessionId/suggested-request` emits the same event then waits briefly for completion before returning either `200` suggested request text or `202 queued`.
 - Suggested-request worker turns publish live state through `POST /api/sessions/:sessionId/suggested-request/upsert` (`streaming|complete|error|canceled`) and API emits websocket `suggested_request_updated`.
-- Suggested-request queue execution is deadline-bounded (`max(ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS, 45s)`): when no completion signal is observed in time, core writes a deterministic fallback suggestion, interrupts the worker turn best-effort, and completes the queue job.
+- Suggested-request queue execution is deadline-bounded (`ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS`): when no completion signal is observed in time, core writes a deterministic fallback suggestion, interrupts the worker turn best-effort, and completes the queue job.
 - Suggest-request queueing is single-flight per source chat: duplicate clicks while one suggest job is queued/running do not enqueue a second job.
 - Unassigned-chat suggest-request uses a session-scoped queue owner id (`session:<sessionId>`), so suggest-request jobs do not require explicit project assignment.
 - File-change approval events emit agent runtime work; supervisor handlers enqueue one instruction job that writes diff explainability (`type: fileChange.explainability`) and supervisor insight (`type: fileChange.supervisorInsight`) to transcript without blocking foreground turn streaming.
@@ -54,7 +54,7 @@ Key runtime semantics operators should know:
   - `POST /api/agents/extensions/reload`
 - Extension loading supports repo-local, installed-package, and configured-root sources with deterministic precedence and compatibility validation.
 - Runtime profile adapter boundaries are enforced in core execution paths for provider-specific turn/read/interrupt and approval/steer capability actions.
-- System-owned agent sessions are worker infrastructure: hidden from user session lists and denied for normal user chat operations (`403 system_session`).
+- System-owned agent sessions are worker infrastructure: hidden from default user session lists, discoverable through API (`GET /api/sessions?includeSystemOwned=true`, `GET /api/projects/:projectId/agent-sessions`), readable via `GET /api/sessions/:sessionId`, and still denied for normal mutating user-chat operations (`403 system_session`).
 - Agent turn permissions are agent-owned via `agents/<agent>/agent.config.json`; when no config is present, the API falls back to global defaults.
 - Project deletion enforces emptiness against live sessions only; stale assignment metadata is pruned during delete before emptiness is evaluated.
 - In the web UI, the left sidebar and right chat pane scroll independently and the composer remains pinned in the right pane; transcript tail-follow uses hysteresis, `Jump to bottom` is an absolute overlay so approval/event bursts do not shift scroll geometry, and incoming approval requests for the active chat force-focus bottom with a short snap-back window (brief settle delay before the first snap, also re-armed on approve) to preserve anchoring through approval transition jitter.
@@ -91,8 +91,8 @@ Agent extension layout contract:
 
 - `agents/<agent>/events.ts|events.js|events.mjs` registers event subscriptions and enqueues queue jobs.
 - `agents/<agent>/agent.config.json` is optional; when present, it controls model/thread/turn policy for that agent's worker turns.
-- core runs one system queue-runner orientation turn per agent session before queued jobs.
-- queue payloads can include optional `bootstrapInstruction` (key + text), executed once per agent session after system orientation.
+- core runs one system queue-runner orientation turn per agent session during startup preflight before the first `agent_instruction` job turn executes.
+- queue payloads can include optional `bootstrapInstruction` (key + text), executed once per agent session/bootstrap-key during startup preflight after system orientation.
 - `agents/<agent>/AGENTS.md` and `agents/<agent>/playbooks/*` can be referenced by bootstrap/job instructions but are not required by core to start processing.
 - `agents/runtime/*` contains shared helper types/utilities for extension modules and is not treated as an event module directory.
 
@@ -251,9 +251,11 @@ ORCHESTRATOR_QUEUE_BACKGROUND_AGING_MS=15000
 ORCHESTRATOR_QUEUE_MAX_INTERACTIVE_BURST=3
 ORCHESTRATOR_SUGGEST_REQUEST_ENABLED=true
 ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS=12000
-ORCHESTRATOR_AGENT_TURN_TIMEOUT_MS=60000
+ORCHESTRATOR_AGENT_TURN_TIMEOUT_MS=180000
 ORCHESTRATOR_AGENT_POLL_INTERVAL_MS=350
 ORCHESTRATOR_AGENT_INCLUDE_TURNS_GRACE_MS=3000
+ORCHESTRATOR_AGENT_UNTRUSTED_TERMINAL_GRACE_MS=3000
+ORCHESTRATOR_AGENT_EMPTY_TURN_GRACE_MS=8000
 
 # Supervisor auto-actions defaults (can be overridden per deployment)
 SUPERVISOR_AUTO_APPROVE_ENABLED=true
@@ -287,8 +289,10 @@ Operational rules:
 - Queue-degraded mode is opt-in: set `ORCHESTRATOR_QUEUE_ENABLED=false` only for diagnostics; suggest-request queue APIs and orchestrator job APIs return `503 job_conflict` while disabled.
 - Agent turn timeout and queue timeout are independent controls:
   - `ORCHESTRATOR_AGENT_TURN_TIMEOUT_MS` bounds worker turn observation loops.
+  - `ORCHESTRATOR_AGENT_UNTRUSTED_TERMINAL_GRACE_MS` controls how long fallback polling must observe stable completed state (with no new progress) before self-healing stale active-turn tracking.
+  - `ORCHESTRATOR_AGENT_EMPTY_TURN_GRACE_MS` bounds how long a running worker turn is allowed to remain empty (no materialized turn items) before failing retryable.
   - queue job timeout is controlled by `ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS` (with `agent_instruction` enforcing a minimum 180s job timeout in code).
-  - suggest-request `agent_instruction` uses an additional completion-signal deadline (`max(ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS, 45s)`); if the signal is not observed, core writes fallback suggestion state and completes the queue job.
+  - suggest-request `agent_instruction` uses an additional completion-signal deadline (`ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS`); if the signal is not observed, core writes fallback suggestion state and completes the queue job.
 - RBAC modes:
   - `disabled`: loopback-only local development bypass (`admin` role); non-loopback callers are rejected with `403 rbac_disabled_remote_forbidden`
   - `header`: role resolution from `x-codex-role` with shared header token `x-codex-rbac-token`

@@ -71,22 +71,24 @@ Use this with:
   - runtime profile adapter boundary:
     - turn start/read/interrupt and approval/steer actions execute through `RuntimeProfileAdapter` contracts.
     - codex profile adapter is the default implementation; fixture profile adapter is used for portability tests.
-  - each queued `agent_instruction` job executes one text instruction turn on an agent-owned system chat (owner + agent), one job at a time through the queue.
+- each queued `agent_instruction` job executes exactly one instruction turn on an agent-owned system chat (owner + agent), one job at a time through the queue.
   - agent chats are created lazily and tracked in session metadata under `projectAgentSessionByKey`.
-  - core performs one mandatory system queue-runner orientation turn per agent session before any queued work is processed.
+- core performs one mandatory system queue-runner orientation turn per agent session during startup preflight, before the first `agent_instruction` job turn executes.
   - agent execution policy is agent-owned:
     - if `agents/<agent>/agent.config.json` exists, orientation/job turns use its declared policy (including optional `model`, `turnPolicy`, `orientationTurnPolicy`, `instructionTurnPolicy`, and `threadStartPolicy` overrides; turn policies also support optional reasoning `effort`).
     - if no config file exists, policy falls back to API defaults (`DEFAULT_SANDBOX_MODE`, `DEFAULT_NETWORK_ACCESS`, `DEFAULT_APPROVAL_POLICY`).
-    - repository supervisor defaults are defined in `agents/supervisor/agent.config.json` (`model: gpt-5.3-codex-spark`, `sandbox: workspace-write`, `networkAccess: enabled`, `approvalPolicy: never`, `effort: medium`).
+    - repository supervisor defaults are defined in `agents/supervisor/agent.config.json` (`model: gpt-5.3-codex-spark`, `sandbox: workspace-write`, `networkAccess: enabled`, `approvalPolicy: never`, `effort: low`).
   - agent instruction execution auto-recovers one time from stale/missing mapped agent chats (`thread not found` / rollout-missing): mapping is cleared, session is reprovisioned, and the job retries once.
   - queue retries for agent-driven jobs (`agent_instruction`) use an immediate-first linear backoff (`0ms`, then `+60ms` per subsequent retry attempt) for fast stale-session recovery on first-turn workloads.
   - supervisor/agent worker turn tracking is event-driven for system-owned agent chats:
     - API observes runtime notifications (`turn/*`, `item/*`, agent-message deltas) for hidden agent sessions and settles worker waits from that stream first.
     - `thread/read(includeTurns)` remains a fallback path only (mainly for non-system sessions or missed event windows).
     - includeTurns fallback materialization is bounded by `ORCHESTRATOR_AGENT_INCLUDE_TURNS_GRACE_MS`; when the grace window is exceeded, the job fails retryable instead of burning the full turn-timeout window.
+    - untrusted terminal fallback reads (completed while active-turn marker still points to same turn) are only accepted after stable no-progress duration (`ORCHESTRATOR_AGENT_UNTRUSTED_TERMINAL_GRACE_MS`), preventing premature next-turn starts on transient completed snapshots.
+    - running turns that remain empty (no materialized turn items) beyond `ORCHESTRATOR_AGENT_EMPTY_TURN_GRACE_MS` fail retryable so phantom in-progress turns do not burn the full timeout window.
     - completed-turn assistant-text waits now include an explicit post-completion grace window before failing when no assistant text is yet readable, reducing false negatives when final assistant output lands slightly after `turn/completed`.
     - failed worker turns are treated as job failures (not success) in both assistant-text and settle-only wait paths.
-  - queued jobs can provide optional extension bootstrap instructions (`bootstrapInstruction`) that core runs once per `(agent session, bootstrap key)` after system orientation and before normal job turns.
+- queue payloads can provide optional extension bootstrap instructions (`bootstrapInstruction`) that core runs once per `(agent session, bootstrap key)` during startup preflight, after system orientation and before job turns.
   - file-change approval requests enqueue agent workflows via event handlers; API core does not include built-in explainability/risk/review processors.
   - `turn.completed` event context snapshots are built from canonical `thread/read(includeTurns)` turn content merged with supplemental ledger entries (supplemental-only fallback if canonical read is unavailable), so end-of-turn supervisor review receives the same transcript model users see.
   - default supervisor auto-action policy in `agents/supervisor/events.ts` is:
@@ -135,9 +137,11 @@ Use this with:
   - global Zod request-validation errors return HTTP 400 with validation issues.
 - API lifecycle/status contracts:
   - `GET /api/sessions` merges persisted `thread/list` output with `thread/loaded/list` so newly created, non-materialized chats appear immediately.
+  - `GET /api/sessions` hides system-owned worker sessions by default; `includeSystemOwned=true` opt-in returns those worker sessions for API/operator visibility.
   - Session summaries expose `materialized` (`true` when backed by persisted rollout state; `false` for loaded in-memory threads read via `includeTurns: false` fallback).
   - Session summaries expose `projectId` (`string | null`) so assigned chats render under project sections and unassigned chats render under `Your chats`.
-  - System-owned agent sessions are hidden from session lists and denied for normal chat operations with HTTP `403` + `code: "system_session"`.
+  - `GET /api/projects/:projectId/agent-sessions` returns owner-scoped agent worker mappings (`agent`, `sessionId`, `systemOwned`) so worker threads are discoverable through API without listing them as normal chats.
+  - `GET /api/sessions/:sessionId` supports system-owned worker sessions for transcript/debug visibility; mutating user-chat operations on worker sessions remain rejected with HTTP `403` + `code: "system_session"`.
   - Session summaries expose `sessionControls` (`model | approvalPolicy | networkAccess | filesystemSandbox`) and retain `approvalPolicy` for backward compatibility.
   - `POST /api/sessions/:sessionId/approval-policy` and `POST /api/sessions/:sessionId/messages` require the target session to resolve via runtime existence checks; unknown/invalid/deleted-after-restart ids return `404 not_found` and do not create session-control metadata entries.
   - `POST /api/sessions/:sessionId/messages` persists per-chat session controls only after turn acceptance (`202`), preventing orphan control writes when `turn/start` fails.
@@ -155,6 +159,7 @@ Use this with:
   - Transcript assembly canonicalizes per-turn synthetic `item-N` rows emitted by raw-events fallbacks: when a canonical same-turn item exists, matching synthetic duplicates are removed (including duplicate user/assistant/reasoning rows) so reload/restart does not double-render thought content.
   - Supplemental transcript rows capture locally observed item timing (`startedAt`/`completedAt`) when Codex item payloads omit timestamps, and merge/upsert logic preserves earliest start plus latest completion per item id for stronger post-restart timing fidelity.
   - `POST /api/sessions/:sessionId/suggested-request` builds context from the same merged/canonicalized transcript pipeline as `GET /api/sessions/:sessionId`, keeping suggested-request context consistent with visible chat history after reload/restart.
+  - suggest-request event context currently includes full user+assistant chat history (not a tail window) and is passed directly into `suggest_request.requested` payload (`turnTranscript`) for immediate worker synthesis without extra lookup dependency.
   - `GET /api/health` exposes orchestrator queue availability and state counters (`enabled`, queued/running/completed/failed/canceled/projects).
 - Explainability supplemental transcript rows (`type: fileChange.explainability`) are upserted by stable message id and anchored after the corresponding file-change item when present in-turn.
 - Supplemental supervisor placeholders (`fileChange.explainability`, `fileChange.supervisorInsight`) are replaced with explicit error/canceled fallback text on terminal failure/cancel when the content is still a placeholder, avoiding misleading perpetual queued/running copy.
@@ -166,12 +171,13 @@ Use this with:
 - repository supervisor extension currently runs `agent_instruction` in `expectResponse: "none"` mode and performs transcript/approval/steer actions through CLI commands (not JSON action-intent envelopes).
 - repository supervisor extension runs suggest-request as `agent_instruction` (`jobKind: suggest_request`) with CLI side-effect flows (`sessions suggest-request upsert`) and does not rely on assistant-text output as the delivery contract.
 - suggest-request `agent_instruction` jobs support completion-signal metadata (`completionSignal`) plus optional `model`/`effort` and `fallbackSuggestionDraft` payload fields.
-- suggest-request `agent_instruction` execution is deadline-bounded: if no completion signal is observed by the bounded window (`max(ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS, 45s)`), core writes a deterministic fallback suggestion via runtime state upsert, interrupts the worker turn best-effort, and completes the queue job without waiting for assistant-text output.
+- suggest-request `agent_instruction` execution is deadline-bounded: if no completion signal is observed by the bounded window (`ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS`), core writes a deterministic fallback suggestion via runtime state upsert, interrupts the worker turn best-effort, and completes the queue job without waiting for assistant-text output.
 - direct extension `action_request` execution in event fanout uses the same scoped-action executor; when event context is present, scope is derived from payload context and enforced for all action types (including `queue.enqueue` project/session constraints).
 - runtime turn wait loops for system-owned agent sessions reconcile with periodic `thread/read` polling when in-memory runtime updates go stale or settle without output, reducing false timeout/stuck states when websocket/runtime signals are delayed.
 - Queue terminal handlers reconcile supplemental rows from payload-declared `supplementalTargets` (message id/type/placeholder/fallback contract) to explicit terminal status when needed, so UI cards do not remain indefinitely pending after job completion/failure/cancel.
 - Supplemental transcript upsert preserves terminal status against stale streaming regressions for the same message id, preventing late retry/duplicate streaming writes from downgrading already-finalized transcript rows.
-- System-owned agent sessions remain harness metadata, are filtered from `GET /api/sessions` and forwarded stream traffic, and have server requests (approvals/tool-input) auto-declined/canceled with startup/request-path cleanup.
+- System-owned agent sessions remain harness metadata, are hidden from default session list responses, and still auto-decline/cancel server requests (approvals/tool-input) on request-path cleanup.
+- websocket traffic for system-owned sessions is thread-filtered: system-session events are delivered only to sockets explicitly subscribed to that worker `threadId`, preventing leakage into global/user chat streams while preserving full session observability.
   - extension portability/conformance gate:
     - `node scripts/run-agent-conformance.mjs` generates `.data/agent-conformance-report.json`.
     - portable extension fixture proves parity across `codex-manager` and `fixture-profile`.
@@ -227,7 +233,7 @@ Use this with:
   - composer uses a single message input; `Suggest Request` populates that same draft box and `Ctrl+Enter` sends.
 - chat view includes a pinned `Session Controls` panel that defaults to a collapsed summary chip and expands on demand, with explicit Apply/Revert semantics for `Model`, `Approval Policy` (`untrusted` / `on-failure` / `on-request` / `never`), `Network Access` (`restricted` / `enabled`), and `Filesystem Sandbox` (`read-only` / `workspace-write` / `danger-full-access`).
 - approval policy values are canonical protocol literals end-to-end (`untrusted`, `on-failure`, `on-request`, `never`).
-  - panel also exposes `Thinking Level` (`none` / `minimal` / `low` / `medium` / `high` / `xhigh`) as an immediate per-chat selector (local preference used on send/suggest), constrained to model-supported effort options when the selected model reports them.
+  - panel also exposes `Thinking Level` (`none` / `minimal` / `low` / `medium` / `high` / `xhigh`) as an immediate per-chat selector (local preference used on send); suggest-request uses a faster effort profile derived from model-supported options to keep request suggestions responsive.
   - after a successful `Apply`, and when switching chats, the panel auto-collapses into the summary chip so controls stay out of the way until reopened.
   - when no session-control tuple edits are pending, the primary action becomes `Close` so users can collapse the expanded panel without sending a no-op apply request.
   - scope toggle supports `This chat` vs `New chats default`; when defaults are harness-locked, `New chats default` remains viewable in read-only mode (lock icons + `Set by harness at session start`) while per-chat controls remain editable.
