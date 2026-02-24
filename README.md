@@ -30,7 +30,7 @@
 - [Why This Project Exists](#why-this-project-exists)
 - [Feature Highlights](#feature-highlights)
 - [Agent Extension Runtime](#agent-extension-runtime)
-- [Build a 5-Minute Event Pipeline Extension](#build-a-5-minute-event-pipeline-extension)
+- [Build a Practical Extension](#build-a-practical-extension)
 - [Package and Load Extensions](#package-and-load-extensions)
 - [Extension Lifecycle Security (RBAC + Trust)](#extension-lifecycle-security-rbac--trust)
 - [Extension Validation and Conformance](#extension-validation-and-conformance)
@@ -153,12 +153,26 @@ What you get out of the box:
 - worker-side structured action intents (`kind: "action_intents"`) executed inside API core with scope + capability + idempotency enforcement
 - atomic extension reload with snapshot preservation on failure
 - extension inventory endpoint with compatibility, trust, and origin metadata
+- system-owned worker sessions that are hidden from default chat lists but fully observable through API/CLI
 
 Core event names emitted by API today:
 
 - `file_change.approval_requested`
 - `turn.completed`
 - `suggest_request.requested`
+
+Recommended execution pattern for production extensions:
+
+- subscribe to runtime events in `events.(ts|js|mjs)`
+- enqueue deterministic `agent_instruction` jobs with stable dedupe keys
+- perform side effects during worker turns via CLI/API mutations (for example transcript upserts, approvals, steering, suggested-request updates)
+- treat assistant text as optional operator trace, not as the source of truth for side effects
+
+This README is intentionally high-level. For implementation contracts, read:
+
+- [`docs/operations/agent-extension-authoring.md`](docs/operations/agent-extension-authoring.md)
+- [`docs/operations/agent-queue-framework.md`](docs/operations/agent-queue-framework.md)
+- [`docs/queue-runner.md`](docs/queue-runner.md)
 
 Reference docs:
 
@@ -169,7 +183,7 @@ Reference docs:
 
 ---
 
-## Build a 5-Minute Event Pipeline Extension
+## Build a Practical Extension
 
 Create a repo-local extension:
 
@@ -178,6 +192,8 @@ agents/
   demo-suggest-agent/
     extension.manifest.json
     events.mjs
+    AGENTS.md
+    agent.config.json
 ```
 
 `agents/demo-suggest-agent/extension.manifest.json`:
@@ -202,31 +218,88 @@ agents/
 }
 ```
 
+This example handles a real workflow: when the user clicks **Suggest request**, the extension enqueues one queue job for its worker agent. The worker receives full request/transcript context and is expected to update suggested-request state live (`streaming` -> `complete|error`) using CLI/API side effects.
+
 `agents/demo-suggest-agent/events.mjs`:
 
 ```js
-export function registerAgentEvents(registry) {
-  registry.on("suggest_request.requested", async (event, tools) => {
-    const payload = event && typeof event.payload === "object" && event.payload ? event.payload : {};
-    const projectId = typeof payload.projectId === "string" && payload.projectId.length > 0 ? payload.projectId : "demo-project";
-    const sessionId = typeof payload.sessionId === "string" && payload.sessionId.length > 0 ? payload.sessionId : "demo-session";
-    const requestKey =
-      typeof payload.requestKey === "string" && payload.requestKey.length > 0 ? payload.requestKey : "demo-request";
+function asRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
 
-    return tools.enqueueJob({
-      type: "suggest_request",
-      projectId,
-      sourceSessionId: sessionId,
-      payload: {
-        requestKey,
-        sessionId,
-        projectId,
-        sourceThreadId: sessionId,
-        sourceTurnId: "demo-turn",
-        instructionText: "Generate one concrete next user request."
+function asNonEmptyString(value) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+export function registerAgentEvents(registry) {
+  registry.on(
+    "suggest_request.requested",
+    async (event, tools) => {
+      const payload = asRecord(event?.payload) ?? {};
+      const projectId = asNonEmptyString(payload.projectId);
+      const sessionId = asNonEmptyString(payload.sessionId);
+      const threadId = asNonEmptyString(payload.threadId);
+      const turnId = asNonEmptyString(payload.turnId);
+      const requestKey = asNonEmptyString(payload.requestKey);
+      const userRequest = asNonEmptyString(payload.userRequest) ?? "User request unavailable.";
+      const transcript = asNonEmptyString(payload.turnTranscript) ?? "No transcript context available.";
+
+      if (!projectId || !sessionId || !threadId || !turnId || !requestKey) {
+        tools.logger.warn(
+          { eventType: event?.type ?? "unknown", payload },
+          "suggest_request event missing required routing fields; skipping enqueue"
+        );
+        return;
       }
-    });
-  });
+
+      const instructionText = [
+        "# Worker Job: suggest_request",
+        "",
+        "## Routing Context",
+        `Project: ${projectId}`,
+        `Source session: ${sessionId}`,
+        `Thread: ${threadId}`,
+        `Turn: ${turnId}`,
+        `Request key: ${requestKey}`,
+        "",
+        "## Turn Context",
+        "```user-request.md",
+        userRequest,
+        "```",
+        "",
+        "```transcript.md",
+        transcript,
+        "```",
+        "",
+        "## Mandatory Execution Contract",
+        "Use CLI/API mutations for side effects.",
+        "Set suggested-request state to streaming immediately, then publish complete with one concise request.",
+        "Do not rely on assistant text output as the integration signal."
+      ].join("\n");
+
+      return tools.enqueueJob({
+        type: "agent_instruction",
+        projectId,
+        sourceSessionId: sessionId,
+        payload: {
+          agent: "demo-suggest",
+          jobKind: "suggest_request",
+          projectId,
+          sourceSessionId: sessionId,
+          threadId,
+          turnId,
+          instructionText,
+          dedupeKey: `suggest_request:${sessionId}`,
+          expectResponse: "none",
+          completionSignal: {
+            kind: "suggested_request",
+            requestKey
+          }
+        }
+      });
+    },
+    { priority: 50, timeoutMs: 8000 }
+  );
 }
 ```
 
@@ -235,6 +308,23 @@ Reload and verify:
 ```bash
 curl -sS -X POST http://127.0.0.1:3001/api/agents/extensions/reload
 curl -sS http://127.0.0.1:3001/api/agents/extensions
+```
+
+Exercise the flow and inspect queue/worker state:
+
+```bash
+# trigger suggest request from UI or API, then inspect queue
+pnpm --filter @repo/cli dev orchestrator jobs list \
+  --project-id <projectId> \
+  --agent demo-suggest \
+  --job-kind suggest_request \
+  --sort desc \
+  --limit 20
+
+# inspect worker mapping and transcript behavior
+pnpm --filter @repo/cli dev api request --method GET --path /api/projects/<projectId>/agent-sessions
+pnpm --filter @repo/cli dev sessions list --include-system-owned true
+pnpm --filter @repo/cli dev sessions get --session-id <workerSessionId>
 ```
 
 ---
@@ -256,9 +346,15 @@ External/package layout:
   extension.manifest.json
   events.js|events.mjs|events.ts
   AGENTS.md
-  orientation.md
   agent.config.json
+  playbooks/
 ```
+
+Notes:
+
+- runtime requires an events entrypoint; manifest is strongly recommended for compatibility + capability enforcement
+- `AGENTS.md` and playbooks are instruction assets for worker behavior
+- optional manifest metadata fields for tooling (for example `entrypoints.orientation`) may be included, but runtime execution does not require them
 
 Example env wiring:
 
