@@ -77,7 +77,7 @@ Use this with:
   - agent execution policy is agent-owned:
     - if `agents/<agent>/agent.config.json` exists, orientation/job turns use its declared policy (including optional `model`, `turnPolicy`, `orientationTurnPolicy`, `instructionTurnPolicy`, and `threadStartPolicy` overrides; turn policies also support optional reasoning `effort`).
     - if no config file exists, policy falls back to API defaults (`DEFAULT_SANDBOX_MODE`, `DEFAULT_NETWORK_ACCESS`, `DEFAULT_APPROVAL_POLICY`).
-    - repository supervisor defaults are defined in `agents/supervisor/agent.config.json` (`model: gpt-5.3-codex-spark`, `sandbox: workspace-write`, `networkAccess: enabled`, `approvalPolicy: never`, `effort: low`).
+    - repository supervisor defaults are defined in `agents/supervisor/agent.config.json` (`model: gpt-5.3-codex`, `sandbox: workspace-write`, `networkAccess: enabled`, `approvalPolicy: never`, `effort: low`).
   - agent instruction execution auto-recovers one time from stale/missing mapped agent chats (`thread not found` / rollout-missing): mapping is cleared, session is reprovisioned, and the job retries once.
   - queue retries for agent-driven jobs (`agent_instruction`) use an immediate-first linear backoff (`0ms`, then `+60ms` per subsequent retry attempt) for fast stale-session recovery on first-turn workloads.
   - supervisor/agent worker turn tracking is event-driven for system-owned agent chats:

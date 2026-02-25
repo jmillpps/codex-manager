@@ -63,7 +63,7 @@ Agent runtime policy file format:
 
 ```json
 {
-  "model": "gpt-5.3-codex-spark",
+  "model": "gpt-5.3-codex",
   "turnPolicy": {
     "sandbox": "read-only|workspace-write|danger-full-access",
     "networkAccess": "restricted|enabled",
