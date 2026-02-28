@@ -9,6 +9,7 @@
 - Includes session-scoped wrappers for concise automation
 - Includes additive typed OpenAPI facade via `cm.typed` / `acm.typed` with generated Pydantic models
 - Includes configurable boundary validation modes (`typed-only`, `off`, `strict`) for typed and selected dict-domain workflows
+- Includes dynamic tool-call wrappers and session-scoped remote-skill bridge helpers
 
 See repository docs for full guides:
 
@@ -19,3 +20,4 @@ See repository docs for full guides:
 - `docs/python/api-surface.md`
 - `docs/python/protocol-interfaces.md`
 - `docs/python/typed-models.md`
+- `docs/python/remote-skills.md`

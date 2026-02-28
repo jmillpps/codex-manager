@@ -50,6 +50,39 @@ Supported shorthand:
 - `on_app_server_request(normalized_method)`
 - `on_turn_started()` (maps to `app_server.item.started`)
 
+## Dynamic tool-call handling
+
+`item/tool/call` requests are surfaced as:
+
+- stream event: `app_server.request.item.tool.call`
+- API routes:
+  - `GET /api/sessions/:sessionId/tool-calls`
+  - `POST /api/tool-calls/:requestId/response`
+
+Python bridge pattern:
+
+```python
+import asyncio
+from codex_manager import AsyncCodexManager
+
+async def main() -> None:
+    session_id = "<session-id>"
+    async with AsyncCodexManager.from_profile("local") as cm:
+        skills = cm.remote_skills.session(session_id)
+
+        @skills.skill(description="Uppercase text")
+        async def uppercase(text: str) -> str:
+            return text.upper()
+
+        @cm.on_app_server_request("item.tool.call")
+        async def _on_dynamic_tool_call(signal, _ctx):
+            await skills.respond_to_signal(signal)
+
+        await cm.stream.run_forever(thread_id=session_id)
+
+asyncio.run(main())
+```
+
 ## Hook decorators for REST operations
 
 Use request hooks for global/pattern behavior:

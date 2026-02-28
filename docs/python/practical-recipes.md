@@ -98,3 +98,35 @@ asyncio.run(main())
 ```
 
 Use this as the minimal event-driven automation loop.
+
+## Recipe 6: Dynamic tool-call bridge with auto cleanup
+
+```python
+import asyncio
+from codex_manager import AsyncCodexManager
+
+SESSION_ID = "<session-id>"
+
+async def main() -> None:
+    async with AsyncCodexManager.from_profile("local") as cm:
+        skills = cm.remote_skills.session(SESSION_ID)
+
+        async def lookup_ticket(ticket_id: str) -> dict[str, str]:
+            return {"ticketId": ticket_id, "status": "open"}
+
+        async with skills.using(
+            "lookup_ticket",
+            lookup_ticket,
+            description="Lookup ticket state by id",
+            input_schema={"type": "object", "properties": {"ticket_id": {"type": "string"}}},
+        ):
+            @cm.on_app_server_request("item.tool.call")
+            async def _on_tool_call(signal, _ctx):
+                await skills.respond_to_signal(signal)
+
+            await cm.stream.run_forever(thread_id=SESSION_ID)
+
+asyncio.run(main())
+```
+
+Use this when you want a temporary Python handler lifecycle (`async with`) for one orchestration run.

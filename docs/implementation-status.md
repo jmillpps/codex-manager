@@ -112,10 +112,14 @@ Use this with:
     - `POST /api/orchestrator/jobs/:jobId/cancel`
   - thread actions: fork, compact, rollback, background terminals clean, review start.
   - turn steering endpoint for active turns.
-- Approvals + tool user-input:
+- Approvals + tool user-input + dynamic tool-calls:
   - pending approvals listing and decisions.
   - server-initiated tool user-input request ingestion and decision submission.
   - pending tool-input listing per session.
+  - server-initiated dynamic tool-call (`item/tool/call`) ingestion and response submission through:
+    - `GET /api/sessions/:sessionId/tool-calls`
+    - `POST /api/tool-calls/:requestId/response`
+    - duplicate response submissions return `409` with `code: "in_flight"` while a response is already being forwarded upstream.
 - Projects and session organization:
   - project create/list/rename/delete with optional per-project `workingDirectory` configuration.
   - project rename preserves existing `workingDirectory` when omitted from the request; explicit `null` clears it.
@@ -134,6 +138,7 @@ Use this with:
   - protocol notifications + approvals.
   - session/project metadata updates.
   - tool user-input requested/resolved.
+  - dynamic tool-call requested/resolved.
   - orchestrator queue lifecycle events (`orchestrator_job_queued|started|progress|completed|failed|canceled`).
   - suggested-request state deltas (`suggested_request_updated`).
   - plan/diff/token-usage updates.
@@ -182,7 +187,7 @@ Use this with:
 - runtime turn wait loops for system-owned agent sessions reconcile with periodic `thread/read` polling when in-memory runtime updates go stale or settle without output, reducing false timeout/stuck states when websocket/runtime signals are delayed.
 - Queue terminal handlers reconcile supplemental rows from payload-declared `supplementalTargets` (message id/type/placeholder/fallback contract) to explicit terminal status when needed, so UI cards do not remain indefinitely pending after job completion/failure/cancel.
 - Supplemental transcript upsert preserves terminal status against stale streaming regressions for the same message id, preventing late retry/duplicate streaming writes from downgrading already-finalized transcript rows.
-- System-owned agent sessions remain harness metadata, are hidden from default session list responses, and still auto-decline/cancel server requests (approvals/tool-input) on request-path cleanup.
+- System-owned agent sessions remain harness metadata, are hidden from default session list responses, and still auto-decline/cancel/fail server requests (approvals/tool-input/dynamic tool-calls) on request-path cleanup.
 - websocket traffic for system-owned sessions is thread-filtered: system-session events are delivered only to sockets explicitly subscribed to that worker `threadId`, preventing leakage into global/user chat streams while preserving full session observability.
   - extension portability/conformance gate:
     - `node scripts/run-agent-conformance.mjs` generates `.data/agent-conformance-report.json`.
@@ -274,7 +279,7 @@ Use this with:
 - Command coverage:
   - domain commands for system/models/apps/skills/mcp/account/config/runtime/feedback/extensions/orchestrator/projects/sessions.
   - session settings commands provide first-class generic storage operations (`sessions settings get|set|unset`), including per-key read/update/delete.
-  - dedicated approval and tool-input decision commands.
+  - dedicated approval, tool-input, and tool-call response commands.
   - websocket stream command (`stream events`) for live event inspection.
   - raw escape hatch (`api request`) for direct endpoint invocation.
 - Route coverage parity:
@@ -291,13 +296,14 @@ Use this with:
   - generated OpenAPI Pydantic models (`src/codex_manager/generated/openapi_models.py`),
   - stream/event decorators (`on_event`, `on_event_prefix`, `on_app_server`, `on_app_server_request`, `on_turn_started`),
   - request hook decorators (`before`, `after`, `on_error`),
+  - dynamic tool-call wrappers (`sessions.tool_calls`, `tool_calls.respond`) and session-scoped remote-skill bridge helpers (`remote_skills.session(...)`, `respond_to_signal(...)`),
   - protocol-based dependency injection for request executors, dynamic header providers, retry policy, custom hook registries, stream routers, and plugins,
   - protocol contracts defined in `protocols.py`,
   - deterministic plugin lifecycle orchestration (`plugins.py`),
   - hook middleware object registration (`use_middleware(...)`),
   - session-scoped wrappers and namespaced settings helpers (`session(...).settings.namespace(...)`).
 - API surface is modeled in OpenAPI (`apps/api/openapi/openapi.json`) and parity-checked against route registrations.
-- Python docs are split under `docs/python/` with focused files for intro, quickstart, API map, streaming handlers, settings automation, protocol architecture, typed OpenAPI coverage, and development notes.
+- Python docs are split under `docs/python/` with focused files for intro, quickstart, API map, streaming handlers, remote-skills bridge flows, settings automation, protocol architecture, typed OpenAPI coverage, and development notes.
 - Unit coverage includes:
   - route-parity verification against server route inventory (`test_route_coverage.py`),
   - typed OpenAPI facade/model coverage (`test_typed_openapi.py`),
@@ -319,6 +325,7 @@ Use this with:
   - suggested-request endpoint (`suggestSessionRequest`) with optional `effort`,
   - message send endpoint (`sendSessionMessage`) with optional `effort`,
   - capability/settings/account/integration endpoints,
+  - dynamic tool-call endpoints (`listSessionToolCalls`, `respondToolCall`),
   - tool-input decision endpoint,
   - existing session/message/approval operations.
 

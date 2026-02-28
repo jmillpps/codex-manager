@@ -108,7 +108,7 @@ Codex app-server exposes a rich runtime/protocol surface, but teams still need a
 
 - consistent session lifecycle control
 - project-level organization
-- approval and tool-input workflows
+- approval, tool-input, and dynamic tool-call workflows
 - stream-aware UI behavior
 - reproducible operations and troubleshooting runbooks
 
@@ -129,6 +129,7 @@ Codex Manager focuses on that layer while keeping Codex as the execution authori
 - Live streaming transcript with category filters (`All`, `Chat`, `Tools`, `Approvals`)
 - Turn-group transcript UX: one user request card plus one consolidated response bubble per turn, with a top thought area (`Working...` / `Worked for …`) and bottom final assistant response text
 - Approval and tool input actions surfaced inline in response thought details
+- Dynamic tool-call bridge routes for external handler runtimes (`sessions tool-calls list` + `tool-calls respond`)
 - Session transcript reload path merges streamed runtime tool/approval events so thought auditing remains visible even when `thread/read` omits raw tool items
 - Session Controls panel in chat view:
   - applies per-chat/default control tuples (`model`, `approval policy`, `network access`, `filesystem sandbox`) with explicit Apply/Revert
@@ -196,6 +197,7 @@ The Python client supports:
 - hook-registry injection (`hook_registry`) for custom hook orchestration
 - middleware object registration with `use_middleware(...)`
 - session-scoped wrappers and namespaced settings helpers
+- dynamic tool-call APIs (`sessions.tool_calls`, `tool_calls.respond`) and session-scoped remote-skill bridge helpers (`remote_skills.session(...)`)
 
 Typed example:
 
@@ -218,6 +220,7 @@ Common practical uses:
 
 - create scripted chat workflows (create session, send request, read transcript/results)
 - process approvals/tool-input requests in automation scripts
+- handle `item/tool/call` requests with Python handlers and respond through codex-manager routes
 - persist per-session settings shared by UI, CLI, and extensions
 - subscribe to stream events for realtime orchestration
 - build typed automations with safer request/response parsing via `cm.typed` / `acm.typed`
@@ -232,6 +235,7 @@ Then continue to focused docs:
 - [`docs/python/practical-recipes.md`](docs/python/practical-recipes.md)
 - [`docs/python/api-surface.md`](docs/python/api-surface.md)
 - [`docs/python/streaming-and-handlers.md`](docs/python/streaming-and-handlers.md)
+- [`docs/python/remote-skills.md`](docs/python/remote-skills.md)
 - [`docs/python/settings-and-automation.md`](docs/python/settings-and-automation.md)
 - [`docs/python/protocol-interfaces.md`](docs/python/protocol-interfaces.md)
 - [`docs/python/typed-models.md`](docs/python/typed-models.md)
@@ -243,6 +247,7 @@ For practical patterns, use:
 - `docs/python/practical-recipes.md` for common production automation recipes
 - `docs/python/settings-and-automation.md` for settings-driven automation recipes
 - `docs/python/streaming-and-handlers.md` for event-driven orchestration patterns
+- `docs/python/remote-skills.md` for dynamic tool-call bridge patterns
 
 ---
 
