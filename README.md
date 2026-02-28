@@ -98,61 +98,21 @@ For complete runbooks: [`docs/operations/troubleshooting.md`](docs/operations/tr
 
 ```mermaid
 flowchart LR
-    subgraph Clients["Interfaces"]
-        UI["Web UI"]
-        CLI["Operator CLI"]
-        PY["Python SDK"]
-    end
-
-    subgraph Control["codex-manager API (Fastify control plane)"]
-        ROUTES["REST + WebSocket surface"]
-        SESS["Session/project lifecycle + materialization"]
-        CTRL["Session controls + generic session settings"]
-        APPROVAL["Approvals, tool-input, and dynamic tool-call response routes"]
-        EXT["Extension runtime dispatch"]
-        QUEUE["Queue jobs + worker session orchestration"]
-    end
-
-    subgraph Runtime["Codex runtime authority"]
-        APP["codex app-server (supervised over STDIO)"]
-        STREAM["Protocol event stream"]
-    end
-
-    subgraph State["Durable local state (.data/)"]
-        META["Session/project metadata + supplemental transcript ledger"]
-        SETTINGS["Per-session settings"]
-        JOBS["Queue/orchestrator job state"]
-    end
-
-    UI --> ROUTES
-    CLI --> ROUTES
-    PY --> ROUTES
-
-    ROUTES --> SESS
-    ROUTES --> CTRL
-    ROUTES --> APPROVAL
-    ROUTES --> EXT
-
-    SESS --> APP
-    APPROVAL --> APP
-    EXT --> QUEUE
-    QUEUE --> APP
-
-    APP --> STREAM
-    STREAM --> ROUTES
-    STREAM --> EXT
-
-    SESS --> META
-    CTRL --> SETTINGS
-    QUEUE --> JOBS
+    CLIENTS["Web UI / CLI / Python SDK"] --> API["codex-manager API control plane"]
+    API --> RUNTIME["codex app-server runtime (supervised over STDIO)"]
+    RUNTIME --> STREAM["WebSocket protocol event stream"]
+    STREAM --> CLIENTS
+    API --> STATE["Durable state under .data/"]
+    API --> EXT["Extension runtime + queue workers"]
+    EXT --> RUNTIME
 ```
 
 In practice:
 
-- Interfaces (web, CLI, Python) all target the same API surface.
-- The API supervises `codex app-server`, owns lifecycle/materialization, and fans out stream events.
-- Extensions subscribe to runtime signals and can enqueue deterministic worker jobs.
-- Persistent metadata, settings, and orchestration state remain durable under `.data/`.
+- Interfaces (web, CLI, Python) all use the same API surface.
+- The API supervises `codex app-server` and fans runtime stream events back to clients.
+- Extensions and queue workers run through the API and interact with the same runtime.
+- Metadata, settings, and orchestration state remain durable under `.data/`.
 
 More detail: [`docs/architecture.md`](docs/architecture.md)
 
