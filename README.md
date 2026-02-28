@@ -96,21 +96,63 @@ For complete runbooks: [`docs/operations/troubleshooting.md`](docs/operations/tr
 
 ## Architecture At A Glance
 
-```text
-Web UI / CLI / Python SDK
-          |
-          v
-Fastify API (codex-manager control plane)
-  - session/project materialization
-  - approvals/tool-input routing
-  - extension runtime and queue actions
-          |
-          v
-codex app-server (STDIO supervised runtime authority)
-          |
-          +--> WebSocket event stream fan-out
-          +--> durable local state under .data/
+```mermaid
+flowchart LR
+    subgraph Clients["Interfaces"]
+        UI["Web UI"]
+        CLI["Operator CLI"]
+        PY["Python SDK"]
+    end
+
+    subgraph Control["codex-manager API (Fastify control plane)"]
+        ROUTES["REST + WebSocket surface"]
+        SESS["Session/project lifecycle + materialization"]
+        CTRL["Session controls + generic session settings"]
+        APPROVAL["Approvals, tool-input, and dynamic tool-call response routes"]
+        EXT["Extension runtime dispatch"]
+        QUEUE["Queue jobs + worker session orchestration"]
+    end
+
+    subgraph Runtime["Codex runtime authority"]
+        APP["codex app-server (supervised over STDIO)"]
+        STREAM["Protocol event stream"]
+    end
+
+    subgraph State["Durable local state (.data/)"]
+        META["Session/project metadata + supplemental transcript ledger"]
+        SETTINGS["Per-session settings"]
+        JOBS["Queue/orchestrator job state"]
+    end
+
+    UI --> ROUTES
+    CLI --> ROUTES
+    PY --> ROUTES
+
+    ROUTES --> SESS
+    ROUTES --> CTRL
+    ROUTES --> APPROVAL
+    ROUTES --> EXT
+
+    SESS --> APP
+    APPROVAL --> APP
+    EXT --> QUEUE
+    QUEUE --> APP
+
+    APP --> STREAM
+    STREAM --> ROUTES
+    STREAM --> EXT
+
+    SESS --> META
+    CTRL --> SETTINGS
+    QUEUE --> JOBS
 ```
+
+In practice:
+
+- Interfaces (web, CLI, Python) all target the same API surface.
+- The API supervises `codex app-server`, owns lifecycle/materialization, and fans out stream events.
+- Extensions subscribe to runtime signals and can enqueue deterministic worker jobs.
+- Persistent metadata, settings, and orchestration state remain durable under `.data/`.
 
 More detail: [`docs/architecture.md`](docs/architecture.md)
 
