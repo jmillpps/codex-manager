@@ -1,196 +1,59 @@
 # Python Client API Surface
 
-## Domain layout
+## Purpose
 
-Both `CodexManager` and `AsyncCodexManager` expose the same domains:
+This is the one-level API surface guide for the Python SDK.
 
-- `system`
-- `models`
-- `apps`
-- `skills`
-- `mcp`
-- `account`
-- `config`
-- `runtime`
-- `feedback`
-- `extensions`
-- `orchestrator`
-- `projects`
-- `sessions`
-- `approvals`
-- `tool_input`
-- `tool_calls`
-- `remote_skills`
-- `wait`
-- `raw`
+It summarizes client domain layout, typed facade posture, and high-value workflow entrypoints.
 
-## Typed facade
+## Client layout summary
 
-Both clients expose additive typed facades:
+Both `CodexManager` and `AsyncCodexManager` expose consistent domain wrappers for system, sessions/projects, decisions, queue/extension lifecycle, runtime stream operations, and raw fallback access.
 
-- `CodexManager.typed`
-- `AsyncCodexManager.typed`
+## Typed facade summary
 
-Typed wrappers currently cover:
+Additive typed facade is available on both clients:
 
-- `sessions.create`
-- `sessions.get`
-- `sessions.send_message`
-- `sessions.settings_get`
-- `sessions.settings_set`
-- `sessions.settings_unset`
-- `sessions.suggest_request`
-- `sessions.suggest_request_enqueue`
-- `sessions.suggest_request_upsert`
-- `approvals.decide`
-- `tool_input.decide`
+- `cm.typed`
+- `acm.typed`
 
-Validation behavior for typed wrappers is configurable by client `validation_mode`:
+Validation mode controls:
 
-- `typed-only` (default)
+- `typed-only`
 - `off`
 - `strict`
 
-Strict mode also validates selected dict-domain responses while preserving dict return shapes.
-
-Models are generated from OpenAPI components into `codex_manager.generated.openapi_models`.
-
-Example:
-
-```python
-from codex_manager import CodexManager
-from codex_manager.typed import CreateSessionRequest
-
-with CodexManager.from_profile("local") as cm:
-    created = cm.typed.sessions.create(CreateSessionRequest(cwd="/workspace"))
-    detail = cm.typed.sessions.get(session_id=created.session.session_id)
-    print(detail.session.title)
-```
-
 ## Protocol extension points
 
-Both clients accept optional constructor injection for advanced runtime behavior:
+Optional constructor injection supports advanced integrations:
 
-- `request_executor`
-- `header_provider`
-- `retry_policy`
-- `retryable_operations`
-- `hook_registry`
-- `stream_router`
-- `plugins`
+- request executor
+- header provider
+- retry policy
+- hook registry
+- stream router
+- plugins
 
-These hooks are additive and do not change default behavior when omitted.
+## Session and wait ergonomics
 
-## Session-scoped wrapper
+- `client.session(session_id)` for scoped operations
+- `wait.until(...)` for generic poll+predicate synchronization
+- `wait.assistant_reply(...)`
+- `wait.send_message_and_wait_reply(...)`
 
-`client.session(session_id)` returns convenience helpers:
+## Remote skill and dynamic tool integration
 
-- `messages.send(...)`
-- `controls.get()` / `controls.apply(...)`
-- `settings.get()` / `settings.set()` / `settings.unset()` / `settings.namespace(...)`
-- `approvals.list()`
-- `tool_input.list()`
-- `tool_calls.list()`
-- `get()`, `rename()`, `archive()`, `unarchive()`, `resume()`, `interrupt()`, `suggest_request(...)`
+- dynamic tools can be forwarded on session lifecycle/message calls
+- `remote_skills` helpers provide session-scoped tool registry and response routing
 
-Session lifecycle/message methods support dynamic tool registration payloads:
+## Read Next (Level 3)
 
-- `sessions.create(..., dynamic_tools=[...])`
-- `sessions.resume(..., dynamic_tools=[...])`
-- `sessions.send_message(..., dynamic_tools=[...])`
+- Domain reference details: [`api-surface-domain-reference.md`](./api-surface-domain-reference.md)
+- Workflow snippets: [`api-surface-workflows.md`](./api-surface-workflows.md)
+- Remote skills: [`remote-skills.md`](./remote-skills.md)
 
-## Wait helpers
+## Related docs
 
-Both clients expose a wait facade:
-
-- `wait.until(...)` for generic poll + predicate synchronization (supports timeout, interval, optional attempt caps)
-- `wait.assistant_reply(session_id, turn_id, ...)` to wait for assistant completion on an existing turn
-- `wait.send_message_and_wait_reply(session_id, text, ...)` to send and block/await until the assistant response is complete
-
-## Route coverage
-
-The client includes:
-
-- OpenAPI-backed routes under `/api/*` (including queue/orchestrator, extension lifecycle, settings, and websocket stream path metadata).
-- API-level route parity tests enforce method/path alignment between `apps/api/src/index.ts` and `apps/api/openapi/openapi.json`.
-- Typed operation coverage is explicit in `codex_manager.typed.contracts`:
-  - `TYPED_OPERATION_IDS`: operations with typed wrappers
-  - `RAW_OPERATION_IDS`: operations intentionally not wrapped yet
-  - `ALL_OPENAPI_OPERATION_IDS`: authoritative OpenAPI operation-id set tracked by tests
-
-## Raw escape hatch
-
-Use `raw.request(...)` when API adds a route before SDK adds a dedicated wrapper:
-
-```python
-payload = cm.raw.request("POST", "/api/sessions/<id>/interrupt")
-```
-
-If path starts with `/api`, client normalizes it automatically.
-
-## Middleware helper
-
-In addition to decorator hooks (`before`, `after`, `on_error`), both clients expose:
-
-- `use_middleware(middleware, operation="*")`
-
-Middleware objects must provide `before(call)`, `after(call, response)`, and `on_error(call, error)`.
-
-## Practical workflow snippets
-
-### Resolve pending approvals for one session
-
-```python
-pending = cm.session(session_id).approvals.list()
-for approval in pending.get("data", []):
-    cm.approvals.decide(
-        approval_id=approval["approvalId"],
-        decision="accept",
-        scope="turn",
-    )
-```
-
-### Inspect and decide tool-input requests
-
-```python
-requests = cm.session(session_id).tool_input.list()
-for req in requests.get("data", []):
-    cm.tool_input.decide(
-        request_id=req["requestId"],
-        decision="decline",
-        response={"note": "automation policy: manual review required"},
-    )
-```
-
-### Inspect and respond to dynamic tool calls
-
-```python
-pending = cm.session(session_id).tool_calls.list()
-for req in pending.get("data", []):
-    cm.tool_calls.respond(
-        request_id=req["requestId"],
-        text=f"Handled tool {req['tool']}",
-        success=True,
-    )
-```
-
-### Session-scoped remote-skill bridge
-
-Use the built-in wrapper for registration, instruction injection, and signal response:
-
-- `cm.remote_skills.session(session_id)`
-- `acm.remote_skills.session(session_id)`
-- `cm.remote_skills.create_session(register=..., ...)`
-- `acm.remote_skills.create_session(register=..., ...)`
-
-Session remote-skill helpers include:
-
-- `prepare_catalog(...)`
-- `send_prepared(...)`
-- `send(...)`
-- `matches_signal(...)`
-- `respond_to_signal(..., max_submit_attempts=3, retry_delay_seconds=0.05)`
-- `respond_to_pending_call(..., max_submit_attempts=3, retry_delay_seconds=0.05)`
-- `drain_pending_calls(max_submit_attempts=3, retry_delay_seconds=0.05)`
-
-See `docs/python/remote-skills.md` for end-to-end examples with `app_server.request.item.tool.call`.
+- Quickstart: [`quickstart.md`](./quickstart.md)
+- Practical recipes: [`practical-recipes.md`](./practical-recipes.md)
+- Typed model details: [`typed-models.md`](./typed-models.md)

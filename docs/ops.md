@@ -2,71 +2,71 @@
 
 ## Purpose
 
-This is the entrypoint for local development and operational runbooks.
+This is the operations entrypoint for L1->L2->L3 progression.
 
-The operations manual was split into focused documents to keep setup, validation, troubleshooting, and maintenance concerns separate.
+- L1: this index
+- L2: foundational runbooks
+- L3: focused deep references and playbooks
 
-## Operations knowledge tree
+## L2 Foundations
 
-- `docs/operations/setup-and-run.md`
-  - Prerequisites, environment setup, running API/web, Codex supervision behavior, and MCP runtime operations.
-- `docs/operations/cli.md`
-  - CLI installation/usage, profile/auth runtime options, command groups, stream usage, and route parity expectations.
-- `docs/operations/api-service-supervision.md`
-  - Always-on API supervision with user-level systemd (`Restart=always`), install/enable commands, and recovery steps.
-- `docs/operations/generation-and-validation.md`
-  - OpenAPI/client generation, protocol schema generation, typecheck/build/test commands, and pre-PR gates.
-- `docs/operations/release-gate-checklist.md`
-  - Required release command gate, contract/doc parity checks, and lock-in closure evidence checklist.
-- `docs/operations/agent-platform-verification-matrix.md`
-  - Requirement-to-test evidence matrix for dispatch, lifecycle, trust, portability, and release conformance gates.
-- `docs/operations/troubleshooting.md`
-  - Logs, failure modes, and concrete recovery playbooks.
-- `docs/operations/agent-queue-troubleshooting.md`
-  - Queue-worker troubleshooting for system-owned agents (job states, retries, stuck/timeout recovery, tuning).
-- `docs/operations/agent-extension-authoring.md`
-  - Implementation runbook for extension packages/manifests, runtime SDK event handlers, and queue enqueue patterns.
-- `docs/operations/agent-extension-lifecycle-and-conformance.md`
-  - Runtime lifecycle endpoints (`list`/`reload`), RBAC/trust modes, extension source roots, audit records, and conformance release gate usage.
-- `docs/operations/agent-queue-framework.md`
-  - End-to-end queue framework contract (invariants, runtime model, event payloads, job schemas, transcript contracts, retry/recovery).
-- `docs/operations/maintenance.md`
-  - Safe reset flows, git workflow rules, CI expectations, and operational invariants.
-- `docs/implementation-status.md`
-  - Current code-level feature coverage and user-visible API/workflow semantics.
-- `docs/python/introduction.md`
-  - Python SDK entrypoint and links to focused Python client docs (`quickstart`, `practical-recipes`, `api-surface`, `streaming-and-handlers`, `remote-skills`, `settings-and-automation`, `protocol-interfaces`, `typed-models`, `development-and-packaging`).
+- Setup and run: [`operations/setup-and-run.md`](./operations/setup-and-run.md)
+- Environment reference: [`operations/environment-reference.md`](./operations/environment-reference.md)
+- CLI runbook: [`operations/cli.md`](./operations/cli.md)
+- Troubleshooting index: [`operations/troubleshooting.md`](./operations/troubleshooting.md)
+- Generation/validation runbook: [`operations/generation-and-validation.md`](./operations/generation-and-validation.md)
+- Release gate checklist: [`operations/release-gate-checklist.md`](./operations/release-gate-checklist.md)
+- API always-on supervision: [`operations/api-service-supervision.md`](./operations/api-service-supervision.md)
+- Extension authoring: [`operations/agent-extension-authoring.md`](./operations/agent-extension-authoring.md)
+- Extension lifecycle/conformance: [`operations/agent-extension-lifecycle-and-conformance.md`](./operations/agent-extension-lifecycle-and-conformance.md)
+- Queue framework: [`operations/agent-queue-framework.md`](./operations/agent-queue-framework.md)
+- Queue troubleshooting: [`operations/agent-queue-troubleshooting.md`](./operations/agent-queue-troubleshooting.md)
+- Queue-runner guide: [`queue-runner.md`](./queue-runner.md)
+- Maintenance: [`operations/maintenance.md`](./operations/maintenance.md)
 
-## Fast-path commands
+## L3 Deep References
 
-- Install deps: `pnpm install`
-- Start dev stack (API + web): `pnpm dev`
-- Run CLI health check: `pnpm --filter @repo/cli dev system health`
-- Install always-on API service: `./scripts/install-api-user-service.sh`
-- Regenerate API contracts: `pnpm gen`
-- Run workspace tests: `pnpm test`
-- Typecheck all workspaces: `pnpm typecheck`
-- Build all workspaces: `pnpm build`
-- Runtime smoke (API + WebSocket lifecycle): `pnpm smoke:runtime`
-- Runtime profile portability conformance: `node scripts/run-agent-conformance.mjs`
-- Browser smoke/e2e: `pnpm test:e2e`
-- Python client compile check: `python3 -m compileall packages/python-client/src/codex_manager`
-- Python client unit tests: `python3 -m pytest packages/python-client/tests/unit`
+CLI:
 
-## Current validation posture
+- [`operations/cli-command-reference.md`](./operations/cli-command-reference.md)
+- [`operations/cli-workflow-playbooks.md`](./operations/cli-workflow-playbooks.md)
 
-- Compile/build validation is active (`typecheck`, `build`).
-- Runtime smoke validation is active (`smoke:runtime`) and exercises core session/project/message/thread-control flows.
-- Runtime profile portability conformance validation is active (`node scripts/run-agent-conformance.mjs`) and emits `.data/agent-conformance-report.json`.
-- Workspace tests are active (`pnpm test`) with API contract/runtime harness, web integration tests, and API-client compile checks.
-- Python client validation is active through compile checks and dedicated unit suites (route parity + protocol boundary tests).
-- Browser-level Playwright smoke is active (`pnpm test:e2e`) via a wrapper that bootstraps missing Linux shared libraries into `.data/playwright-libs` when possible; see `docs/operations/troubleshooting.md` for edge cases.
-- Lint commands are still placeholders in workspace packages and should be replaced with enforceable lint rules.
+Validation:
 
-## Updating operations docs
+- [`operations/generation-command-reference.md`](./operations/generation-command-reference.md)
+- [`operations/validation-gate-playbook.md`](./operations/validation-gate-playbook.md)
 
-When operational behavior changes:
+Troubleshooting:
 
-1. Update the focused operations document containing that behavior.
-2. Keep command examples synchronized with `package.json` scripts.
-3. Keep this index updated if document boundaries or file names change.
+- [`operations/troubleshooting-api-auth-runtime.md`](./operations/troubleshooting-api-auth-runtime.md)
+- [`operations/troubleshooting-web-stream-state.md`](./operations/troubleshooting-web-stream-state.md)
+
+Extensions:
+
+- [`operations/agent-extension-authoring-manifest-events.md`](./operations/agent-extension-authoring-manifest-events.md)
+- [`operations/agent-extension-authoring-worker-jobs.md`](./operations/agent-extension-authoring-worker-jobs.md)
+- [`operations/agent-extension-lifecycle-rbac-trust.md`](./operations/agent-extension-lifecycle-rbac-trust.md)
+- [`operations/agent-extension-conformance-audit.md`](./operations/agent-extension-conformance-audit.md)
+
+Queue:
+
+- [`operations/agent-queue-event-and-job-contracts.md`](./operations/agent-queue-event-and-job-contracts.md)
+- [`operations/agent-queue-runtime-semantics.md`](./operations/agent-queue-runtime-semantics.md)
+- [`queue-runner-capability-reference.md`](./queue-runner-capability-reference.md)
+
+## Fast Path Commands
+
+- `pnpm dev`
+- `pnpm gen`
+- `pnpm typecheck`
+- `pnpm test`
+- `pnpm build`
+- `pnpm smoke:runtime`
+- `node scripts/run-agent-conformance.mjs`
+
+## Related docs
+
+- Product scope: [`prd.md`](./prd.md)
+- Architecture: [`architecture.md`](./architecture.md)
+- Protocol index: [`codex-app-server.md`](./codex-app-server.md)
+- Implementation snapshot: [`implementation-status.md`](./implementation-status.md)

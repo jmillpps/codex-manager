@@ -2,485 +2,122 @@
 
 ## Purpose
 
-This document defines the queue framework and agent-driven orchestration model used by this repository.
+This is the one-level-deeper queue framework guide.
 
-It answers:
+It starts where `README.md` leaves off for orchestration: the README says queue/extension runtime exists; this document explains the queue mental model, guarantees, and how to safely build workflows on top of it.
 
-- What the queue guarantees.
-- How agent extensions subscribe to runtime events.
-- How queued jobs run on system-owned worker chats.
-- How supervisor workflows write transcript insight and optional auto-actions.
+## What You Should Understand After Reading
 
-This is an implementation contract for current behavior.
+- Which responsibilities belong to queue core vs extension handlers.
+- Why worker sessions are system-owned and owner-scoped.
+- How dedupe, retries, and terminal reconciliation maintain operational reliability.
+- Which level-2 docs to use for exact payload contracts and runtime timing behavior.
 
 ## Core Model
 
-The API core runs a generic queue and generic agent runtime. Workflow logic lives in agent extensions under `agents/*`.
+Codex Manager queue architecture is intentionally split:
 
-Core responsibilities:
+- **Queue core** (API runtime)
+  - executes typed jobs with retry/cancel/timeouts.
+  - persists and recovers job state.
+  - provisions worker sessions and streams lifecycle events.
+- **Extension handlers** (`agents/*`)
+  - subscribe to runtime events.
+  - decide what work should be enqueued.
+  - define instruction semantics and side-effect strategy.
 
-- load extension event modules from repo-local + configured/package roots at startup
-- emit named runtime events to registered handlers
-- allow handlers to enqueue queue jobs
-- run queue jobs with retries, cancelation, and terminal reconciliation
-- stream queue lifecycle events over websocket
-- maintain system-owned worker sessions per project + agent
-
-Agent extension responsibilities:
-
-- subscribe to runtime events
-- build human-readable instruction text for worker jobs
-- choose dedupe semantics through queue payload keys
-- write workflow outputs through API endpoints (for example transcript upsert, approval decision, steer)
+This separation keeps queue runtime generic while allowing workflow-specific behavior to evolve independently.
 
 ## Invariants
 
-- Foreground user turn streaming is never blocked by background queue workflows.
-- Every queue job reaches an explicit terminal state: `completed`, `failed`, or `canceled`.
-- Queue recovery never silently drops persisted work due to schema/type mismatch.
-- Duplicate user actions are deduped when the queue contract requires single-flight behavior.
-- Worker chats are system-owned infrastructure and are not user-operable chat sessions.
-- Transcript rows are updated idempotently via stable `messageId` keys.
+1. Foreground user turn streaming must not block on background queue work.
+2. Every queue job must reach explicit terminal state (`completed|failed|canceled`).
+3. Dedupe keys must make repeated triggers idempotent for intended scope.
+4. Worker sessions are infrastructure sessions, not user chat sessions.
+5. Transcript side effects must be idempotent by stable message id.
 
-## Queue Runtime
+## Event -> Job -> Side Effect Flow
 
-Primary files:
+Canonical pipeline:
 
-- `apps/api/src/orchestrator-queue.ts`
-- `apps/api/src/orchestrator-types.ts`
-- `apps/api/src/orchestrator-processors.ts`
-- `apps/api/src/index.ts`
-
-Queue supports:
-
-- typed job definitions with payload/result schemas
-- per-job dedupe mode (`single_flight`, `drop_duplicate`, `merge_duplicate`, `none`)
-- retry classification (`retryable` vs `fatal`)
-- retry delay controls, including custom `delayForAttempt(attempt)`
-- queue/job capacity limits and fairness controls
-- terminal history retention and persisted snapshot recovery
-
-Configured retry behavior for agent-driven jobs:
-
-- immediate-first linear retry delay (`0ms`, then `+60ms` per attempt)
-- retryable classification includes transient thread/session materialization failures
-
-## Agent Runtime Event Bus
-
-Primary files:
-
-- `apps/api/src/agent-events-runtime.ts`
-- `agents/runtime/events.ts`
-
-Module loading contract:
-
-- Source roots include:
-  - repo-local `agents/`
-  - `AGENT_EXTENSION_PACKAGE_ROOTS`
-  - `AGENT_EXTENSION_CONFIGURED_ROOTS`
-- For repo-local scanning, directories named `runtime`, `lib`, or dot-prefixed are ignored.
-- A module is loadable when one of these files exists:
-  - `events.js`
-  - `events.mjs`
-  - `events.ts`
-- Optional `extension.manifest.json` compatibility/capability declarations are enforced at load/reload.
-- Module must export `registerAgentEvents(registry)` (directly or via default export).
-- Dispatch is fanout and deterministic (`priority`, module name, registration order) with per-handler timeout isolation.
-
-Event handler tool contract:
-
-- `enqueueJob(input)` queues work through orchestrator queue
-- `logger` exposes structured log methods
-- handler output is normalized to typed envelopes (`enqueue_result`, `action_result`, `handler_result`, `handler_error`)
-- direct `action_request` execution is constrained by event-derived scope when available (`projectId`, `sourceSessionId`, `turnId`)
-- handler tool access is invocation-scoped; once a handler times out or finishes, late tool calls are rejected to prevent delayed enqueue side effects
+1. Runtime/system event is emitted into extension runtime.
+2. Extension handler emits enqueue output.
+3. Queue runtime resolves dedupe and schedules execution.
+4. Worker session executes one instruction turn.
+5. Side effects update transcript/approvals/steer/suggest state.
+6. Queue terminal reconciliation enforces explicit terminal output.
 
 ## Worker Session Model
 
-Worker sessions are owner-scoped and agent-scoped:
+Worker sessions are keyed by owner + agent:
 
 - mapping key: `${ownerId}::${agent}`
-- `ownerId` is either:
-  - real `projectId`
-  - `session:<sessionId>` for unassigned-chat queue workflows
-- persisted in metadata `projectAgentSessionByKey`
-- hidden from default session lists (`GET /api/sessions`) but visible with `includeSystemOwned=true` and owner-mapping lookup (`GET /api/projects/:projectId/agent-sessions`)
-- worker sessions are readable (`GET /api/sessions/:sessionId`); mutating user chat operations remain rejected (`403 system_session`)
-
-Worker session lifecycle:
-
-- created lazily on first queued job for `(ownerId, agent)`
-- `thread/start` uses project working directory when configured, else workspace root
-- mandatory one-time core system orientation turn (queue-runner posture + CLI usage guidance)
-- optional one-time extension bootstrap turn from queue payload `bootstrapInstruction` (`key`, `instructionText`)
-- turn policy comes from `agents/<agent>/agent.config.json` when present
-- stale mapped worker session is recovered once by clearing mapping and reprovisioning
-
-## Runtime Events Used by Supervisor
-
-Primary file:
-
-- `agents/supervisor/events.js`
-
-Subscribed events:
-
-- `file_change.approval_requested`
-- `turn.completed`
-- `suggest_request.requested`
-- `app_server.item.started`
-
-### Event: `file_change.approval_requested`
-
-Payload contract:
-
-- `context`
-  - `projectId`
-  - `sourceSessionId`
-  - `threadId`
-  - `turnId`
-  - optional: `itemId`, `approvalId`, `anchorItemId`, `userRequest`, `turnTranscript`
-- `summary` (string)
-- `details` (string; may be structured JSON text)
-- `sourceEvent`: `approval_request | approvals_reconcile`
-- `fileChangeStatus`: `pending_approval`
-- optional `autoActions`
-  - `approve`: `{ enabled, threshold }`
-  - `reject`: `{ enabled, threshold }`
-  - `steer`: `{ enabled, threshold }`
-  - thresholds use `none | low | med | high`
-
-Handler behavior:
-
-- records file-change activity for the turn by stable anchor id (`anchorItemId`) before dispatch, so repeated approval-reconcile polling cannot inflate turn counters
-- builds one `file_change_supervisor_review` instruction
-- enqueues one `agent_instruction` job
-- dedupe key:
-  - `file_change_supervisor_review:${threadId}:${turnId}:${itemId ?? approvalId ?? "na"}`
-
-### Event: `turn.completed`
-
-Payload contract:
-
-- `context`
-  - `projectId`
-  - `sourceSessionId`
-  - `threadId`
-  - `turnId`
-  - optional `userRequest`
-- `hadFileChangeRequests` (boolean)
-- `turnTranscriptSnapshot` (string)
-- optional `fileChangeRequestCount` (number)
-- optional `insights[]` (extension-defined summary input)
-  - `itemId`, `change`, `impact`, `riskLevel`, `riskReason`
-
-Handler behavior:
-
-- returns without enqueue when `hadFileChangeRequests` is `false`
-- turn transcript snapshot input is sourced from canonical turn content (`thread/read(includeTurns)`) merged with supplemental ledger rows, with supplemental-only fallback when canonical read is temporarily unavailable
-- if in-memory per-turn file-change anchors are absent (for example post-restart), turn-completed gating recovers file-change activity from supplemental `approval.request` transcript rows that carry `details.method=item/fileChange/requestApproval`
-- event dispatch is de-duplicated per `(threadId, turnId)` while in-flight and retried with bounded linear backoff (`0ms`, `+60ms`, `+120ms`) before giving up
-- if handlers are present but none returns actionable enqueue/action output, dispatch is treated as failed and retried (prevents silent loss of expected turn-review work)
-- otherwise builds one `turn_supervisor_review` instruction
-- enqueues one `agent_instruction` job
-- dedupe key:
-  - `turn_supervisor_review:${threadId}:${turnId}`
-
-### Event: `suggest_request.requested`
-
-Payload contract:
-
-- `requestKey`
-- `sessionId`
-- `projectId`
-- `threadId`
-- `turnId`
-- `userRequest`
-- `turnTranscript` (full user+assistant chat history context for the source session)
-- optional `model`
-- optional `effort`
-- optional `draft`
-
-Handler behavior:
-
-- builds one suggest-request instruction
-- instruction contract tells worker to run suggestion synthesis immediately using provided payload context (no additional transcript lookup required)
-- enqueues one `agent_instruction` queue job with `jobKind: suggest_request`
-
-### Event: `app_server.item.started`
-
-Signal contract (from app-server pass-through):
-
-- `source: "app_server"`
-- `signalType: "notification"`
-- `method: "item/started"`
-- `context.threadId`, `context.turnId`
-- `params.item` (must be `type: "userMessage"` for this workflow)
-
-Handler behavior:
-
-- extracts user request text from `params.item.content[]`
-- assumes `params.item` is a `userMessage` payload with text content blocks (runtime contract shape)
-- when signal metadata includes a known non-default session title, skips enqueue
-- enqueues one `agent_instruction` queue job with `jobKind: session_initial_rename`
-- dedupe key:
-  - `session_initial_rename:<sourceSessionId>`
-- queue owner id:
-  - uses signal project hint when present
-  - otherwise falls back to `session:<sourceSessionId>`
-
-## Queue Job Types
-
-### Job Kind: `suggest_request` (via `agent_instruction`)
-
-Payload fields are carried inside `agent_instruction.instructionText` plus routing ids:
-
-- `projectId`
-- `sourceSessionId`
-- `threadId`
-- `turnId`
-- `jobKind: suggest_request`
-- `dedupeKey: suggest_request:<sourceSessionId>` (single-flight per source chat)
-- optional per-job worker overrides:
-  - `model`
-  - `effort`
-  - `fallbackSuggestionDraft`
-- completion metadata:
-  - `completionSignal.kind: suggested_request`
-  - `completionSignal.requestKey`
-
-Execution:
-
-- runs one instruction turn with `expectResponse: none`
-- worker publishes `streaming|complete|error|canceled` suggestion state via `POST /api/sessions/:sessionId/suggested-request/upsert`
-- API emits websocket `suggested_request_updated` for each upsert
-- request routes and client flow reconcile by `requestKey`
-- execution is deadline-bounded (`ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS`); when no completion signal is observed in time, core writes a deterministic fallback suggestion, interrupts the worker turn best-effort, and completes the queue job
-
-### Job Kind: `session_initial_rename` (via `agent_instruction`)
-
-Payload fields are carried inside `agent_instruction.instructionText` plus routing ids:
+- owner id: project id or `session:<sessionId>` fallback for unassigned-chat ownership.
 
-- `projectId` (queue owner id; may be session-scoped fallback)
-- `sourceSessionId`
-- `threadId`
-- `turnId`
-- `jobKind: session_initial_rename`
-- `dedupeKey: session_initial_rename:<sourceSessionId>`
+Operational semantics:
 
-Execution:
+- created lazily on first relevant job.
+- hidden from default user session list surfaces.
+- visible for operators through dedicated include-system-owned/session-mapping routes.
+- subject to startup preflight (core orientation + optional bootstrap per key).
 
-- runs one instruction turn with `expectResponse: none`
-- worker inspects `sessions get` output for current session title + project assignment
-- worker renames only if title is still exactly `New chat`
-- worker uses `sessions rename` with a concise initial-request-derived title
-- when title was already changed, worker exits without side effects
+## Dedupe and Retry Philosophy
 
-### Job: `agent_instruction`
+Dedupe avoids duplicate work inflation in bursty event windows.
 
-Payload schema:
+Retries are bounded and classified:
 
-- `agent`
-- `jobKind`
-- `projectId`
-- `sourceSessionId`
-- `threadId`
-- `turnId`
-- optional `itemId`
-- optional `approvalId`
-- optional `anchorItemId`
-- optional `bootstrapInstruction` (`key`, `instructionText`)
-- `instructionText`
-- optional `dedupeKey`
-- optional `expectResponse`: `none | assistant_text | action_intents`
+- transient failures are retryable.
+- invalid payload/schema failures are terminal and explicit.
 
-Dedupe:
+Repository supervisor flows use deterministic dedupe keys by session/turn/item context and immediate-first retry behavior for stale-worker recovery.
 
-- single-flight key:
-  - explicit payload `dedupeKey` when provided
-  - otherwise `${projectId}:${threadId}:${turnId}:${jobKind}`
+## Queue Job Families in Practice
 
-Result schema:
+Repository workflows primarily use `agent_instruction` jobs with `jobKind` variants (for example `suggest_request`, `session_initial_rename`, file-change/turn reviews).
 
-- `status: "ok"`
-- optional `outputText`
-- optional `actionIntents[]`
-- optional `actionResults[]`
+`expectResponse` controls completion contract shape:
 
-Execution:
+- `none`
+- `assistant_text`
+- `action_intents`
 
-- resolves/creates project agent session
-- runs startup preflight once per worker session before executing job instruction turns
-- startup preflight includes one core orientation turn per worker session
-- startup preflight includes one extension bootstrap turn per worker session/bootstrap-key when provided
-- runs instruction turn
-- when `expectResponse=assistant_text`, streams assistant output snapshots into transcript row type `agent.jobOutput`
-- when `expectResponse=none`, no structured output contract is required; side effects may occur live during the worker turn (for example via CLI commands)
-- when `expectResponse=action_intents`, parses structured JSON intents, validates scope/capability/idempotency in API core, then executes intents server-side
-- action scope locks include `projectId`, `sourceSessionId`, and `turnId` when available; `queue.enqueue` intents cannot target a different project and inherit `sourceSessionId` from scope when omitted
-- reconciles expected supplemental entries for supervisor job kinds at terminal state
+Worker side effects can be live CLI-driven or parsed/executed intent-driven, depending on workflow design.
 
-## Supervisor Instruction Contract
+## UI and Stream Coupling
 
-Supervisor instruction text is human-readable markdown and is the execution contract.
+Queue lifecycle is observable by websocket events (`orchestrator_job_*`) and transcript deltas.
 
-File-change instruction structure includes:
+Client behavior should assume:
 
-- routing context (project/session/thread/turn/item/approval ids)
-- fenced user request block:
+- websocket is live source for progress UX.
+- REST/read-path fallback exists for reconciliation after missed events.
 
-```user-request.md
-...
-```
+## Reliability Model
 
-- fenced turn transcript block:
+Queue reliability includes:
 
-```transcript.md
-...
-```
+- bounded timeouts.
+- bounded retries with explicit classification.
+- worker reprovision on stale mapping.
+- completion-signal and deadline-bounded handling for suggest-request jobs.
+- terminal reconciliation for expected supplemental transcript outputs.
 
-- diff details
-- explicit deterministic auto-action rules
-- explicit ordered CLI side effects in required order
+## Building New Workflows Safely
 
-Mandatory execution order for file-change supervision:
+When adding new queue-backed behavior:
 
-1. upsert explainability `streaming`
-2. upsert explainability `complete`
-3. upsert supervisor insight `streaming`
-4. upsert supervisor insight `complete`
-5. evaluate and execute eligible auto actions
+1. Define event subscription in extension.
+2. Define deterministic dedupe key.
+3. Define one job contract and expected terminal output.
+4. Keep side effects idempotent by stable IDs.
+5. Add validation coverage for retry/reconcile paths.
 
-Worker execution contract for supervisor jobs:
+## Read Next (Level 3)
 
-- execute transcript/approval/steer side effects through CLI during turn execution
-- do not depend on structured JSON output parsing for side effects
-- keep transcript message ids and job dedupe keys deterministic for idempotent replay behavior
-
-Auto-action precedence:
-
-- reject wins when both approve and reject conditions match
-- user decisions are authoritative in races
-- `already_resolved` approval action status is reconciliation, not retryable failure
-
-## Transcript Contracts
-
-Public upsert endpoint:
-
-- `POST /api/sessions/:sessionId/transcript/upsert`
-
-Upsert body fields:
-
-- `messageId`
-- `turnId`
-- `role`: `user | assistant | system`
-- `type`
-- `content`
-- `status`: `streaming | complete | canceled | error`
-- optional `details`
-- optional `startedAt`
-- optional `completedAt`
-
-Supervisor message id conventions:
-
-- explainability:
-  - `file-change-explain::<threadId>::<turnId>::<anchorItemId>`
-- supervisor insight:
-  - `file-change-supervisor-insight::<threadId>::<turnId>::<anchorItemId>`
-- turn review:
-  - `turn-supervisor-review::<threadId>::<turnId>`
-- queue output stream:
-  - `agent-job-output::<jobId>`
-
-Supervisor transcript types used by UI:
-
-- `fileChange.explainability`
-- `fileChange.supervisorInsight`
-- `turn.supervisorReview`
-- `agent.jobOutput`
-
-Terminal reconciliation:
-
-- queue terminal handlers fill missing/placeholder supervisor rows with deterministic fallback content
-- supplemental transcript upsert protects terminal rows from stale `streaming` regression on same `messageId`
-
-## File-Change Policy Resolution
-
-Supervisor file-change policy is loaded by the extension at event-handling time from per-session settings (`sessionControls.settings.supervisor.fileChange`), using runtime settings tools (`getSessionSettings` / optional `getSessionSetting`). Settings producers (UI/CLI/API) read/write through `GET|POST /api/sessions/:sessionId/settings` and `DELETE /api/sessions/:sessionId/settings/:key`.
-
-Default policy when no setting exists:
-
-- diff explainability: enabled
-- auto-approve: disabled, threshold `low`
-- auto-reject: disabled, threshold `high`
-- auto-steer: disabled, threshold `high`
-
-Threshold domain:
-
-- `low | med | high` (`medium` is accepted as alias and normalized to `med`)
-
-## Timeouts, Retry, and Recovery
-
-Agent turn timing controls:
-
-- `ORCHESTRATOR_AGENT_TURN_TIMEOUT_MS`
-- `ORCHESTRATOR_AGENT_POLL_INTERVAL_MS`
-- `ORCHESTRATOR_AGENT_INCLUDE_TURNS_GRACE_MS`
-- `ORCHESTRATOR_AGENT_UNTRUSTED_TERMINAL_GRACE_MS`
-- `ORCHESTRATOR_AGENT_EMPTY_TURN_GRACE_MS`
-
-Queue timing controls:
-
-- `ORCHESTRATOR_QUEUE_DEFAULT_TIMEOUT_MS`
-- `ORCHESTRATOR_QUEUE_MAX_ATTEMPTS`
-
-Runtime behavior:
-
-- worker turn completion is resolved from runtime notifications first
-- `thread/read(includeTurns)` polling is fallback
-- include-turns non-materialized windows are bounded by grace timer
-- grace overflow throws retryable error instead of waiting full turn timeout
-- if fallback reads report terminal state while active-turn tracking still marks the same turn active, core requires stable no-progress observation for `ORCHESTRATOR_AGENT_UNTRUSTED_TERMINAL_GRACE_MS` before self-healing the active-turn marker
-- running turns that remain empty (no materialized turn items) longer than `ORCHESTRATOR_AGENT_EMPTY_TURN_GRACE_MS` fail retryable to avoid multi-minute phantom in-progress stalls
-
-Recovery behavior:
-
-- stale mapped worker session triggers one mapping reset + reprovision retry
-- persisted unknown-type or invalid-payload jobs become explicit terminal failures on recovery
-
-## Websocket and UI Coupling
-
-Queue lifecycle websocket events:
-
-- `orchestrator_job_queued`
-- `orchestrator_job_started`
-- `orchestrator_job_progress`
-- `orchestrator_job_completed`
-- `orchestrator_job_failed`
-- `orchestrator_job_canceled`
-
-Transcript websocket delta:
-
-- `transcript_updated` carries full upserted entry payload
-- active chat applies delta immediately
-- REST transcript reload remains reconcile fallback
-
-Approval bubble grouping behavior:
-
-- file-change diff + explainability + supervisor insight + queue output are grouped by anchor item/approval metadata
-- grouped rows render inline in the same thought bubble context
-
-## Extending the Framework
-
-To add a new workflow:
-
-1. create/update an agent extension event handler under `agents/<agent>/events.js|events.mjs|events.ts`
-2. subscribe to one or more runtime event names
-3. construct deterministic markdown instruction text with full routing/context payload
-4. enqueue `agent_instruction` or another registered queue job type
-5. choose a side-effect execution contract:
-   - CLI/live actions with `expectResponse=none`, or
-   - structured `action_intents` output executed by API core
-6. define stable dedupe and transcript message id keys
-7. add unit/contract coverage for dedupe, retry, and terminal reconciliation
-
-Core API remains generic while extension code owns workflow semantics.
+- Event and job payload contracts: [`agent-queue-event-and-job-contracts.md`](./agent-queue-event-and-job-contracts.md)
+- Runtime settlement/retry/recovery semantics: [`agent-queue-runtime-semantics.md`](./agent-queue-runtime-semantics.md)
+- Symptom-led queue troubleshooting: [`agent-queue-troubleshooting.md`](./agent-queue-troubleshooting.md)
+- Queue-runner capability model: [`../queue-runner.md`](../queue-runner.md)
+- Extension authoring patterns: [`agent-extension-authoring.md`](./agent-extension-authoring.md)
+- Runtime event families: [`../protocol/harness-runtime-events.md`](../protocol/harness-runtime-events.md)

@@ -1,5 +1,9 @@
 # Operations: Maintenance and Cleanup
 
+## Purpose
+
+Maintenance/runbook rules for reset flows, git hygiene, and validation expectations.
+
 ## Safe reset procedures
 
 ### Reset backend state (recommended for dev)
@@ -128,3 +132,10 @@ Update `ops.md` in the same PR whenever you change:
 - Codex runtime supervision behavior
 
 If a contributor following `ops.md` would get stuck, then `ops.md` is wrong and must be fixed.
+
+## Related docs
+
+- Operations index: [`../ops.md`](../ops.md)
+- Setup/run baseline: [`setup-and-run.md`](./setup-and-run.md)
+- Generation/validation runbook: [`generation-and-validation.md`](./generation-and-validation.md)
+- Release gate checklist: [`release-gate-checklist.md`](./release-gate-checklist.md)

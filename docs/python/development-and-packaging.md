@@ -30,8 +30,8 @@ pnpm python:openapi:gen
 - Keep plugin lifecycle orchestration isolated in `plugins.py`.
 - Keep protocol injection constructor surface additive and stable (`request_executor`, `header_provider`, `retry_policy`, `hook_registry`, `stream_router`, `plugins`).
 - Keep public imports stable in `__init__.py`.
-- Use `docs/python/protocol-interfaces.md` as the protocol-architecture contract when expanding transport/hook/plugin interfaces.
-- Use `docs/python/typed-models.md` for generated typed request/response model architecture, operation coverage, and boundary-validation behavior.
+- Use [`protocol-interfaces.md`](./protocol-interfaces.md) as the protocol-architecture contract when expanding transport/hook/plugin interfaces.
+- Use [`typed-models.md`](./typed-models.md) for generated typed request/response model architecture, operation coverage, and boundary-validation behavior.
 - Keep `pydantic` as a runtime dependency because typed facades are always available (`cm.typed`, `acm.typed`).
 
 ## Typed model generation
@@ -69,3 +69,10 @@ Before shipping client changes:
 2. Run Python unit tests (when pytest is available).
 3. Spot-check major workflows against a running codex-manager API.
 4. Verify docs match actual method names and paths.
+
+## Related docs
+
+- Python introduction and navigation: [`introduction.md`](./introduction.md)
+- API domain wrappers and route map: [`api-surface.md`](./api-surface.md)
+- Protocol interface contracts: [`protocol-interfaces.md`](./protocol-interfaces.md)
+- Typed model generation/coverage: [`typed-models.md`](./typed-models.md)

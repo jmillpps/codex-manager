@@ -132,6 +132,6 @@ Shared app-server signal payload envelope fields:
 
 ## Related references
 
-- `docs/protocol/agent-dispatch-and-reconciliation.md`
-- `docs/protocol/agent-extension-packaging.md`
-- `docs/protocol/harness-runtime-events.md`
+- Dispatch and reconciliation semantics: [`agent-dispatch-and-reconciliation.md`](./agent-dispatch-and-reconciliation.md)
+- Extension packaging and compatibility fields: [`agent-extension-packaging.md`](./agent-extension-packaging.md)
+- Runtime event families and envelopes: [`harness-runtime-events.md`](./harness-runtime-events.md)

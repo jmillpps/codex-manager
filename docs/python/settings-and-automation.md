@@ -120,3 +120,10 @@ async def run_worker(session_id: str) -> None:
 
 asyncio.run(run_worker("<session-id>"))
 ```
+
+## Related docs
+
+- Python introduction: [`introduction.md`](./introduction.md)
+- Practical recipes: [`practical-recipes.md`](./practical-recipes.md)
+- Streaming handlers: [`streaming-and-handlers.md`](./streaming-and-handlers.md)
+- Remote skill workflows: [`remote-skills.md`](./remote-skills.md)

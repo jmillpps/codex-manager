@@ -2,8 +2,8 @@
 
 ## Before Opening a Request
 
-1. Read `README.md` for setup and command usage.
-2. Check `docs/operations/troubleshooting.md` for known failure modes.
+1. Read [`README.md`](./README.md) for setup and command usage.
+2. Check [`docs/operations/troubleshooting.md`](./docs/operations/troubleshooting.md) for known failure modes.
 3. Reproduce with fresh state where possible (`.data` reset, clean terminal logs).
 
 ## Where to Ask for Help

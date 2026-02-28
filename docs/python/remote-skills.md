@@ -2,62 +2,73 @@
 
 ## Purpose
 
-Run Python callables as dynamic tool handlers for Codex sessions through codex-manager, with session-scoped lifecycle and API-managed response delivery.
+Run Python callables as session-scoped dynamic tool handlers for Codex sessions through codex-manager.
 
-This is not a Python-only local loop: codex-manager now exposes dynamic tool-call request/response routes so handlers can respond through the service boundary.
+This is service-bound integration, not a local-only loop: codex-manager exposes server routes for pending tool-call retrieval and response submission.
 
 ## Server routes used
 
 - `GET /api/sessions/:sessionId/tool-calls`
   - list pending dynamic tool-call requests for one session.
 - `POST /api/tool-calls/:requestId/response`
-  - submit tool-call output back to codex-manager, which replies to `codex app-server`.
+  - submit tool-call output; codex-manager forwards response to `codex app-server`.
 
 Python wrappers:
 
 - `cm.session(session_id).tool_calls.list()`
 - `cm.tool_calls.respond(request_id=..., ...)`
 
-## Remote skill lifecycle API
+## Session-scoped remote-skill facade
 
-`client.remote_skills.session(session_id)` returns a session-scoped registry.
+`client.remote_skills.session(session_id)` returns a session registry with:
 
-`client.remote_skills.create_session(register=..., **session_create_kwargs)` creates a new session and injects the registered skill catalog as `dynamic_tools` at create time.
-- Sync client expects `register` to be a synchronous callback.
-- Async client accepts either a synchronous or `async` register callback.
+- skill registration and catalog rendering
+- dynamic tool payload generation
+- helper send methods with optional catalog injection
+- signal/pending-call dispatch and response submission
 
-Core methods:
+Create a new session with tools included on create:
+
+- `client.remote_skills.create_session(register=..., **session_create_kwargs)`
+
+Use this for first-turn tool availability reliability.
+
+## Core methods
+
+Catalog and lifecycle:
 
 - `register(name, handler, description=..., input_schema=...)`
+- `skill(...)` decorator
 - `unregister(name)`
 - `clear()`
-- `dynamic_tools()` (current dynamic tool catalog payload)
-- `sync_runtime()` (push current dynamic tools via `sessions.resume`)
-- `prepare_catalog()` (best-effort runtime catalog sync; includes bootstrap fallback for unmaterialized sessions)
-- `instruction_text()` and `inject_request(text)`
+- `dynamic_tools()`
+- `instruction_text()`
+- `inject_request(text)`
+
+Runtime sync and send helpers:
+
+- `sync_runtime()`
+- `prepare_catalog()`
 - `send(text, inject_skills=True, ...)`
-- `send_prepared(text, inject_skills=True, ...)` (`prepare_catalog()` + `send(...)`)
-- `dispatch_app_server_signal(signal)` (local dispatch only)
-- `matches_signal(signal)` (session-aware signal guard)
-- `respond_to_signal(signal)` (dispatch + API response submit)
-- `respond_to_pending_call(call)` (dispatch + API response from a pending REST record)
-- `drain_pending_calls()` (list + resolve all pending calls for the session)
+- `send_prepared(text, inject_skills=True, ...)`
+
+Dispatch and response helpers:
+
+- `matches_signal(signal)`
+- `respond_to_signal(signal)`
+- `respond_to_pending_call(call)`
+- `drain_pending_calls()`
+
+Scoped registration helper:
+
 - `using(...)` / `async using(...)` for auto cleanup
-
-`respond_to_signal(...)` is the drop-in bridge for `app_server.request.item.tool.call`.
-
-`send(...)` automatically includes `dynamic_tools=[...]` built from currently registered skills unless you override `dynamic_tools` explicitly.
-
-For first-turn reliability, prefer `remote_skills.create_session(...)` so tools are present during session creation. App-server accepts `dynamicTools` on additional lifecycle calls, but first-turn tool-call behavior is most reliable when catalog is set at create.
 
 ## Sync example
 
 ```python
 from codex_manager import CodexManager
 
-SESSION_ID = "<session-id>"
-
-with CodexManager.from_env() as cm:
+with CodexManager.from_profile("local") as cm:
     def register(skills):
         @skills.skill(
             name="lookup_ticket",
@@ -72,23 +83,19 @@ with CodexManager.from_env() as cm:
 
     @cm.on_app_server_request("item.tool.call")
     def on_tool_call(signal, _ctx):
-        # Executes registered Python handler and posts result to:
-        # POST /api/tool-calls/{requestId}/response
         skills.respond_to_signal(signal)
 
     cm.stream.run_forever(thread_id=session_id)
 ```
 
-## Async example with auto cleanup
+## Async example
 
 ```python
 import asyncio
 from codex_manager import AsyncCodexManager
 
-SESSION_ID = "<session-id>"
-
 async def main() -> None:
-    async with AsyncCodexManager.from_env() as cm:
+    async with AsyncCodexManager.from_profile("local") as cm:
         def register(skills):
             @skills.skill(
                 name="summarize_diff",
@@ -110,22 +117,30 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-## Notes
+## Reliability notes
 
-- `POST /api/tool-calls/:requestId/response` status outcomes:
-  - `200` accepted
-  - `404` request unknown/already resolved
-  - `409` response already in flight (`code: "in_flight"`)
-  - `500` upstream/runtime submission failed (`status: "error"`)
 - `respond_to_signal(...)` ignores non-tool-call signals and returns `None`.
-- `respond_to_signal(...)` / `respond_to_pending_call(...)` are session-aware and return `None` for mismatched session payloads.
-- `respond_to_pending_call(...)` accepts one pending `sessions.tool_calls.list()` row and submits a response.
-- `drain_pending_calls()` is a websocket-independent reliability fallback for handling queued tool calls.
-- `drain_pending_calls()` treats deleted/system-owned session payloads as empty and raises `ValueError` for malformed `sessions.tool_calls.list()` payloads missing `data`.
-- response submission is retried by default (`max_submit_attempts=3`, `retry_delay_seconds=0.05`) for transient failures.
-  - set `retry_delay_seconds=0` for immediate retry attempts without backoff sleep.
-- duplicate/late response states (`404 not_found`, `409 in_flight`) are treated as idempotent success and surfaced in dispatch metadata (`submission_status`, `submission_idempotent`).
-- `send(..., inject_skills=True)` can prepend the active skill catalog to your request for instruction-grounding.
-- dynamic tools always include an `inputSchema`; if you omit `input_schema` at registration, a permissive object schema is generated.
-- `sync_runtime()` is useful after register/unregister/clear when you want to update runtime tool availability before the next send.
-- For a full multi-session team coordination pattern, see `docs/python/team-mesh.md`.
+- `respond_to_signal(...)` and `respond_to_pending_call(...)` are session-aware.
+- response submit retries default to `max_submit_attempts=3`, `retry_delay_seconds=0.05`.
+- `404 not_found` and `409 in_flight` are treated as idempotent completion outcomes in dispatch metadata.
+- `drain_pending_calls()` is a websocket-independent fallback for delayed stream windows.
+
+## Status outcomes from response route
+
+Typical outcomes:
+
+- `200` accepted
+- `404` unknown/already resolved request
+- `409` response already in flight (`code: "in_flight"`)
+- `500` upstream/runtime response submit failure
+
+## Read Next (Level 3)
+
+- Lifecycle and catalog sync strategy: [`remote-skills-lifecycle-and-catalog.md`](./remote-skills-lifecycle-and-catalog.md)
+- Dispatch/retry/idempotency details: [`remote-skills-dispatch-and-reliability.md`](./remote-skills-dispatch-and-reliability.md)
+
+## Related docs
+
+- Streaming decorators and listener reliability: [`streaming-and-handlers.md`](./streaming-and-handlers.md)
+- Multi-session collaboration pattern: [`team-mesh.md`](./team-mesh.md)
+- Python API surface map: [`api-surface.md`](./api-surface.md)

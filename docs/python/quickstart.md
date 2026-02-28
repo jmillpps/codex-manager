@@ -100,10 +100,10 @@ with CodexManager(validation_mode="off") as cm_off:
 
 ## Next
 
-- For copy-paste recipes, open `docs/python/practical-recipes.md`
-- For a multi-agent team workflow without orchestrator jobs, open `docs/python/team-mesh.md`
-- For endpoint/domain coverage, open `docs/python/api-surface.md`
-- For event handlers and decorators, open `docs/python/streaming-and-handlers.md`
-- For dynamic tool-call bridging with Python handlers, open `docs/python/remote-skills.md`
-- For protocol injection architecture and contracts, open `docs/python/protocol-interfaces.md`
-- For generated typed model architecture, operation coverage, and boundary validation behavior, open `docs/python/typed-models.md`
+- For copy-paste recipes, open [`practical-recipes.md`](./practical-recipes.md)
+- For a multi-agent team workflow without orchestrator jobs, open [`team-mesh.md`](./team-mesh.md)
+- For endpoint/domain coverage, open [`api-surface.md`](./api-surface.md)
+- For event handlers and decorators, open [`streaming-and-handlers.md`](./streaming-and-handlers.md)
+- For dynamic tool-call bridging with Python handlers, open [`remote-skills.md`](./remote-skills.md)
+- For protocol injection architecture and contracts, open [`protocol-interfaces.md`](./protocol-interfaces.md)
+- For generated typed model architecture, operation coverage, and boundary validation behavior, open [`typed-models.md`](./typed-models.md)

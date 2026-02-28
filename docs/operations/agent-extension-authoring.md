@@ -2,234 +2,57 @@
 
 ## Purpose
 
-This runbook explains how to build extension modules that integrate with the runtime event fanout contract and queue execution model.
+This is the one-level extension authoring guide.
 
-Primary question:
+It describes how to build extension modules that subscribe to runtime events and enqueue queue work without adding workflow logic to API core.
 
-- How do I add or modify event-driven workflows without hard-coding workflow logic into API core?
+## Authoring surface summary
 
-## Authoring surfaces
+Runtime contracts are provided by `@codex-manager/agent-runtime-sdk`.
 
-Use the runtime SDK package for extension contracts:
+Typical extension folder includes:
 
-- `@codex-manager/agent-runtime-sdk`
+- `extension.manifest.json`
+- `events.js|events.mjs|events.ts`
+- optional `agent.config.json`
+- optional playbooks/docs
 
-Repository-local extensions can still import through:
+## Core authoring rules
 
-- `agents/runtime/events.ts` (thin SDK re-export)
+- export `registerAgentEvents(registry)`
+- declare compatibility and capabilities in manifest
+- subscribe to deterministic event names
+- emit enqueue/action requests through runtime tools (not direct side effects in API core)
+- use deterministic dedupe keys and stable transcript ids for idempotent workflows
 
-Core contract highlights:
+## Event families to know
 
-- typed runtime events (`AgentRuntimeEvent`)
-- typed tools (`enqueueJob`, `logger`, optional `getSessionSettings`, optional `getSessionSetting`)
-- typed emit result envelopes (`enqueue_result`, `action_result`, `handler_result`, `handler_error`)
-- deterministic registration options (`priority`, `timeoutMs`)
+- synthesized workflow events
+- `app_server.<normalized_method>`
+- `app_server.request.<normalized_method>`
 
-## Extension source layouts
+## Queue and worker model summary
 
-### Repo-local development extension
+- handlers enqueue jobs (`agent_instruction` common)
+- worker sessions are system-owned and owner-scoped
+- startup preflight includes orientation and optional bootstrap
 
-```txt
-agents/
-  <agent>/
-    extension.manifest.json
-    events.js|events.mjs|events.ts
-    AGENTS.md
-    agent.config.json
-    playbooks/
-      ...
-```
+## Validation expectations
 
-### External/package-style extension
+Before merging extension changes, verify:
 
-```txt
-<extension-root>/
-  extension.manifest.json
-  events.js|events.mjs|events.ts
-  AGENTS.md
-  agent.config.json
-```
+- manifest/capabilities compatibility
+- dedupe and idempotency correctness
+- retry/terminal behavior under failure windows
+- trust-mode behavior for target deployment mode
 
-External roots are loaded through:
+## Read Next (Level 3)
 
-- `AGENT_EXTENSION_PACKAGE_ROOTS`
-- `AGENT_EXTENSION_CONFIGURED_ROOTS`
-
-See `docs/operations/agent-extension-lifecycle-and-conformance.md` for operational root wiring.
-
-## Required manifest fields
-
-`extension.manifest.json` should include:
-
-- `name`
-- `version`
-- `agentId`
-- `displayName`
-- `runtime` compatibility:
-  - `coreApiVersion` and/or `coreApiVersionRange`
-  - `profiles[]` (`name`, `version` or `versionRange`)
-- `entrypoints.events`
-- `capabilities.events[]`
-- `capabilities.actions[]`
-
-Example:
-
-```json
-{
-  "name": "@acme/supervisor-agent",
-  "version": "1.0.0",
-  "agentId": "supervisor",
-  "displayName": "Supervisor",
-  "runtime": {
-    "coreApiVersion": 1,
-    "coreApiVersionRange": ">=1 <2",
-    "profiles": [
-      { "name": "codex-manager", "versionRange": ">=1 <2" }
-    ]
-  },
-  "entrypoints": {
-    "events": "./events.mjs"
-  },
-  "capabilities": {
-    "events": ["suggest_request.requested"],
-    "actions": ["queue.enqueue"]
-  }
-}
-```
-
-## Event registration contract
-
-Export `registerAgentEvents(registry)` and subscribe with:
-
-- `registry.on(eventType, handler, { priority, timeoutMs })`
-
-Runtime dispatch semantics:
-
-- fanout to all handlers for the event
-- deterministic order:
-  - `priority` ascending
-  - module name ascending
-  - registration index ascending
-- per-handler timeout isolation
-- one failing/timed-out handler does not block others
-
-Current API core event families:
-
-- synthesized workflow events:
-  - `file_change.approval_requested`
-  - `turn.completed`
-  - `suggest_request.requested`
-- app-server notification pass-through:
-  - `app_server.<normalized_method>`
-- app-server server-request pass-through:
-  - `app_server.request.<normalized_method>`
-
-`<normalized_method>` uses protocol method normalization:
-
-- split app-server method on `/`
-- camelCase/PascalCase segments convert to `snake_case`
-- segments join with `.`
-
-Examples:
-
-- `app_server.turn.started`
-- `app_server.item.reasoning.summary_text_delta`
-- `app_server.request.item.file_change.request_approval`
-
-See `docs/protocol/harness-runtime-events.md` for the full method-to-event map and shared app-server signal envelope fields.
-
-## Handler output contract
-
-Handlers can return:
-
-- `AgentJobEnqueueResult` (`enqueued` or `already_queued`)
-- `AgentRuntimeActionRequest` (`kind: "action_request"`) for side effects
-- explicit `AgentEventEmitResult`
-- `void` / `null` / `undefined` for diagnostics-only handling
-
-Runtime executes action requests in API core; handlers cannot directly execute actions.
-Returning `action_result` directly is treated as invalid by runtime.
-
-Use stable capability/action names for `action_request.actionType`:
-
-- `queue.enqueue`
-- `transcript.upsert`
-- `approval.decide`
-- `turn.steer.create`
-
-## Trust and capability rules
-
-Runtime policy is configured with `AGENT_EXTENSION_TRUST_MODE`:
-
-- `disabled`: allow undeclared capabilities
-- `warn`: allow but log undeclared capability warnings
-- `enforced`: reject undeclared event/action capabilities
-
-In enforced mode:
-
-- undeclared event subscriptions can deny module activation
-- undeclared action attempts are denied with `status: "forbidden"` and `code: "undeclared_capability"`
-
-Declare capabilities accurately in the manifest to avoid activation/action failures.
-
-## Queue enqueue guidance
-
-Use `enqueueJob` with:
-
-- `type`
-- `projectId`
-- optional `sourceSessionId`
-- `payload`
-
-Core queue job types:
-
-- `agent_instruction`
-- `suggest_request`
-
-Dedupe and idempotency guidance:
-
-- define deterministic queue keys to prevent duplicate inflation
-- reuse stable transcript `messageId` values
-- include `supplementalTargets` on `agent_instruction` payload when queue-terminal reconciliation is required
-
-## Worker execution model
-
-Worker sessions are system-owned and owner-scoped:
-
-- mapping key: `${ownerId}::${agentId}`
-- hidden from default user session lists (`GET /api/sessions`), with operator visibility via `GET /api/sessions?includeSystemOwned=true` and `GET /api/projects/:projectId/agent-sessions`
-- worker sessions are readable (`GET /api/sessions/:sessionId`), while mutating user-chat operations still return `403 system_session`
-
-Execution flow:
-
-1. resolve/create worker session
-2. run startup preflight once for the worker session before executing instruction turns
-3. startup preflight runs core queue-runner orientation once
-4. startup preflight runs optional extension bootstrap once per session/bootstrap-key when provided by queue payload (`bootstrapInstruction`)
-5. run exactly one instruction turn per queued job
-
-Worker turn policy can be controlled by `agent.config.json`:
-
-- `model`
-- `turnPolicy`
-- `orientationTurnPolicy`
-- `instructionTurnPolicy`
-- `threadStartPolicy`
-
-## Validation checklist
-
-Before merging extension changes:
-
-1. manifest compatibility and capability declarations are valid
-2. handler payload parsing is defensive for sparse/invalid inputs
-3. queue dedupe behavior matches workflow requirements
-4. transcript message ids are stable/idempotent
-5. terminal states are explicit (`completed`/`failed`/`canceled`)
-6. behavior is verified under trust mode expected for deployment
+- Manifest/events deep dive: [`agent-extension-authoring-manifest-events.md`](./agent-extension-authoring-manifest-events.md)
+- Worker/job pattern deep dive: [`agent-extension-authoring-worker-jobs.md`](./agent-extension-authoring-worker-jobs.md)
 
 ## Related references
 
-- `docs/operations/agent-extension-lifecycle-and-conformance.md`
-- `docs/operations/agent-queue-framework.md`
-- `docs/protocol/harness-runtime-events.md`
-- `docs/implementation-status.md`
+- Lifecycle and conformance: [`agent-extension-lifecycle-and-conformance.md`](./agent-extension-lifecycle-and-conformance.md)
+- Queue framework: [`agent-queue-framework.md`](./agent-queue-framework.md)
+- Runtime event contracts: [`../protocol/harness-runtime-events.md`](../protocol/harness-runtime-events.md)

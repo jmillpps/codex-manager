@@ -2,241 +2,66 @@
 
 ## Purpose
 
-This document is the operator runbook for the Codex Manager CLI in `apps/cli`.
+This is the one-level CLI operations guide.
 
-Use this runbook when you need scriptable access to the same API surface that the web client uses:
-
-- session/project lifecycle
-- approvals/tool-input decisions
-- orchestrator queue visibility and control
-- extension lifecycle operations
-- stream inspection and raw fallback requests
+It covers how to invoke CLI surfaces, where command groups map, and where to find deeper command/workflow references.
 
 ## Package and invocation
 
-The CLI package is `@repo/cli` and ships two binaries:
+CLI package: `@repo/cli`
+
+Binaries:
 
 - `codex-manager`
 - `cmgr`
 
-For local development from repository root:
+Local dev examples:
 
 ```bash
 pnpm --filter @repo/cli dev system health
 pnpm --filter @repo/cli dev sessions list
 ```
 
-Build the distributable binary:
+## Runtime option model
 
-```bash
-pnpm --filter @repo/cli build
-./apps/cli/dist/main.js system health
-```
+Global controls include profile/base URL/api prefix/timeouts and auth headers.
 
-## Global runtime options
+Resolution order:
 
-Global flags apply to all command groups:
-
-- `--profile <name>`
-- `--base-url <url>`
-- `--api-prefix <path>`
-- `--timeout-ms <n>`
-- `--json`
-- `--verbose`
-- `--bearer <token>`
-- `--rbac-token <token>`
-- `--role <role>`
-- `--actor <id>`
-- `--headers <key:value>` (repeatable)
-
-Runtime context resolution order:
-
-1. command flags
-2. environment variables
-3. selected profile in CLI config
-
-Environment overrides:
-
-- `CODEX_MANAGER_API_BASE`
-- `CODEX_MANAGER_API_PREFIX`
-- `CODEX_MANAGER_TIMEOUT_MS`
-- `CODEX_MANAGER_BEARER_TOKEN`
-- `CODEX_MANAGER_RBAC_TOKEN`
-- `CODEX_MANAGER_RBAC_ROLE`
-- `CODEX_MANAGER_RBAC_ACTOR`
+1. explicit flags
+2. env overrides
+3. selected profile config
 
 ## Profile management
 
-Profiles are stored at:
+Profiles live under user config path (`~/.config/codex-manager/cli/config.json` fallback behavior).
 
-- `$XDG_CONFIG_HOME/codex-manager/cli/config.json`
-- fallback: `~/.config/codex-manager/cli/config.json`
-
-Profile commands:
+Common commands:
 
 ```bash
 pnpm --filter @repo/cli dev profile list
 pnpm --filter @repo/cli dev profile set local --base-url http://127.0.0.1:3001 --api-prefix /api
-pnpm --filter @repo/cli dev profile auth-set local --bearer "$TOKEN"
 pnpm --filter @repo/cli dev profile use local
 ```
 
-## Command groups
+## Command-surface summary
 
-The CLI is organized by endpoint domains:
+CLI covers system/discovery, projects/sessions, approvals/tool-input/tool-calls, stream, extension lifecycle, and orchestrator jobs.
 
-- `system` (`info`, `health`, `capabilities`, `features list`, `collaboration-modes list`)
-- `models` (`list`)
-- `apps` (`list`)
-- `skills` (`list`, `config set`, `remote get|set`)
-- `mcp` (`servers list`, `reload`, `oauth login`)
-- `account` (`get`, `login start|cancel`, `logout`, `rate-limits`)
-- `config` (`get`, `requirements`, `set`, `batch-set`)
-- `runtime` (`exec`)
-- `feedback` (`submit`)
-- `agents extensions` (`list`, `reload`)
-- `orchestrator jobs` (`get`, `list`, `wait`, `cancel`)
-- `projects` (`list`, `create`, `rename`, `delete`, `agent-sessions list`, `chats move-all|delete-all`)
-- `sessions` (`list`, `create`, `get`, `send`, lifecycle/thread-actions, approvals/tool-input/tool-calls/transcript/suggest-request`)
-- `approvals` (`decide`)
-- `tool-calls` (`respond`)
-- `tool-input` (`decide`)
-- `stream events` (websocket event stream)
-- `api request` (raw fallback HTTP request)
+Use raw fallback only when a first-class command is not yet available.
 
-Supervisor-oriented helper flags:
+## Quality and parity
 
-- `sessions transcript upsert` uses `--entry-role <user|assistant|system>` for transcript row role, and supports `--content` or `--content-file`, plus `--details` or `--details-file`.
-- `sessions steer` supports `--input` or `--input-file`.
-- `sessions suggest-request upsert` supports `--suggestion` or `--suggestion-file` (suggestion required when `--status complete`).
-- `sessions settings get` reads generic per-session settings (or default-scope settings) and supports `--key` to fetch one top-level setting entry.
-- `sessions settings set` updates generic settings through the dedicated settings API:
-  - object mode: `--settings` or `--settings-file` with `--mode merge|replace`
-  - key/value mode: `--key` with `--value` or `--value-file` (JSON value or plain-string fallback)
-- `sessions settings unset` removes one top-level settings key for the selected scope.
+- route bindings are explicitly declared
+- CLI route parity tests guard drift from API registrations
 
-## High-value workflows
+## Read Next (Level 3)
 
-### Session + message lifecycle
+- Command reference map: [`cli-command-reference.md`](./cli-command-reference.md)
+- Workflow playbooks: [`cli-workflow-playbooks.md`](./cli-workflow-playbooks.md)
 
-```bash
-pnpm --filter @repo/cli dev sessions create --title "CLI test"
-pnpm --filter @repo/cli dev sessions send --session-id <sessionId> --text "Summarize this project."
-pnpm --filter @repo/cli dev sessions get --session-id <sessionId>
-```
+## Related runbooks
 
-### Worker/session troubleshooting workflows
-
-Use these commands when debugging hidden agent worker behavior, queue stalls, or delayed UI state updates:
-
-```bash
-# 1) Verify API/service health first.
-pnpm --filter @repo/cli dev system health
-
-# 2) Include system-owned worker sessions in listing output.
-pnpm --filter @repo/cli dev sessions list --include-system-owned true
-
-# 3) Inspect a worker session transcript directly.
-pnpm --filter @repo/cli dev sessions get --session-id <workerSessionId>
-
-# 4) Monitor queue state for running/stuck jobs.
-pnpm --filter @repo/cli dev orchestrator jobs list --project-id <projectId> --state running --limit 50
-pnpm --filter @repo/cli dev orchestrator jobs get --job-id <jobId>
-pnpm --filter @repo/cli dev orchestrator jobs wait --job-id <jobId> --timeout-ms 30000 --poll-ms 250
-
-# 5) Watch live websocket events for one chat while reproducing.
-pnpm --filter @repo/cli dev stream events --session-id <sessionId>
-
-# 6) Enumerate pending approval/tool-input requests before deciding.
-pnpm --filter @repo/cli dev sessions approvals list --session-id <sessionId>
-pnpm --filter @repo/cli dev sessions tool-input list --session-id <sessionId>
-pnpm --filter @repo/cli dev sessions tool-calls list --session-id <sessionId>
-
-# 7) Query project->agent worker mappings.
-pnpm --filter @repo/cli dev projects agent-sessions list --project-id <projectId>
-```
-
-Operational guidance:
-
-- Prefer `sessions list --include-system-owned true` + `sessions get` before assuming a worker is idle; many issues are visibility/routing rather than execution failure.
-- Use `orchestrator jobs wait` for bounded checks, then `jobs get` for terminal diagnostics (`error`, `attempt`, `runningContext`).
-- Keep `stream events` open during reproduction to distinguish backend lag from UI reconcile lag.
-- Use `api request` only when no first-class CLI command exists for the route.
-
-### Decide pending approvals
-
-```bash
-pnpm --filter @repo/cli dev sessions approvals list --session-id <sessionId>
-pnpm --filter @repo/cli dev approvals decide --approval-id <approvalId> --decision approve
-```
-
-### Respond to dynamic tool calls
-
-```bash
-pnpm --filter @repo/cli dev sessions tool-calls list --session-id <sessionId>
-pnpm --filter @repo/cli dev tool-calls respond --request-id <requestId> --text "lookup complete" --success true
-```
-
-### Suggest request and queue visibility
-
-```bash
-pnpm --filter @repo/cli dev sessions suggest-request enqueue --session-id <sessionId>
-pnpm --filter @repo/cli dev sessions suggest-request upsert --session-id <sessionId> --request-key <requestKey> --status streaming
-pnpm --filter @repo/cli dev sessions suggest-request upsert --session-id <sessionId> --request-key <requestKey> --status complete --suggestion "Draft one next request"
-pnpm --filter @repo/cli dev orchestrator jobs list --project-id <projectId> --state running --limit 25
-pnpm --filter @repo/cli dev orchestrator jobs wait --job-id <jobId> --timeout-ms 20000 --poll-ms 250
-```
-
-### Supervisor/extension lifecycle
-
-```bash
-pnpm --filter @repo/cli dev agents extensions list
-pnpm --filter @repo/cli dev agents extensions reload --rbac-token "$RBAC_TOKEN" --role admin --actor operator
-```
-
-### Live stream inspection
-
-```bash
-pnpm --filter @repo/cli dev stream events --session-id <sessionId>
-pnpm --filter @repo/cli dev stream events --project-id <projectId>
-```
-
-## Raw fallback
-
-When a route is new or not yet modeled by a dedicated command, use:
-
-```bash
-pnpm --filter @repo/cli dev api request \
-  --method POST \
-  --path /api/sessions/<sessionId>/interrupt \
-  --allow-status 200,409
-```
-
-`api request` is a direct escape hatch and should still use normal auth/profile controls.
-
-## Output contracts
-
-- Default mode prints status plus pretty response body.
-- `--json` prints a machine-oriented envelope:
-  - success: `{ ok: true, command, request, response }`
-  - failure: `{ ok: false, command, error }`
-
-This mode is intended for shell pipelines and CI checks.
-
-## Route coverage and parity
-
-CLI command-route bindings are declared in:
-
-- `apps/cli/src/lib/route-coverage.ts`
-
-Parity test compares CLI bindings against API route registrations in:
-
-- `apps/cli/src/route-parity.test.ts`
-
-Run:
-
-```bash
-pnpm --filter @repo/cli test
-```
-
-A parity mismatch is a release blocker for CLI coverage.
+- Setup and run baseline: [`setup-and-run.md`](./setup-and-run.md)
+- Troubleshooting: [`troubleshooting.md`](./troubleshooting.md)
+- Queue framework: [`agent-queue-framework.md`](./agent-queue-framework.md)

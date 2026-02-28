@@ -122,3 +122,9 @@ If service starts but health endpoint fails:
 2. check for port conflicts (`ss -ltnp | rg 3001`)
 3. inspect API logs for startup/config errors
 
+## Related runbooks
+
+- Setup and day-to-day local operation: [`setup-and-run.md`](./setup-and-run.md)
+- Environment variable catalog: [`environment-reference.md`](./environment-reference.md)
+- CLI health checks and operational commands: [`cli.md`](./cli.md)
+- Troubleshooting failure modes: [`troubleshooting.md`](./troubleshooting.md)
