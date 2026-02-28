@@ -6,15 +6,11 @@
   <a href="./LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache%202.0-2563eb" /></a>
   <img alt="Node &gt;=24" src="https://img.shields.io/badge/node-%3E%3D24-16a34a?logo=node.js&amp;logoColor=white" />
   <img alt="pnpm 10.29.3" src="https://img.shields.io/badge/pnpm-10.29.3-f97316?logo=pnpm&amp;logoColor=white" />
-  <img alt="CI not configured yet" src="https://img.shields.io/badge/ci-not%20configured%20yet-6b7280" />
   <img alt="Transport: STDIO + WebSocket" src="https://img.shields.io/badge/transport-STDIO%20%2B%20WebSocket-0f172a" />
 </p>
 
-<p align="center"><strong>Codex Manager</strong> is a local-first Codex workspace for running, organizing, and supervising Codex chat threads through a browser UI.</p>
-<p align="center">It pairs a React/Vite frontend with a Fastify API that supervises <code>codex app-server</code> over STDIO, streams protocol events over WebSocket, and keeps materialized session/project state durable under <code>.data/</code>.</p>
-
-<p align="center"><code>pnpm install && cp apps/api/.env.example apps/api/.env && cp apps/web/.env.example apps/web/.env && pnpm dev</code></p>
-<p align="center">Before sending your first turn, set <code>OPENAI_API_KEY</code> in <code>apps/api/.env</code> or ensure <code>~/.codex/auth.json</code> exists for bootstrap.</p>
+<p align="center"><strong>Codex Manager</strong> is a local-first control plane for Codex sessions.</p>
+<p align="center">It combines a browser workspace, an operator CLI, and a Python SDK over a Fastify API that supervises <code>codex app-server</code> over STDIO, streams lifecycle events over WebSocket, and keeps durable state under <code>.data/</code>.</p>
 
 <p align="center"><a href="https://github.com/jmillpps/codex-manager/issues">Issues</a> · <a href="https://github.com/jmillpps/codex-manager/issues/new">Report a Bug</a> · <a href="https://github.com/jmillpps/codex-manager/discussions">Discussions</a> · <a href="./CONTRIBUTING.md">Contributing</a></p>
 
@@ -24,592 +20,225 @@
 
 ---
 
-## Table of Contents
+## Why Codex Manager
 
-- [Quickstart](#quickstart)
-- [Why This Project Exists](#why-this-project-exists)
-- [Feature Highlights](#feature-highlights)
-- [Python Client](#python-client)
-- [Agent Extension Runtime](#agent-extension-runtime)
-- [Supervisor Session Controls and Settings](#supervisor-session-controls-and-settings)
-- [Build a Practical Extension](#build-a-practical-extension)
-- [Package and Load Extensions](#package-and-load-extensions)
-- [Extension Lifecycle Security (RBAC + Trust)](#extension-lifecycle-security-rbac--trust)
-- [Extension Validation and Conformance](#extension-validation-and-conformance)
-- [Backstory](#backstory)
-- [Getting Started (Detailed)](#getting-started-detailed)
-- [Repository Layout](#repository-layout)
-- [Documentation Map](#documentation-map)
-- [Contributing](#contributing)
-- [Support](#support)
-- [License](#license)
+Codex app-server is the runtime authority, but most teams still need a practical workspace around it: session lifecycle control, approval/tool-input handling, stream-aware supervision, extension hooks, and reproducible operator workflows.
 
----
+Codex Manager is that layer.
 
-## Quickstart
+## Who This Is For
 
-Install prerequisites and verify your environment:
+- Teams running Codex as part of local development workflows.
+- Operators who need reproducible API/CLI/session controls and observability.
+- Developers building automation and remote-tool bridges through Python.
+- Extension authors building event-driven workflows without patching API core.
 
-```bash
-node --version
-pnpm --version
-codex --version
-codex app-server --help
-```
+## 5-Minute Quickstart
 
-This README assumes a Unix-like shell environment (`bash`, `zsh`, or `sh`).
-
-From the repository root:
-
-```bash
-pnpm install
-cp apps/api/.env.example apps/api/.env
-cp apps/web/.env.example apps/web/.env
-
-# Choose one auth path before sending turns.
-# Option A (recommended): set OPENAI_API_KEY in apps/api/.env
-# edit apps/api/.env and set:
-# OPENAI_API_KEY=your_key_here
-
-# Option B: ensure ~/.codex/auth.json exists for startup bootstrap into CODEX_HOME
-
-pnpm dev
-```
-
-Open:
-
-- `http://127.0.0.1:5173` (web)
-- `http://127.0.0.1:3001/api/health` (api health)
-
-Then verify auth readiness:
-
-```bash
-curl -s http://127.0.0.1:3001/api/health | grep -Eq '"likelyUnauthenticated"\\s*:\\s*false' \
-  && echo "Auth ready" || echo "Auth missing or not loaded"
-```
-
-<details>
-<summary>Alternative auth modes (API key vs Codex home state)</summary>
-
-The API supports either auth path:
-
-- set `OPENAI_API_KEY` in `apps/api/.env`, or
-- use existing Codex auth state in `CODEX_HOME/auth.json` (startup can bootstrap from `~/.codex/auth.json` when available).
-
-If auth is missing, health may still return `ok`, but turns can fail with `401` when model calls begin.
-
-</details>
-
----
-
-## Why This Project Exists
-
-Codex app-server exposes a rich runtime/protocol surface, but teams still need a practical local workspace that combines:
-
-- consistent session lifecycle control
-- project-level organization
-- approval, tool-input, and dynamic tool-call workflows
-- stream-aware UI behavior
-- reproducible operations and troubleshooting runbooks
-
-Codex Manager focuses on that layer while keeping Codex as the execution authority.
-
----
-
-## Feature Highlights
-
-- Local-first architecture with API + web stack and repo-local state under `.data/`
-- Session and project workflows:
-  - create/rename/archive/unarchive/delete chats
-  - assign/move chats across projects and unassigned views
-  - bulk project chat move/delete operations
-- Materialization-aware behavior:
-  - loaded non-materialized chats are visible and movable
-  - archive constraints enforced when rollout is not yet materialized
-- Live streaming transcript with category filters (`All`, `Chat`, `Tools`, `Approvals`)
-- Turn-group transcript UX: one user request card plus one consolidated response bubble per turn, with a top thought area (`Working...` / `Worked for …`) and bottom final assistant response text
-- Approval and tool input actions surfaced inline in response thought details
-- Dynamic tool-call bridge routes for external handler runtimes (`sessions tool-calls list` + `tool-calls respond`)
-- Session transcript reload path merges streamed runtime tool/approval events so thought auditing remains visible even when `thread/read` omits raw tool items
-- Session Controls panel in chat view:
-  - applies per-chat/default control tuples (`model`, `approval policy`, `network access`, `filesystem sandbox`) with explicit Apply/Revert
-  - includes supervisor file-change controls (`Diff Explainability`, `Auto Approve`, `Auto Reject`, `Auto Steer`) persisted in generic session settings
-  - default auto-action posture is safe/off (`Auto Approve`: off/`low`, `Auto Reject`: off/`high`, `Auto Steer`: off/`high`)
-- Thread control surface:
-  - `fork`, `steer`, `interrupt`, `compact`, `rollback`, `review/start`, `backgroundTerminals/clean`
-- Extension runtime:
-  - event-driven pipelines as loadable extensions (`agents/*`, package roots, configured roots)
-  - deterministic fanout dispatch + timeout isolation + atomic reload
-  - lifecycle inventory/reload APIs with RBAC and trust/capability enforcement
-  - app-server signal passthrough for extension subscribers via normalized families:
-    - `app_server.<normalized_method>`
-    - `app_server.request.<normalized_method>`
-  - initial chat-title automation through `app_server.item.started` -> `session_initial_rename` queue jobs (rename only when title is still `New chat`)
-- Capability/integration settings:
-  - combined `Model -> Reasoning` selection (model-aware effort options), account state, MCP status/oauth, skills, config, collaboration modes, experimental features
-- Generic session settings storage shared by UI/CLI/extensions:
-  - API: `GET|POST /api/sessions/:sessionId/settings`, `DELETE /api/sessions/:sessionId/settings/:key`
-  - CLI: `sessions settings get|set|unset`
-- Cross-client sidebar synchronization via websocket events
-- Right-pane blocking modal when an active session is deleted
-
----
-
-## Python Client
-
-Codex Manager includes a Python client under `packages/python-client` for control-plane automation against codex-manager APIs and realtime stream events.
-
-Install locally from this repo:
-
-```bash
-pip install -e packages/python-client
-```
-
-Practical advanced example: interconnected team development mesh (no orchestrator jobs).
-
-Run it directly from repository root:
-
-```bash
-PYTHONPATH=packages/python-client/src python packages/python-client/examples/team_mesh.py
-```
-
-The script creates three sessions (`developer`, `docs`, `reviewer`) through `remote_skills.create_session(...)` so remote tools are attached at create-time, then coordinates through remote skills (`team_pull_work`, `team_queue_work`, `team_publish_artifact`, `team_read_board`, `team_mark_done`) and shared Python state.
-
-The Python client supports:
-
-- sync + async clients (`CodexManager`, `AsyncCodexManager`)
-- full domain wrappers for codex-manager API surface
-- additive typed OpenAPI facade (`cm.typed`, `acm.typed`) backed by generated Pydantic models
-- boundary validation modes for typed workflows (`typed-only`, `off`, `strict`) with strict-mode dict-domain guards for selected high-value operations
-- runtime route support for stream/extensions/orchestrator/session utility routes
-- decorator-based event handlers and request hooks (`on_event*`, `on_app_server*`, `before/after/on_error`)
-- protocol-based injection for request executors, header providers, retry policy, stream routers, and plugins
-- hook-registry injection (`hook_registry`) for custom hook orchestration
-- middleware object registration with `use_middleware(...)`
-- session-scoped wrappers and namespaced settings helpers
-- wait helpers for sync + async automation (`wait.until(...)`, `wait.send_message_and_wait_reply(...)`)
-- dynamic tool-call APIs (`sessions.tool_calls`, `tool_calls.respond`) and session-scoped remote-skill bridge helpers (`remote_skills.session(...)`)
-  - remote-skill `send(...)` auto-forwards registered handlers as `dynamic_tools`
-  - `remote_skills.create_session(register=...)` creates sessions with the tool catalog pre-attached for first-turn tool-call reliability
-  - `remote_skills.send_prepared(...)` provides catalog-prepare + send for existing sessions
-
-Common practical uses:
-
-- create scripted chat workflows (create session, send request, read transcript/results)
-- process approvals/tool-input requests in automation scripts
-- handle `item/tool/call` requests with Python handlers and respond through codex-manager routes
-- persist per-session settings shared by UI, CLI, and extensions
-- subscribe to stream events for realtime orchestration
-- build typed automations with safer request/response parsing via `cm.typed` / `acm.typed`
-
-Start with:
-
-- [`docs/python/introduction.md`](docs/python/introduction.md)
-
-Then continue to focused docs:
-
-- [`docs/python/quickstart.md`](docs/python/quickstart.md)
-- [`docs/python/practical-recipes.md`](docs/python/practical-recipes.md)
-- [`docs/python/team-mesh.md`](docs/python/team-mesh.md)
-- [`docs/python/api-surface.md`](docs/python/api-surface.md)
-- [`docs/python/streaming-and-handlers.md`](docs/python/streaming-and-handlers.md)
-- [`docs/python/remote-skills.md`](docs/python/remote-skills.md)
-- [`docs/python/settings-and-automation.md`](docs/python/settings-and-automation.md)
-- [`docs/python/protocol-interfaces.md`](docs/python/protocol-interfaces.md)
-- [`docs/python/typed-models.md`](docs/python/typed-models.md)
-- [`docs/python/development-and-packaging.md`](docs/python/development-and-packaging.md)
-
-For practical patterns, use:
-
-- `docs/python/quickstart.md` for first workflows
-- `docs/python/practical-recipes.md` for common production automation recipes
-- `docs/python/team-mesh.md` for multi-agent team coordination without server orchestrator jobs
-- `docs/python/settings-and-automation.md` for settings-driven automation recipes
-- `docs/python/streaming-and-handlers.md` for event-driven orchestration patterns
-- `docs/python/remote-skills.md` for dynamic tool-call bridge patterns
-
----
-
-## Agent Extension Runtime
-
-Codex Manager includes a generic event runtime for building workflow logic as extensions instead of hard-coding behavior in API core.
-
-What you get out of the box:
-
-- deterministic fanout dispatch by `priority`, then module name, then registration order
-- per-handler timeout isolation (a slow/failing handler does not block the rest)
-- typed handler envelopes (`enqueue_result`, `action_result`, `handler_result`, `handler_error`)
-- runtime action execution for `kind: "action_request"` envelopes (scope + capability + idempotency enforced in API core)
-- optional queue job response mode (`expectResponse: "action_intents"`) for structured worker intent batches
-- atomic extension reload with snapshot preservation on failure
-- extension inventory endpoint with compatibility, trust, and origin metadata
-- system-owned worker sessions that are hidden from default chat lists but fully observable through API/CLI
-- app-server protocol passthrough emits normalized extension-safe event names plus a common envelope (`source`, `signalType`, `eventType`, `method`, `context`, `params`, `session`)
-- optional extension tools for session-scoped settings lookup (`getSessionSettings`, `getSessionSetting`)
-
-Core event names emitted by API today:
-
-- `file_change.approval_requested`
-- `turn.completed`
-- `suggest_request.requested`
-- `app_server.<normalized_method>` (notifications)
-- `app_server.request.<normalized_method>` (server-initiated requests)
-
-Recommended execution pattern for production extensions:
-
-- subscribe to runtime events in `events.(js|mjs|ts)`
-- enqueue deterministic `agent_instruction` jobs with stable dedupe keys
-- perform side effects during worker turns via CLI/API mutations (for example transcript upserts, approvals, steering, suggested-request updates)
-- treat assistant text as optional operator trace, not as the source of truth for side effects
-
-This README is intentionally high-level. For implementation contracts, read:
-
-- [`docs/operations/agent-extension-authoring.md`](docs/operations/agent-extension-authoring.md)
-- [`docs/operations/agent-queue-framework.md`](docs/operations/agent-queue-framework.md)
-- [`docs/queue-runner.md`](docs/queue-runner.md)
-
-Reference docs:
-
-- [`docs/operations/agent-extension-authoring.md`](docs/operations/agent-extension-authoring.md)
-- [`docs/operations/agent-extension-lifecycle-and-conformance.md`](docs/operations/agent-extension-lifecycle-and-conformance.md)
-- [`docs/protocol/agent-runtime-sdk.md`](docs/protocol/agent-runtime-sdk.md)
-- [`docs/protocol/agent-extension-packaging.md`](docs/protocol/agent-extension-packaging.md)
-
----
-
-## Supervisor Session Controls and Settings
-
-Supervisor automation is extension-owned logic, while configuration is surfaced as generic session state.
-
-- UI exposes supervisor controls inside the chat `Session Controls` panel so they sit alongside existing session controls:
-  - `Diff Explainability`
-  - `Auto Approve` (`enabled`, `threshold`)
-  - `Auto Reject` (`enabled`, `threshold`)
-  - `Auto Steer` (`enabled`, `threshold`)
-- These values are stored under generic session settings (for example `settings.supervisor.fileChange`), not in app-server event payloads.
-- The supervisor extension reads those values at event-handling time through runtime tools and builds job instructions dynamically.
-- If all file-change functions are disabled for a session (`diffExplainability=false` and all auto-actions disabled), file-change supervisor jobs are skipped.
-- Initial title rename automation is driven by app-server turn-start signals:
-  - event: `app_server.item.started`
-  - behavior: enqueue `session_initial_rename`; worker renames only if current title is still exactly `New chat`
-
-Common control and settings commands:
-
-```bash
-# read session controls tuple
-pnpm --filter @repo/cli dev --json sessions controls get --session-id <sessionId>
-
-# update generic supervisor settings for a session
-pnpm --filter @repo/cli dev --json sessions settings set \
-  --session-id <sessionId> \
-  --scope session \
-  --settings '{"supervisor":{"fileChange":{"diffExplainability":true,"autoActions":{"approve":{"enabled":false,"threshold":"low"},"reject":{"enabled":false,"threshold":"high"},"steer":{"enabled":false,"threshold":"high"}}}}}'
-
-# read one settings key
-pnpm --filter @repo/cli dev --json sessions settings get --session-id <sessionId> --scope session --key supervisor
-```
-
----
-
-## Build a Practical Extension
-
-Create a repo-local extension:
-
-```text
-agents/
-  demo-suggest-agent/
-    extension.manifest.json
-    events.mjs
-    AGENTS.md
-    agent.config.json
-```
-
-`agents/demo-suggest-agent/extension.manifest.json`:
-
-```json
-{
-  "name": "@acme/demo-suggest-agent",
-  "version": "1.0.0",
-  "agentId": "demo-suggest",
-  "displayName": "Demo Suggest Agent",
-  "runtime": {
-    "coreApiVersionRange": ">=1 <2",
-    "profiles": [{ "name": "codex-manager", "versionRange": ">=1 <2" }]
-  },
-  "entrypoints": {
-    "events": "./events.mjs"
-  },
-  "capabilities": {
-    "events": ["suggest_request.requested"],
-    "actions": ["queue.enqueue"]
-  }
-}
-```
-
-This example handles a real workflow: when the user clicks **Suggest request**, the extension enqueues one queue job for its worker agent. The worker receives full request/transcript context and is expected to update suggested-request state live (`streaming` -> `complete|error`) using CLI/API side effects.
-
-`agents/demo-suggest-agent/events.mjs`:
-
-```js
-function asRecord(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
-}
-
-function asNonEmptyString(value) {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-}
-
-export function registerAgentEvents(registry) {
-  registry.on(
-    "suggest_request.requested",
-    async (event, tools) => {
-      const payload = asRecord(event?.payload) ?? {};
-      const projectId = asNonEmptyString(payload.projectId);
-      const sessionId = asNonEmptyString(payload.sessionId);
-      const threadId = asNonEmptyString(payload.threadId);
-      const turnId = asNonEmptyString(payload.turnId);
-      const requestKey = asNonEmptyString(payload.requestKey);
-      const userRequest = asNonEmptyString(payload.userRequest) ?? "User request unavailable.";
-      const transcript = asNonEmptyString(payload.turnTranscript) ?? "No transcript context available.";
-
-      if (!projectId || !sessionId || !threadId || !turnId || !requestKey) {
-        tools.logger.warn(
-          { eventType: event?.type ?? "unknown", payload },
-          "suggest_request event missing required routing fields; skipping enqueue"
-        );
-        return;
-      }
-
-      const instructionText = [
-        "# Worker Job: suggest_request",
-        "",
-        "## Routing Context",
-        `Project: ${projectId}`,
-        `Source session: ${sessionId}`,
-        `Thread: ${threadId}`,
-        `Turn: ${turnId}`,
-        `Request key: ${requestKey}`,
-        "",
-        "## Turn Context",
-        "```user-request.md",
-        userRequest,
-        "```",
-        "",
-        "```transcript.md",
-        transcript,
-        "```",
-        "",
-        "## Mandatory Execution Contract",
-        "Use CLI/API mutations for side effects.",
-        "Set suggested-request state to streaming immediately, then publish complete with one concise request.",
-        "Do not rely on assistant text output as the integration signal."
-      ].join("\n");
-
-      return tools.enqueueJob({
-        type: "agent_instruction",
-        projectId,
-        sourceSessionId: sessionId,
-        payload: {
-          agent: "demo-suggest",
-          jobKind: "suggest_request",
-          projectId,
-          sourceSessionId: sessionId,
-          threadId,
-          turnId,
-          instructionText,
-          dedupeKey: `suggest_request:${sessionId}`,
-          expectResponse: "none",
-          completionSignal: {
-            kind: "suggested_request",
-            requestKey
-          }
-        }
-      });
-    },
-    { priority: 50, timeoutMs: 8000 }
-  );
-}
-```
-
-Reload and verify:
-
-```bash
-curl -sS -X POST http://127.0.0.1:3001/api/agents/extensions/reload
-curl -sS http://127.0.0.1:3001/api/agents/extensions
-```
-
-Exercise the flow and inspect queue/worker state:
-
-```bash
-# trigger suggest request from UI or API, then inspect queue
-pnpm --filter @repo/cli dev orchestrator jobs list \
-  --project-id <projectId> \
-  --agent demo-suggest \
-  --job-kind suggest_request \
-  --sort desc \
-  --limit 20
-
-# inspect worker mapping and transcript behavior
-pnpm --filter @repo/cli dev api request --method GET --path /api/projects/<projectId>/agent-sessions
-pnpm --filter @repo/cli dev sessions list --include-system-owned true
-pnpm --filter @repo/cli dev sessions get --session-id <workerSessionId>
-```
-
----
-
-## Package and Load Extensions
-
-Supported load sources:
-
-- repo-local extensions under `agents/*` (`origin.type = repo_local`)
-- installed package roots via `AGENT_EXTENSION_PACKAGE_ROOTS` (`origin.type = installed_package`)
-- configured roots via `AGENT_EXTENSION_CONFIGURED_ROOTS` (`origin.type = configured_root`)
-
-If the same extension root is discoverable from multiple sources, loader keeps the highest-precedence origin (`repo_local` > `installed_package` > `configured_root`).
-
-External/package layout:
-
-```text
-<extension-root>/
-  extension.manifest.json
-  events.js|events.mjs|events.ts
-  AGENTS.md
-  agent.config.json
-  playbooks/
-```
-
-Notes:
-
-- runtime requires an events entrypoint; manifest is strongly recommended for compatibility + capability enforcement
-- `AGENTS.md` and playbooks are instruction assets for worker behavior
-- optional manifest metadata fields for tooling (for example `entrypoints.orientation`) may be included, but runtime execution does not require them
-
-Example env wiring:
-
-```bash
-# Linux/macOS path delimiter is :
-AGENT_EXTENSION_PACKAGE_ROOTS=/opt/codex/extensions:/path/to/extension-packages
-AGENT_EXTENSION_CONFIGURED_ROOTS=/etc/codex/extensions
-```
-
-```powershell
-# Windows path delimiter is ;
-$env:AGENT_EXTENSION_PACKAGE_ROOTS="C:\codex\extensions;D:\team\extensions"
-$env:AGENT_EXTENSION_CONFIGURED_ROOTS="C:\codex\configured-extensions"
-```
-
-Manifest compatibility is enforced at load time (including semver ranges for `coreApiVersionRange` and profile `versionRange`).
-
----
-
-## Extension Lifecycle Security (RBAC + Trust)
-
-Lifecycle endpoints:
-
-- `GET /api/agents/extensions`
-- `POST /api/agents/extensions/reload`
-
-RBAC modes (`AGENT_EXTENSION_RBAC_MODE`):
-
-- `disabled` (loopback-only local admin access; remote callers are rejected)
-- `header` (trusted proxy/header asserted roles)
-- `jwt` (bearer-token verified role claims)
-
-Header mode:
-
-- validates `x-codex-rbac-token` against `AGENT_EXTENSION_RBAC_HEADER_SECRET`
-- reads `x-codex-role` and optional `x-codex-actor`
-- unless `AGENT_EXTENSION_ALLOW_INSECURE_HEADER_MODE=true`, header mode requires loopback host binding and `AGENT_EXTENSION_RBAC_HEADER_SECRET`
-
-JWT mode:
-
-- verifies `Authorization: Bearer <token>`
-- requires `AGENT_EXTENSION_RBAC_JWT_SECRET`
-- optional issuer/audience constraints:
-  - `AGENT_EXTENSION_RBAC_JWT_ISSUER`
-  - `AGENT_EXTENSION_RBAC_JWT_AUDIENCE`
-- configurable claims:
-  - role claim: `AGENT_EXTENSION_RBAC_JWT_ROLE_CLAIM` (default `role`)
-  - actor claim: `AGENT_EXTENSION_RBAC_JWT_ACTOR_CLAIM` (default `sub`)
-
-Trust/capability mode (`AGENT_EXTENSION_TRUST_MODE`):
-
-- `disabled`: allow undeclared capabilities
-- `warn`: allow + warn
-- `enforced`: block undeclared event/action capabilities
-
----
-
-## Extension Validation and Conformance
-
-Run full release-gate validation:
-
-```bash
-pnpm --filter @repo/api typecheck
-pnpm --filter @repo/api test
-pnpm --filter @repo/web typecheck
-pnpm --filter @repo/web test
-pnpm smoke:runtime
-node scripts/run-agent-conformance.mjs
-```
-
-Conformance output artifact:
-
-- `.data/agent-conformance-report.json`
-
-Portable extension expectation:
-
-- one extension passes under at least two runtime profiles (`codex-manager` and `fixture-profile` in the bundled conformance harness).
-
----
-
-## Backstory
-
-This repository started as a docs-first effort to lock down product scope, protocol semantics, lifecycle guarantees, and operations before broad implementation.
-
-That foundation now drives an active codebase with runtime verification harnesses, browser-level smoke tests, and a split documentation tree designed for maintainability as the protocol and UI evolve.
-
----
-
-## Getting Started (Detailed)
-
-### 1) Requirements
+Prerequisites:
 
 - Node.js `>=24`
 - pnpm `10.29.3`
 - Codex CLI available on `PATH`
 
-If you need to set pnpm via Corepack:
+From repository root:
 
 ```bash
-corepack enable
-corepack prepare pnpm@10.29.3 --activate
+pnpm install
+cp apps/api/.env.example apps/api/.env
+cp apps/web/.env.example apps/web/.env
 ```
 
-### 2) Environment configuration
+Pick one auth path before sending turns:
 
-`apps/api/.env` default local baseline:
+1. Recommended: set `OPENAI_API_KEY` in `apps/api/.env`.
+2. Alternative: ensure `~/.codex/auth.json` exists (startup can bootstrap into local `CODEX_HOME`).
 
-```env
-HOST=127.0.0.1
-PORT=3001
-LOG_LEVEL=info
-CODEX_BIN=codex
-CODEX_HOME=.data/codex-home
-DATA_DIR=.data
-OPENAI_API_KEY=
-DEFAULT_APPROVAL_POLICY=untrusted
-DEFAULT_SANDBOX_MODE=read-only
+Start API + web:
+
+```bash
+pnpm dev
 ```
 
-`apps/web/.env` baseline:
+Open:
 
-```env
-VITE_API_BASE=/api
-VITE_API_PROXY_TARGET=http://127.0.0.1:3001
+- Web: `http://127.0.0.1:5173`
+- API health: `http://127.0.0.1:3001/api/health`
+
+## First-Turn Smoke Test
+
+1. Open the web app and create/select a chat.
+2. Send: `Explain this repository in 5 bullets.`
+3. Confirm all of the following:
+   - Your user message transitions through `Sending` -> `Sent` -> `Delivered`.
+   - Assistant response streams in the transcript.
+   - The response finalizes with completion state/checkmark.
+   - `GET /api/health` does not indicate `likelyUnauthenticated: true`.
+
+CLI health/auth quick check:
+
+```bash
+curl -s http://127.0.0.1:3001/api/health | grep -Eq '"likelyUnauthenticated"[[:space:]]*:[[:space:]]*false' \
+  && echo "Auth ready" || echo "Auth missing or not loaded"
 ```
 
-### 3) Development commands
+## Quick Troubleshooting
+
+| Symptom | Check | Fix |
+| --- | --- | --- |
+| Turn fails with auth error | `GET /api/health` shows `likelyUnauthenticated: true` | Set `OPENAI_API_KEY` or ensure Codex auth state exists |
+| Web app cannot connect | API health URL unavailable | Start with `pnpm dev` or `pnpm dev:api` |
+| No stream updates | Browser devtools websocket/network | Verify API is running and websocket upgrade is not blocked |
+| Extension changes not reflected | Extension inventory/reload endpoints | `POST /api/agents/extensions/reload` then re-check inventory |
+| Python script cannot connect | `CODEX_MANAGER_API_BASE` and profile config | Point client to running API (`http://127.0.0.1:3001`) |
+
+For complete runbooks: [`docs/operations/troubleshooting.md`](docs/operations/troubleshooting.md)
+
+## Architecture At A Glance
+
+```text
+Web UI / CLI / Python SDK
+          |
+          v
+Fastify API (codex-manager control plane)
+  - session/project materialization
+  - approvals/tool-input routing
+  - extension runtime and queue actions
+          |
+          v
+codex app-server (STDIO supervised runtime authority)
+          |
+          +--> WebSocket event stream fan-out
+          +--> durable local state under .data/
+```
+
+More detail: [`docs/architecture.md`](docs/architecture.md)
+
+## Core Capabilities
+
+### Session and Project Operations
+
+- Chat/project lifecycle: create, rename, archive/unarchive, delete, move, and bulk project operations.
+- Materialization-aware constraints for not-yet-materialized chat data.
+- Consolidated turn transcript rendering with approval/tool-input visibility.
+- Session-switch race protections to prevent stale hydration leakage.
+
+### Runtime Controls and Governance
+
+- Session Controls panel with explicit apply/revert for:
+  - `model`
+  - `approval policy` (`untrusted`, `on-failure`, `on-request`, `never`)
+  - `network access`
+  - `filesystem sandbox`
+- Supervisor controls in the same panel (stored as generic session settings):
+  - `Diff Explainability`
+  - `Auto Approve` (default off, threshold `low`)
+  - `Auto Reject` (default off, threshold `high`)
+  - `Auto Steer` (default off, threshold `high`)
+
+### Automation Surfaces
+
+- Endpoint-complete REST + websocket API surface in `apps/api`.
+- Operator CLI parity in `apps/cli`.
+- Generic per-session settings storage shared across UI, CLI, API, and extensions.
+- Runtime routes for session utility, tool-call response, and stream-driven automation.
+
+### Extension Runtime Platform
+
+- Deterministic event fanout with timeout isolation and typed envelopes.
+- Source discovery across repo-local, package roots, and configured roots.
+- App-server signal pass-through families for extension subscribers:
+  - `app_server.<normalized_method>`
+  - `app_server.request.<normalized_method>`
+- Lifecycle inventory/reload APIs with RBAC and trust/capability enforcement.
+
+## Python SDK
+
+The Python SDK (`packages/python-client`) provides sync/async clients, typed OpenAPI models, wait helpers, settings wrappers, streaming handlers, and remote skill bridges for dynamic tool-call workflows.
+
+Install from this repository:
+
+```bash
+pip install -e packages/python-client
+```
+
+Simple, generally useful example:
+
+```python
+from codex_manager import CodexManager
+
+with CodexManager.from_profile("local") as cm:
+    session = cm.sessions.create(cwd=".")
+    session_id = session["session"]["sessionId"]
+
+    reply = cm.wait.send_message_and_wait_reply(
+        session_id=session_id,
+        text="Explain this repository in 5 concise bullets.",
+    )
+
+    print(reply.assistant_reply)
+```
+
+Start here: [`docs/python/introduction.md`](docs/python/introduction.md)
+
+Deep dives:
+
+- [`docs/python/quickstart.md`](docs/python/quickstart.md)
+- [`docs/python/practical-recipes.md`](docs/python/practical-recipes.md)
+- [`docs/python/team-mesh.md`](docs/python/team-mesh.md)
+- [`docs/python/remote-skills.md`](docs/python/remote-skills.md)
+- [`docs/python/streaming-and-handlers.md`](docs/python/streaming-and-handlers.md)
+- [`docs/python/typed-models.md`](docs/python/typed-models.md)
+- [`docs/python/api-surface.md`](docs/python/api-surface.md)
+
+## Build and Operate Extensions
+
+Codex Manager supports extension-driven automation without adding workflow logic directly to API core.
+
+Extension roots can be loaded from:
+
+- `agents/*` (repo local)
+- `AGENT_EXTENSION_PACKAGE_ROOTS`
+- `AGENT_EXTENSION_CONFIGURED_ROOTS`
+
+Runtime includes deterministic dispatch, queue action execution, lifecycle reload/inventory, and trust/capability enforcement.
+
+Start here:
+
+- Authoring: [`docs/operations/agent-extension-authoring.md`](docs/operations/agent-extension-authoring.md)
+- Queue framework: [`docs/operations/agent-queue-framework.md`](docs/operations/agent-queue-framework.md)
+- Lifecycle + conformance: [`docs/operations/agent-extension-lifecycle-and-conformance.md`](docs/operations/agent-extension-lifecycle-and-conformance.md)
+- SDK contracts: [`docs/protocol/agent-runtime-sdk.md`](docs/protocol/agent-runtime-sdk.md)
+
+## Choose Your Path
+
+- Product intent and scope: [`docs/prd.md`](docs/prd.md)
+- Architecture and invariants: [`docs/architecture.md`](docs/architecture.md)
+- Setup and local runbook: [`docs/operations/setup-and-run.md`](docs/operations/setup-and-run.md)
+- CLI operations: [`docs/operations/cli.md`](docs/operations/cli.md)
+- API service supervision (`systemd --user`): [`docs/operations/api-service-supervision.md`](docs/operations/api-service-supervision.md)
+- Validation and release gates: [`docs/operations/release-gate-checklist.md`](docs/operations/release-gate-checklist.md)
+- Codex protocol reference index: [`docs/codex-app-server.md`](docs/codex-app-server.md)
+- Current implementation status: [`docs/implementation-status.md`](docs/implementation-status.md)
+
+## Repository Layout
+
+```text
+apps/
+  api/        Fastify API + Codex app-server supervisor
+  cli/        CLI for endpoint-complete API/websocket workflows
+  web/        React/Vite frontend
+packages/
+  agent-runtime-sdk/ Canonical extension contracts
+  api-client/ Generated TypeScript API client
+  codex-protocol/ Generated protocol schema/types
+  python-client/ Python SDK for API + streaming + remote skills
+scripts/      Generation, conformance, and runtime utilities
+tests/e2e/    Playwright smoke/e2e coverage
+docs/         Product, architecture, protocol, and operations docs
+```
+
+## Development Commands
 
 ```bash
 pnpm dev               # api + web
@@ -620,104 +249,34 @@ pnpm typecheck
 pnpm test
 pnpm build
 pnpm smoke:runtime
-pnpm test:e2e:list   # list browser suites
-pnpm test:e2e        # run browser smoke (requires runtime auth + browser deps)
+pnpm test:e2e:list
+pnpm test:e2e
 ```
 
-Optional: install an always-on user service for the API (auto-restart + boot persistence on systemd hosts):
-
-```bash
-./scripts/install-api-user-service.sh
-systemctl --user status codex-manager-api.service
-```
-
-Runbook: [`docs/operations/api-service-supervision.md`](docs/operations/api-service-supervision.md)
-
-### 4) Data and artifact locations
-
-This repository keeps default runs clean by writing runtime artifacts to ignored paths:
-
-- runtime state: `.data/`
-- codex home (recommended local): `.data/codex-home`
-- playwright output: `.data/playwright-test-results`
-- playwright linux dependency bootstrap cache: `.data/playwright-libs`
-
-Ignored report/state directories:
-
-- `test-results/`
-- `playwright-report/`
-- `blob-report/`
-- `coverage/`
-
----
-
-## Repository Layout
-
-```text
-apps/
-  api/        Fastify API + Codex app-server supervisor
-  cli/        Operator CLI for endpoint-complete API/websocket workflows
-  web/        React/Vite frontend
-packages/
-  agent-runtime-sdk/ Provider-neutral extension event/runtime contracts
-  api-client/ Generated TypeScript API client
-  codex-protocol/ Generated protocol schema/types
-  python-client/ Python SDK for codex-manager API + stream automation
-scripts/      Generation + runtime verification utilities
-tests/e2e/    Playwright browser smoke coverage
-docs/         Product, architecture, protocol, and operations knowledge tree
-```
-
----
-
-## Documentation Map
-
-- Product requirements: [`docs/prd.md`](docs/prd.md)
-- Architecture and invariants: [`docs/architecture.md`](docs/architecture.md)
-- Python client introduction: [`docs/python/introduction.md`](docs/python/introduction.md)
-- Python deep dives: [`docs/python/`](docs/python/)
-- Codex protocol index: [`docs/codex-app-server.md`](docs/codex-app-server.md)
-- Protocol deep dives: [`docs/protocol/`](docs/protocol/)
-- Operations index: [`docs/ops.md`](docs/ops.md)
-- CLI operations runbook: [`docs/operations/cli.md`](docs/operations/cli.md)
-- Setup/validation/troubleshooting/maintenance runbooks: [`docs/operations/`](docs/operations/)
-- Always-on API supervision runbook: [`docs/operations/api-service-supervision.md`](docs/operations/api-service-supervision.md)
-- Current implementation and verification status: [`docs/implementation-status.md`](docs/implementation-status.md)
-
----
+Runtime/test artifacts are written to ignored paths (primarily `.data/`).
 
 ## Contributing
-
-Contributions are welcome.
 
 Before opening a PR, read:
 
 - [`CONTRIBUTING.md`](CONTRIBUTING.md)
 - [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)
 
-Highlights:
+Expectations:
 
-- use focused branches and explicit staging (`git add <file1> <file2>`)
-- include validation results with your PR
-- update documentation in the same change when behavior/workflow/config changes
-
----
+- Use focused branches and explicit staging.
+- Include validation evidence in your PR.
+- Update docs in the same change whenever behavior/workflow/config changes.
 
 ## Support
 
-For help, issue reports, and feature requests:
-
-- Start with [`SUPPORT.md`](SUPPORT.md).
-- Use [`Issues`](https://github.com/jmillpps/codex-manager/issues) for bugs and feature requests.
-- Open a new ticket from [`New issue`](https://github.com/jmillpps/codex-manager/issues/new).
-- Use [`Discussions`](https://github.com/jmillpps/codex-manager/discussions) for implementation questions.
-
-If you suspect a security issue, do not post sensitive details publicly. Use a private reporting path if configured, or open a minimal issue requesting one.
-
----
+- Start with [`SUPPORT.md`](SUPPORT.md)
+- Bugs/features: [`Issues`](https://github.com/jmillpps/codex-manager/issues)
+- New ticket: [`New issue`](https://github.com/jmillpps/codex-manager/issues/new)
+- Implementation questions: [`Discussions`](https://github.com/jmillpps/codex-manager/discussions)
 
 ## License
 
-This project is licensed under the Apache 2.0 License.
+This project is licensed under Apache 2.0.
 
 See [`LICENSE`](LICENSE) for details.
