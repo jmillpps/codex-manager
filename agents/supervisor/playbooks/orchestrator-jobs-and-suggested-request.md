@@ -9,7 +9,7 @@ Primary API/runtime references:
 - `apps/api/src/orchestrator-queue.ts`
 - `apps/api/src/orchestrator-processors.ts`
 - `apps/api/src/index.ts`
-- `agents/supervisor/events.ts`
+- `agents/supervisor/events.js`
 
 ## Queue Job Types
 
@@ -35,6 +35,7 @@ Within `agent_instruction`, supervisor handlers use these `jobKind` values:
 - `file_change_supervisor_review`
 - `turn_supervisor_review`
 - `suggest_request`
+- `session_initial_rename`
 
 ## Core Execution Contracts
 
@@ -59,6 +60,13 @@ For `suggest_request` instructions:
 - synthesize one concise user-to-agent request text
 - set complete state via `sessions suggest-request upsert --status complete --suggestion...`
 - do not rely on assistant-text output as the delivery contract
+
+For `session_initial_rename` instructions:
+
+- inspect session metadata first (`sessions get`)
+- rename only when `session.title` is still exactly `New chat`
+- generate a concise request-based title and apply via `sessions rename`
+- if title is already non-default, stop without side effects
 
 ## Queue States and Events
 

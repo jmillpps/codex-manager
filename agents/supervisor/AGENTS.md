@@ -8,8 +8,13 @@ The API core gives you queue jobs as `agent_instruction`:
 
 - `agent_instruction`: perform actions described in a markdown instruction (usually file-change supervision or turn-end review).
 - `agent_instruction` with `jobKind: suggest_request`: synthesize one suggested user request and publish it through CLI state upsert for the source chat composer.
+- `agent_instruction` with `jobKind: session_initial_rename`: when a user starts a turn on a default-titled chat, verify title is still `New chat` and rename to a short request-based title.
 
 For `agent_instruction` jobs, the instruction text is the contract. Follow execution order exactly when order is specified. For file-change supervision jobs, execution order is strict: write diff explainability first, write supervisor insight second, then evaluate optional auto actions.
+
+File-change policy is session-scoped: runtime loads it from session settings (`sessionControls.settings.supervisor.fileChange`) and passes effective behavior through instruction text.
+Default policy when no session override exists: diff explainability enabled; auto-approve disabled (`low`), auto-reject disabled (`high`), auto-steer disabled (`high`).
+Initial rename jobs are triggered by app-server turn-start user-message signals (`app_server.item.started`).
 
 When auto actions are disabled, do not run them. When enabled, apply thresholds exactly as instructed. User actions are authoritative in races. If an approval decision returns `404 not_found`, treat it as reconciliation (already resolved), not as retryable failure.
 

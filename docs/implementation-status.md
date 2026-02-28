@@ -38,6 +38,10 @@ Use this with:
   - new user-created chats are initialized with a short sticky default title (`New chat`) and remain renameable via existing rename flow.
   - send message supports optional reasoning effort override (`effort`) and applies it to `turn/start`.
   - session controls API supports persisted per-chat and default tuples via `GET/POST /api/sessions/:sessionId/session-controls` with explicit scope (`session` / `default`), lock-aware default editing (`SESSION_DEFAULTS_LOCKED`), and audit-log transcript entries for control changes (`old -> new`, actor, source=`ui`).
+  - dedicated settings API supports generic per-scope session key/value storage:
+    - `GET /api/sessions/:sessionId/settings` (`scope` and `key` query support)
+    - `POST /api/sessions/:sessionId/settings` (`{ scope, settings, mode }` or `{ scope, key, value }`)
+    - `DELETE /api/sessions/:sessionId/settings/:key` (optional `scope` query)
   - send message applies the persisted session-controls tuple (`model`, approval policy, network access, filesystem sandbox) and accepts optional per-turn overrides for compatibility.
   - thread lifecycle calls (`thread/start`, `thread/fork`, `thread/resume`) optimistically request `experimentalRawEvents` and automatically retry without it when unsupported (`requires experimentalApi capability`) so runtime compatibility is preserved across app-server versions.
   - queue-backed suggest-request APIs:
@@ -58,7 +62,8 @@ Use this with:
       - `AGENT_EXTENSION_PACKAGE_ROOTS`
       - `AGENT_EXTENSION_CONFIGURED_ROOTS`
     - validates manifest/entrypoint/runtime compatibility before activation (including full semver range checks for core/profile ranges).
-    - emits named events (`file_change.approval_requested`, `turn.completed`, `suggest_request.requested`) with fanout deterministic dispatch (`priority`, module name, registration index).
+    - emits named events (`file_change.approval_requested`, `turn.completed`, `suggest_request.requested`) plus app-server signal families (`app_server.<normalized_method>`, `app_server.request.<normalized_method>`) with fanout deterministic dispatch (`priority`, module name, registration index).
+    - supervisor extension subscribes to `app_server.item.started` (user-message turn-start signals) and enqueues `agent_instruction` job kind `session_initial_rename` to rename default-titled chats; worker execution verifies title is still exactly `New chat` before applying `sessions rename`.
     - dispatch enforces first-wins action reconciliation per emitted event: after first `action_result(performed)`, later action requests are normalized as `not_eligible` without executing additional side effects.
     - normalizes handler outputs to typed envelopes (`enqueue_result`, `action_result`, `handler_result`, `handler_error`) with per-handler timeout isolation.
     - exposes queue/execution primitives without hard-coding workflow review logic in API core; repository supervisor workflows (including suggest-request) run through `agent_instruction`.
@@ -91,11 +96,10 @@ Use this with:
 - queue payloads can provide optional extension bootstrap instructions (`bootstrapInstruction`) that core runs once per `(agent session, bootstrap key)` during startup preflight, after system orientation and before job turns.
   - file-change approval requests enqueue agent workflows via event handlers; API core does not include built-in explainability/risk/review processors.
   - `turn.completed` event context snapshots are built from canonical `thread/read(includeTurns)` turn content merged with supplemental ledger entries (supplemental-only fallback if canonical read is unavailable), so end-of-turn supervisor review receives the same transcript model users see.
-  - default supervisor auto-action policy in `agents/supervisor/events.ts` is:
-    - auto-approve enabled at `high` threshold (effectively always eligible).
-    - auto-steer enabled at `med` threshold (ignores low/none risk).
-    - auto-reject disabled.
-    - all three remain environment-overridable via `SUPERVISOR_AUTO_*` flags and thresholds.
+  - file-change supervisor policy is resolved inside the supervisor extension from session settings (`sessionControls.settings.supervisor.fileChange`), not copied through app-server event payloads.
+    - runtime tools expose `getSessionSettings(sessionId)` and optional `getSessionSetting(sessionId, key)` for extension-side settings lookup.
+    - default file-change behavior when no setting is present: diff explainability enabled, auto-approve disabled (`low`), auto-reject disabled (`high`), auto-steer disabled (`high`).
+    - file-change handlers skip enqueue when no file-change function is enabled for that session.
   - turn-completed event emission for agent review is gated by observed per-turn file-change approval anchors (stable `anchorItemId` set), so approval-reconcile polling does not overcount and first-turn review gating remains deterministic.
   - when in-memory turn anchor tracking is absent (for example after API restart), turn-completed gating recovers file-change activity from persisted supplemental approval transcript rows (`approval.request` where `details.method=item/fileChange/requestApproval`) to avoid silently skipping final review.
   - turn-completed dispatch is in-flight deduped per `(threadId, turnId)` and retried up to three attempts (`0ms`, `+60ms`, `+120ms`) before terminal give-up; when handlers are present but no actionable enqueue/action result is returned, dispatch is treated as failed for retry instead of silently succeeding.
@@ -142,7 +146,7 @@ Use this with:
   - Session summaries expose `projectId` (`string | null`) so assigned chats render under project sections and unassigned chats render under `Your chats`.
   - `GET /api/projects/:projectId/agent-sessions` returns owner-scoped agent worker mappings (`agent`, `sessionId`, `systemOwned`) so worker threads are discoverable through API without listing them as normal chats.
   - `GET /api/sessions/:sessionId` supports system-owned worker sessions for transcript/debug visibility; mutating user-chat operations on worker sessions remain rejected with HTTP `403` + `code: "system_session"`.
-  - Session summaries expose `sessionControls` (`model | approvalPolicy | networkAccess | filesystemSandbox`) and retain `approvalPolicy` for backward compatibility.
+  - Session summaries expose `sessionControls` (`model | approvalPolicy | networkAccess | filesystemSandbox | settings`) and retain `approvalPolicy` for backward compatibility.
   - `POST /api/sessions/:sessionId/approval-policy` and `POST /api/sessions/:sessionId/messages` require the target session to resolve via runtime existence checks; unknown/invalid/deleted-after-restart ids return `404 not_found` and do not create session-control metadata entries.
   - `POST /api/sessions/:sessionId/messages` persists per-chat session controls only after turn acceptance (`202`), preventing orphan control writes when `turn/start` fails.
   - Startup prunes stale `sessionControlsById` / `sessionApprovalPolicyById` entries whose session ids are no longer known to active, archived, or loaded runtime threads.
@@ -231,7 +235,7 @@ Use this with:
   - turn-end supervisor output renders as a dedicated thought row:
     - `turn.supervisorReview` (`Turn Supervisor Review`)
   - composer uses a single message input; `Suggest Request` populates that same draft box and `Ctrl+Enter` sends.
-- chat view includes a pinned `Session Controls` panel that defaults to a collapsed summary chip and expands on demand, with explicit Apply/Revert semantics for `Model`, `Approval Policy` (`untrusted` / `on-failure` / `on-request` / `never`), `Network Access` (`restricted` / `enabled`), and `Filesystem Sandbox` (`read-only` / `workspace-write` / `danger-full-access`).
+- chat view includes a pinned `Session Controls` panel that defaults to a collapsed summary chip and expands on demand, with explicit Apply/Revert semantics for `Model`, `Approval Policy` (`untrusted` / `on-failure` / `on-request` / `never`), `Network Access` (`restricted` / `enabled`), `Filesystem Sandbox` (`read-only` / `workspace-write` / `danger-full-access`), and supervisor file-change controls persisted in generic session settings (`Diff Explainability`, `Auto Approve`, `Auto Reject`, `Auto Steer` with per-action thresholds).
 - approval policy values are canonical protocol literals end-to-end (`untrusted`, `on-failure`, `on-request`, `never`).
   - panel also exposes `Thinking Level` (`none` / `minimal` / `low` / `medium` / `high` / `xhigh`) as an immediate per-chat selector (local preference used on send); suggest-request uses a faster effort profile derived from model-supported options to keep request suggestions responsive.
   - after a successful `Apply`, and when switching chats, the panel auto-collapses into the summary chip so controls stay out of the way until reopened.
@@ -267,6 +271,7 @@ Use this with:
   - extension RBAC headers (`x-codex-rbac-token`, `x-codex-role`, `x-codex-actor`)
 - Command coverage:
   - domain commands for system/models/apps/skills/mcp/account/config/runtime/feedback/extensions/orchestrator/projects/sessions.
+  - session settings commands provide first-class generic storage operations (`sessions settings get|set|unset`), including per-key read/update/delete.
   - dedicated approval and tool-input decision commands.
   - websocket stream command (`stream events`) for live event inspection.
   - raw escape hatch (`api request`) for direct endpoint invocation.
@@ -277,7 +282,7 @@ Use this with:
 
 ### API client and contracts
 
-- OpenAPI/client generation covers core session/settings/account/tool-input APIs, but currently does not yet model all newer orchestrator/session-control surfaces in generated helper signatures (for example `/sessions/:id/session-controls`, queue-backed suggested-request jobs endpoint, and orchestrator job inspection/cancel endpoints).
+- OpenAPI/client generation covers core session/settings/account/tool-input APIs, including `/sessions/:id/session-controls`, `/sessions/:id/settings`, and `/projects/:id/agent-sessions`; some newer queue orchestration routes are still not modeled in generated helper signatures (for example queue-backed suggested-request jobs endpoints and orchestrator job inspection/cancel endpoints).
 - Generated API client includes helpers for:
   - project bulk operations,
   - project creation (returns `orchestrationSession: null` under lazy agent-session provisioning),

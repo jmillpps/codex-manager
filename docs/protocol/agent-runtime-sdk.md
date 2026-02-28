@@ -32,6 +32,8 @@ This SDK is provider-neutral. Provider-specific behavior is implemented by runti
 - `AgentRuntimeTools`
   - `enqueueJob(input)`
   - `logger`
+  - optional `getSessionSettings(sessionId)` for extension-side per-session settings lookup
+  - optional `getSessionSetting(sessionId, key)` for extension-side top-level key lookup
 - `AgentEventRegistry`
   - `on(eventType, handler, { priority, timeoutMs })`
 
@@ -107,6 +109,26 @@ Current runtime-emitted event names:
 - `file_change.approval_requested`
 - `turn.completed`
 - `suggest_request.requested`
+- `app_server.<normalized_method>` for app-server notifications
+- `app_server.request.<normalized_method>` for app-server server-initiated requests
+
+Normalization:
+
+- split app-server method on `/`
+- camelCase/PascalCase segments convert to `snake_case`
+- segments join with `.`
+
+Shared app-server signal payload envelope fields:
+
+- `source: "app_server"`
+- `signalType: "notification" | "request"`
+- `eventType`
+- `method`
+- `receivedAt`
+- `context.threadId` / `context.turnId`
+- `params`
+- `session` (`{ id, title, projectId } | null`)
+- `requestId` (request signals only)
 
 ## Related references
 

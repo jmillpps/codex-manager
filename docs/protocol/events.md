@@ -6,6 +6,58 @@ Events are notifications (no id) and server-initiated requests (with id) that st
 
 After a thread is started/resumed, clients MUST continuously read events.
 
+## Complete signal method catalog (stable schema)
+
+Schema sources:
+
+- `packages/codex-protocol/generated/stable/json-schema/ServerNotification.json`
+- `packages/codex-protocol/generated/stable/json-schema/ServerRequest.json`
+
+### Notifications
+
+- `account/login/completed`
+- `account/rateLimits/updated`
+- `account/updated`
+- `app/list/updated`
+- `authStatusChange`
+- `configWarning`
+- `deprecationNotice`
+- `error`
+- `item/agentMessage/delta`
+- `item/commandExecution/outputDelta`
+- `item/commandExecution/terminalInteraction`
+- `item/completed`
+- `item/fileChange/outputDelta`
+- `item/mcpToolCall/progress`
+- `item/plan/delta`
+- `item/reasoning/summaryPartAdded`
+- `item/reasoning/summaryTextDelta`
+- `item/reasoning/textDelta`
+- `item/started`
+- `loginChatGptComplete`
+- `mcpServer/oauthLogin/completed`
+- `rawResponseItem/completed`
+- `sessionConfigured`
+- `thread/compacted`
+- `thread/name/updated`
+- `thread/started`
+- `thread/tokenUsage/updated`
+- `turn/completed`
+- `turn/diff/updated`
+- `turn/plan/updated`
+- `turn/started`
+- `windows/worldWritableWarning`
+
+### Server-initiated requests
+
+- `account/chatgptAuthTokens/refresh`
+- `applyPatchApproval`
+- `execCommandApproval`
+- `item/commandExecution/requestApproval`
+- `item/fileChange/requestApproval`
+- `item/tool/call`
+- `item/tool/requestUserInput`
+
 ### Thread events
 
 #### `thread/started`

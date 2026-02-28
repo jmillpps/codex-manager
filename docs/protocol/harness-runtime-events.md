@@ -27,6 +27,97 @@ Dispatch semantics:
 - handler failure/timeouts are normalized as `handler_error`
 - handler invocation is full fanout; action execution is first-wins reconciled per emit pass (after first `performed`, later action requests become `not_eligible` and are not executed)
 
+## App-server signal event family
+
+API core forwards Codex app-server signals into extension dispatch so modules can subscribe to native protocol traffic directly (alongside synthesized repository events).
+
+Event name mapping:
+
+- notifications: `app_server.<normalized_method>`
+- server requests: `app_server.request.<normalized_method>`
+
+Method normalization rules:
+
+- split app-server `method` on `/`
+- convert each segment from camelCase/PascalCase to `snake_case`
+- join normalized segments with `.`
+
+Examples:
+
+- `turn/started` -> `app_server.turn.started`
+- `item/fileChange/requestApproval` -> `app_server.request.item.file_change.request_approval`
+- `configWarning` -> `app_server.config_warning`
+
+All app-server signal events share one generic payload envelope:
+
+- `source: "app_server"`
+- `signalType: "notification" | "request"`
+- `eventType` (final emitted extension event name)
+- `method` (original app-server method string)
+- `receivedAt` (ISO timestamp)
+- `context`
+  - `threadId` (`string | null`)
+  - `turnId` (`string | null`)
+- `params` (original `params`, or `null` when absent)
+- `session` (`{ id, title, projectId } | null`) from API metadata when thread context is known
+- `requestId` (`number | string`) for `signalType: "request"` only
+
+Isolation rules:
+
+- thread-scoped signals are not emitted for purged sessions
+- thread-scoped signals are not emitted for system-owned worker sessions
+- process/global signals without thread context still emit
+
+Current app-server method catalog is schema-derived from:
+
+- `packages/codex-protocol/generated/stable/json-schema/ServerNotification.json`
+- `packages/codex-protocol/generated/stable/json-schema/ServerRequest.json`
+
+### Notification methods -> emitted event names
+
+- `account/login/completed` -> `app_server.account.login.completed`
+- `account/rateLimits/updated` -> `app_server.account.rate_limits.updated`
+- `account/updated` -> `app_server.account.updated`
+- `app/list/updated` -> `app_server.app.list.updated`
+- `authStatusChange` -> `app_server.auth_status_change`
+- `configWarning` -> `app_server.config_warning`
+- `deprecationNotice` -> `app_server.deprecation_notice`
+- `error` -> `app_server.error`
+- `item/agentMessage/delta` -> `app_server.item.agent_message.delta`
+- `item/commandExecution/outputDelta` -> `app_server.item.command_execution.output_delta`
+- `item/commandExecution/terminalInteraction` -> `app_server.item.command_execution.terminal_interaction`
+- `item/completed` -> `app_server.item.completed`
+- `item/fileChange/outputDelta` -> `app_server.item.file_change.output_delta`
+- `item/mcpToolCall/progress` -> `app_server.item.mcp_tool_call.progress`
+- `item/plan/delta` -> `app_server.item.plan.delta`
+- `item/reasoning/summaryPartAdded` -> `app_server.item.reasoning.summary_part_added`
+- `item/reasoning/summaryTextDelta` -> `app_server.item.reasoning.summary_text_delta`
+- `item/reasoning/textDelta` -> `app_server.item.reasoning.text_delta`
+- `item/started` -> `app_server.item.started`
+- `loginChatGptComplete` -> `app_server.login_chat_gpt_complete`
+- `mcpServer/oauthLogin/completed` -> `app_server.mcp_server.oauth_login.completed`
+- `rawResponseItem/completed` -> `app_server.raw_response_item.completed`
+- `sessionConfigured` -> `app_server.session_configured`
+- `thread/compacted` -> `app_server.thread.compacted`
+- `thread/name/updated` -> `app_server.thread.name.updated`
+- `thread/started` -> `app_server.thread.started`
+- `thread/tokenUsage/updated` -> `app_server.thread.token_usage.updated`
+- `turn/completed` -> `app_server.turn.completed`
+- `turn/diff/updated` -> `app_server.turn.diff.updated`
+- `turn/plan/updated` -> `app_server.turn.plan.updated`
+- `turn/started` -> `app_server.turn.started`
+- `windows/worldWritableWarning` -> `app_server.windows.world_writable_warning`
+
+### Server-request methods -> emitted event names
+
+- `account/chatgptAuthTokens/refresh` -> `app_server.request.account.chatgpt_auth_tokens.refresh`
+- `applyPatchApproval` -> `app_server.request.apply_patch_approval`
+- `execCommandApproval` -> `app_server.request.exec_command_approval`
+- `item/commandExecution/requestApproval` -> `app_server.request.item.command_execution.request_approval`
+- `item/fileChange/requestApproval` -> `app_server.request.item.file_change.request_approval`
+- `item/tool/call` -> `app_server.request.item.tool.call`
+- `item/tool/requestUserInput` -> `app_server.request.item.tool.request_user_input`
+
 ## Core event names and payloads
 
 ### `file_change.approval_requested`

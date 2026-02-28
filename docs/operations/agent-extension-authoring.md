@@ -21,7 +21,7 @@ Repository-local extensions can still import through:
 Core contract highlights:
 
 - typed runtime events (`AgentRuntimeEvent`)
-- typed tools (`enqueueJob`, `logger`)
+- typed tools (`enqueueJob`, `logger`, optional `getSessionSettings`, optional `getSessionSetting`)
 - typed emit result envelopes (`enqueue_result`, `action_result`, `handler_result`, `handler_error`)
 - deterministic registration options (`priority`, `timeoutMs`)
 
@@ -33,7 +33,7 @@ Core contract highlights:
 agents/
   <agent>/
     extension.manifest.json
-    events.ts
+    events.js|events.mjs|events.ts
     AGENTS.md
     agent.config.json
     playbooks/
@@ -113,11 +113,30 @@ Runtime dispatch semantics:
 - per-handler timeout isolation
 - one failing/timed-out handler does not block others
 
-Current API core event names:
+Current API core event families:
 
-- `file_change.approval_requested`
-- `turn.completed`
-- `suggest_request.requested`
+- synthesized workflow events:
+  - `file_change.approval_requested`
+  - `turn.completed`
+  - `suggest_request.requested`
+- app-server notification pass-through:
+  - `app_server.<normalized_method>`
+- app-server server-request pass-through:
+  - `app_server.request.<normalized_method>`
+
+`<normalized_method>` uses protocol method normalization:
+
+- split app-server method on `/`
+- camelCase/PascalCase segments convert to `snake_case`
+- segments join with `.`
+
+Examples:
+
+- `app_server.turn.started`
+- `app_server.item.reasoning.summary_text_delta`
+- `app_server.request.item.file_change.request_approval`
+
+See `docs/protocol/harness-runtime-events.md` for the full method-to-event map and shared app-server signal envelope fields.
 
 ## Handler output contract
 

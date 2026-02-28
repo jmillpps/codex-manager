@@ -122,7 +122,8 @@ Reload success:
       "events": [
         "file_change.approval_requested",
         "turn.completed",
-        "suggest_request.requested"
+        "suggest_request.requested",
+        "app_server.item.started"
       ]
     }
   ]

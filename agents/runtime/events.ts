@@ -1,5 +1,5 @@
 /**
- * Shared runtime contracts for agent extension event modules under `agents/<agent>/events.(ts|js|mjs)`.
+ * Shared runtime contracts for agent extension event modules under `agents/<agent>/events.(js|mjs|ts)`.
  *
  * This file is a thin alias layer over the canonical runtime SDK.
  */

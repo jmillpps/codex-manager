@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Use this playbook only for turn-control actions that are directly requested by supervisor jobs. This playbook is intentionally narrow. The supervisor is not responsible for general chat/session lifecycle operations such as creating chats, sending user messages, renaming chats, archiving chats, or deleting chats.
+Use this playbook only for turn-control actions that are directly requested by supervisor jobs. This playbook is intentionally narrow. The supervisor is not responsible for general chat/session lifecycle operations such as creating chats, sending user messages, archiving chats, or deleting chats. Default-title rename handling is a separate workflow documented in `playbooks/orchestrator-jobs-and-suggested-request.md` (`jobKind: session_initial_rename`).
 
 Primary API reference surface: `apps/api/src/index.ts`
 
