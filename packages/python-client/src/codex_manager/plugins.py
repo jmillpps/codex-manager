@@ -25,7 +25,9 @@ class PluginRegistry:
                 self._lifecycles.append(plugin)
         self.start()
 
-    def register_async(self, client: AsyncCodexManager, plugins: Iterable[AsyncClientPlugin]) -> None:
+    def register_async(
+        self, client: AsyncCodexManager, plugins: Iterable[AsyncClientPlugin]
+    ) -> None:
         for plugin in plugins:
             plugin.register(client)
             if isinstance(plugin, PluginLifecycle):

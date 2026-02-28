@@ -21,7 +21,7 @@ class ClientConfig:
     headers: dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def from_env(cls) -> "ClientConfig":
+    def from_env(cls) -> ClientConfig:
         base_url = os.getenv("CODEX_MANAGER_API_BASE", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
         api_prefix = normalize_prefix(os.getenv("CODEX_MANAGER_API_PREFIX", DEFAULT_API_PREFIX))
         timeout_ms = _parse_positive_int(os.getenv("CODEX_MANAGER_TIMEOUT_MS"))
@@ -44,7 +44,12 @@ class ClientConfig:
         if actor:
             headers["x-codex-rbac-actor"] = actor
 
-        return cls(base_url=base_url, api_prefix=api_prefix, timeout_seconds=timeout_seconds, headers=headers)
+        return cls(
+            base_url=base_url,
+            api_prefix=api_prefix,
+            timeout_seconds=timeout_seconds,
+            headers=headers,
+        )
 
     @classmethod
     def from_profile(
@@ -52,7 +57,7 @@ class ClientConfig:
         profile: str | None = None,
         *,
         config_path: str | Path | None = None,
-    ) -> "ClientConfig":
+    ) -> ClientConfig:
         payload = load_cli_config(config_path=config_path)
         profiles = payload.get("profiles") if isinstance(payload, dict) else None
         current_profile = payload.get("currentProfile") if isinstance(payload, dict) else None
@@ -65,7 +70,9 @@ class ClientConfig:
             profile_entry = dict(profiles["local"])
 
         base_url = _trim_or_default(profile_entry.get("baseUrl"), DEFAULT_BASE_URL)
-        api_prefix = normalize_prefix(_trim_or_default(profile_entry.get("apiPrefix"), DEFAULT_API_PREFIX))
+        api_prefix = normalize_prefix(
+            _trim_or_default(profile_entry.get("apiPrefix"), DEFAULT_API_PREFIX)
+        )
         timeout_ms = _parse_positive_int(profile_entry.get("timeoutMs"))
         timeout_seconds = (timeout_ms / 1000.0) if timeout_ms else DEFAULT_TIMEOUT_SECONDS
 
@@ -73,7 +80,12 @@ class ClientConfig:
         raw_headers = profile_entry.get("headers")
         if isinstance(raw_headers, dict):
             for key, value in raw_headers.items():
-                if isinstance(key, str) and isinstance(value, str) and key.strip() and value.strip():
+                if (
+                    isinstance(key, str)
+                    and isinstance(value, str)
+                    and key.strip()
+                    and value.strip()
+                ):
                     headers[key] = value
 
         auth = profile_entry.get("auth")
@@ -94,7 +106,12 @@ class ClientConfig:
             if actor:
                 headers["x-codex-rbac-actor"] = actor
 
-        return cls(base_url=base_url, api_prefix=api_prefix, timeout_seconds=timeout_seconds, headers=headers)
+        return cls(
+            base_url=base_url,
+            api_prefix=api_prefix,
+            timeout_seconds=timeout_seconds,
+            headers=headers,
+        )
 
 
 def normalize_prefix(value: str | None) -> str:

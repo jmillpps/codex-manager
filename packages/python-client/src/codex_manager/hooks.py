@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from .protocols import AsyncHookMiddleware, SyncHookMiddleware
 
@@ -39,7 +40,9 @@ class HookRegistry:
     def add_error(self, operation: str, hook: ErrorHook) -> None:
         self._error.setdefault(operation, []).append(hook)
 
-    def add_middleware(self, operation: str, middleware: SyncHookMiddleware | AsyncHookMiddleware) -> None:
+    def add_middleware(
+        self, operation: str, middleware: SyncHookMiddleware | AsyncHookMiddleware
+    ) -> None:
         self.add_before(operation, _require_hook_callable(middleware, "before"))
         self.add_after(operation, _require_hook_callable(middleware, "after"))
         self.add_error(operation, _require_hook_callable(middleware, "on_error"))

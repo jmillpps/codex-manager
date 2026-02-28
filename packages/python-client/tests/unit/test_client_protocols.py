@@ -88,7 +88,9 @@ def test_retry_policy_retries_get_requests() -> None:
             return {"ok": True}
 
     class RetryPolicy:
-        def should_retry(self, *, attempt: int, error: Exception | None, status_code: int | None) -> bool:
+        def should_retry(
+            self, *, attempt: int, error: Exception | None, status_code: int | None
+        ) -> bool:
             assert error is not None
             assert status_code is None
             return attempt == 1
@@ -117,7 +119,9 @@ def test_retry_policy_does_not_retry_post_without_opt_in() -> None:
     class RetryPolicy:
         calls = 0
 
-        def should_retry(self, *, attempt: int, error: Exception | None, status_code: int | None) -> bool:
+        def should_retry(
+            self, *, attempt: int, error: Exception | None, status_code: int | None
+        ) -> bool:
             self.calls += 1
             return True
 
@@ -146,7 +150,9 @@ def test_retry_policy_retries_post_when_operation_opted_in() -> None:
             return {"ok": True}
 
     class RetryPolicy:
-        def should_retry(self, *, attempt: int, error: Exception | None, status_code: int | None) -> bool:
+        def should_retry(
+            self, *, attempt: int, error: Exception | None, status_code: int | None
+        ) -> bool:
             return attempt == 1
 
         def next_delay_seconds(self, *, attempt: int) -> float:

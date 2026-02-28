@@ -27,13 +27,13 @@ from ..generated import (
     SessionSettingsLockedResponse,
     SessionSettingsSetResponse,
     SetSessionSettingsRequest,
-    SuggestSessionRequestNoContextResponse,
-    SuggestSessionRequestSuccessResponse,
     SuggestedRequestBody,
     SuggestedRequestQueuedResponse,
     SuggestedRequestUpsertBody,
     SuggestedRequestUpsertErrorResponse,
     SuggestedRequestUpsertResponse,
+    SuggestSessionRequestNoContextResponse,
+    SuggestSessionRequestSuccessResponse,
     SystemSessionError,
     ToolInputDecisionErrorResponse,
     ToolInputDecisionNotFoundResponse,
@@ -175,7 +175,9 @@ TYPED_OPERATION_CONTRACTS: dict[str, TypedOperationContract] = {
 }
 
 
-TYPED_OPERATION_IDS: set[str] = {contract.operation_id for contract in TYPED_OPERATION_CONTRACTS.values()}
+TYPED_OPERATION_IDS: set[str] = {
+    contract.operation_id for contract in TYPED_OPERATION_CONTRACTS.values()
+}
 
 STRICT_VALIDATION_OPERATION_KEYS: set[str] = {
     "sessions.create",

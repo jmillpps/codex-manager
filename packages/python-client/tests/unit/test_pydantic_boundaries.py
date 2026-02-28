@@ -245,7 +245,9 @@ def test_strict_validation_error_does_not_retry() -> None:
         def __init__(self) -> None:
             self.should_retry_calls = 0
 
-        def should_retry(self, *, attempt: int, error: Exception | None, status_code: int | None) -> bool:
+        def should_retry(
+            self, *, attempt: int, error: Exception | None, status_code: int | None
+        ) -> bool:
             self.should_retry_calls += 1
             return True
 
