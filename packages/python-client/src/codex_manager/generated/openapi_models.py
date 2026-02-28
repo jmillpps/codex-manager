@@ -97,6 +97,35 @@ class DeletedSessionPayload(BaseModel):
     message: str = ...
     deleted_at: str = Field(..., alias="deletedAt")
 
+class DynamicToolCallImageContentItem(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+    type: Literal["inputImage"] = ...
+    image_url: str = Field(..., alias="imageUrl")
+
+class DynamicToolCallTextContentItem(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+    type: Literal["inputText"] = ...
+    text: str = ...
+
+class ListSessionToolCallsResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+    data: list[PendingToolCall] = ...
+
+class PendingToolCall(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+    request_id: str = Field(..., alias="requestId")
+    method: Literal["item/tool/call"] = ...
+    thread_id: str = Field(..., alias="threadId")
+    turn_id: str | None = Field(..., alias="turnId")
+    item_id: str | None = Field(..., alias="itemId")
+    call_id: str | None = Field(..., alias="callId")
+    tool: str = ...
+    arguments: Any = ...
+    summary: str = ...
+    details: dict[str, Any] = ...
+    created_at: str = Field(..., alias="createdAt")
+    status: Literal["pending"] = ...
+
 class QueueErrorResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
     status: Literal["error"] = ...
@@ -279,6 +308,35 @@ class SystemSessionError(BaseModel):
     session_id: str = Field(..., alias="sessionId")
     message: str = ...
 
+class ToolCallResponseConflictResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+    status: Literal["conflict"] = ...
+    code: Literal["in_flight"] = ...
+    request_id: str = Field(..., alias="requestId")
+
+class ToolCallResponseErrorResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+    status: Literal["error"] = ...
+    request_id: str = Field(..., alias="requestId")
+
+class ToolCallResponseNotFoundResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+    status: Literal["not_found"] = ...
+    request_id: str = Field(..., alias="requestId")
+
+class ToolCallResponseRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+    success: bool | None = None
+    text: str | None = None
+    content_items: list[DynamicToolCallOutputContentItem] | None = Field(None, alias="contentItems")
+    response: Any | None = None
+
+class ToolCallResponseSuccessResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+    status: Literal["ok"] = ...
+    request_id: str = Field(..., alias="requestId")
+    thread_id: str = Field(..., alias="threadId")
+
 class ToolInputDecisionErrorResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
     status: Literal["error"] = ...
@@ -317,6 +375,7 @@ class TranscriptEntry(BaseModel):
     completed_at: int | None = Field(None, alias="completedAt")
     status: Literal["streaming", "complete", "canceled", "error"] = ...
 
+DynamicToolCallOutputContentItem: TypeAlias = DynamicToolCallTextContentItem | DynamicToolCallImageContentItem
 SessionSettingsGetResponse: TypeAlias = SessionSettingsListResponse | SessionSettingsKeyResponse
 SuggestSessionRequestSuccessResponse: TypeAlias = SuggestSessionRequestOkResponse | SuggestSessionRequestFallbackResponse
 SuggestedRequestUpsertErrorResponse: TypeAlias = ApiValidationError | SuggestedRequestUpsertInvalidResponse
@@ -335,8 +394,13 @@ __all__ = [
     "CreateSessionRequest",
     "CreateSessionResponse",
     "DeletedSessionPayload",
+    "DynamicToolCallImageContentItem",
+    "DynamicToolCallOutputContentItem",
+    "DynamicToolCallTextContentItem",
     "FilesystemSandbox",
+    "ListSessionToolCallsResponse",
     "NetworkAccess",
+    "PendingToolCall",
     "QueueErrorResponse",
     "ReadSessionResponse",
     "SendSessionMessageAcceptedResponse",
@@ -365,6 +429,11 @@ __all__ = [
     "SuggestedRequestUpsertInvalidResponse",
     "SuggestedRequestUpsertResponse",
     "SystemSessionError",
+    "ToolCallResponseConflictResponse",
+    "ToolCallResponseErrorResponse",
+    "ToolCallResponseNotFoundResponse",
+    "ToolCallResponseRequest",
+    "ToolCallResponseSuccessResponse",
     "ToolInputDecisionErrorResponse",
     "ToolInputDecisionNotFoundResponse",
     "ToolInputDecisionOptionAnswers",

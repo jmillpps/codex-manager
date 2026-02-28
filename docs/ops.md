@@ -35,7 +35,7 @@ The operations manual was split into focused documents to keep setup, validation
 - `docs/implementation-status.md`
   - Current code-level feature coverage and user-visible API/workflow semantics.
 - `docs/python/introduction.md`
-  - Python SDK entrypoint and links to focused Python client docs (`quickstart`, `practical-recipes`, `api-surface`, `streaming-and-handlers`, `settings-and-automation`, `protocol-interfaces`, `typed-models`, `development-and-packaging`).
+  - Python SDK entrypoint and links to focused Python client docs (`quickstart`, `practical-recipes`, `api-surface`, `streaming-and-handlers`, `remote-skills`, `settings-and-automation`, `protocol-interfaces`, `typed-models`, `development-and-packaging`).
 
 ## Fast-path commands
 

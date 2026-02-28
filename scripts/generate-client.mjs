@@ -91,6 +91,21 @@ export type PendingToolInput = {
   status: "pending";
 };
 
+export type PendingToolCall = {
+  requestId: string;
+  method: string;
+  threadId: string;
+  turnId: string | null;
+  itemId: string | null;
+  callId: string | null;
+  tool: string;
+  arguments: unknown;
+  summary: string;
+  details: Record<string, unknown>;
+  createdAt: string;
+  status: "pending";
+};
+
 export type ModelEntry = Record<string, unknown>;
 export type McpServerStatusEntry = Record<string, unknown>;
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -749,6 +764,15 @@ export async function listSessionToolInput(sessionId: string, baseUrl = "/api"):
   );
 }
 
+export async function listSessionToolCalls(sessionId: string, baseUrl = "/api"): Promise<{ data: Array<PendingToolCall> }> {
+  return requestJson<{ data: Array<PendingToolCall> }>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/tool-calls",
+    {},
+    "list tool calls failed",
+    [200, 403, 410]
+  );
+}
+
 export async function getSessionControls(sessionId: string, baseUrl = "/api"): Promise<Record<string, unknown>> {
   return requestJson<Record<string, unknown>>(
     baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/session-controls",
@@ -909,6 +933,28 @@ export async function interruptSession(
     },
     "interrupt session failed",
     [200, 409, 410]
+  );
+}
+
+export async function respondToolCall(
+  requestId: string,
+  body: {
+    success?: boolean;
+    text?: string;
+    contentItems?: Array<{ type: "inputText"; text: string } | { type: "inputImage"; imageUrl: string }>;
+    response?: unknown;
+  },
+  baseUrl = "/api"
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/tool-calls/" + encodeURIComponent(requestId) + "/response",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    },
+    "respond tool call failed",
+    [200, 404, 409]
   );
 }
 

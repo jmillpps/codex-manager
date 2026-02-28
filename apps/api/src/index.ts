@@ -207,6 +207,38 @@ type PendingToolUserInputRecord = PendingToolUserInput & {
   rpcId: string | number;
 };
 
+type DynamicToolCallRequestMethod = "item/tool/call";
+
+type DynamicToolCallOutputContentItem =
+  | {
+      type: "inputText";
+      text: string;
+    }
+  | {
+      type: "inputImage";
+      imageUrl: string;
+    };
+
+type PendingDynamicToolCall = {
+  requestId: string;
+  method: DynamicToolCallRequestMethod;
+  threadId: string;
+  turnId: string | null;
+  itemId: string | null;
+  callId: string | null;
+  tool: string;
+  arguments: unknown;
+  summary: string;
+  details: Record<string, unknown>;
+  createdAt: string;
+  status: "pending";
+};
+
+type PendingDynamicToolCallRecord = PendingDynamicToolCall & {
+  rpcId: string | number;
+  transcriptMessageId: string;
+};
+
 type CapabilityStatus = "available" | "disabled" | "unknown";
 
 type CapabilityEntry = {
@@ -468,6 +500,24 @@ const toolUserInputDecisionBodySchema = z.object({
   response: z.unknown().optional()
 });
 
+const dynamicToolCallOutputContentItemSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("inputText"),
+    text: z.string()
+  }),
+  z.object({
+    type: z.literal("inputImage"),
+    imageUrl: z.string().trim().min(1)
+  })
+]);
+
+const dynamicToolCallResponseBodySchema = z.object({
+  success: z.boolean().optional(),
+  contentItems: z.array(dynamicToolCallOutputContentItemSchema).optional(),
+  text: z.string().optional(),
+  response: z.unknown().optional()
+});
+
 const mcpOauthLoginBodySchema = z.object({
   scopes: z.array(z.string()).optional(),
   timeoutSecs: z.coerce.number().int().positive().optional()
@@ -712,6 +762,8 @@ const codexRuntime = new CodexRuntimeClient({
 const activeTurnByThread = new Map<string, string>();
 const pendingApprovals = new Map<string, PendingApprovalRecord>();
 const pendingToolUserInputs = new Map<string, PendingToolUserInputRecord>();
+const pendingDynamicToolCalls = new Map<string, PendingDynamicToolCallRecord>();
+const respondingDynamicToolCalls = new Set<string>();
 const purgedSessionIds = new Set<string>();
 const supplementalTranscriptByThread = new Map<string, Map<string, SupplementalTranscriptEntry>>();
 const fileChangeEventAnchorsByTurn = new Map<string, Set<string>>();
@@ -725,6 +777,7 @@ const runtimeTurnSignalWaitersByKey = new Map<string, Set<() => void>>();
 const suggestedRequestStateByRequestKey = new Map<string, SuggestedRequestRuntimeState>();
 const MAX_SUGGESTED_REQUEST_STATE_ENTRIES = 2_000;
 let supplementalTranscriptSequence = 1;
+let dynamicToolCallTranscriptSequence = 1;
 let supplementalTranscriptPersistTimer: NodeJS.Timeout | null = null;
 let supplementalTranscriptPersistQueued = false;
 let supplementalTranscriptPersistInFlight: Promise<void> | null = null;
@@ -942,6 +995,7 @@ const capabilityMethodProbes: Array<CapabilityMethodProbe> = [
   { method: "app/list", probeParams: { limit: 1 } },
   { method: "config/mcpServer/reload", probeParams: { _probe: true } },
   { method: "mcpServer/oauth/login", probeParams: {} },
+  { method: "item/tool/call", probeParams: {} },
   { method: "item/tool/requestUserInput", probeParams: {} },
   { method: "tool/requestUserInput", probeParams: {} },
   { method: "config/read", probeParams: {} },
@@ -5565,6 +5619,35 @@ function listPendingToolInputsByThread(threadId: string): Array<PendingToolUserI
   return requests;
 }
 
+function hasPendingToolCallsForThread(threadId: string): boolean {
+  for (const item of pendingDynamicToolCalls.values()) {
+    if (item.threadId === threadId && item.status === "pending") {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function toPublicDynamicToolCall(record: PendingDynamicToolCallRecord): PendingDynamicToolCall {
+  const { rpcId: _rpcId, transcriptMessageId: _transcriptMessageId, ...rest } = record;
+  return rest;
+}
+
+function listPendingDynamicToolCallsByThread(threadId: string): Array<PendingDynamicToolCall> {
+  const requests: Array<PendingDynamicToolCall> = [];
+  for (const request of pendingDynamicToolCalls.values()) {
+    if (request.threadId !== threadId || request.status !== "pending") {
+      continue;
+    }
+
+    requests.push(toPublicDynamicToolCall(request));
+  }
+
+  requests.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  return requests;
+}
+
 function normalizeToolUserInputQuestion(input: unknown): ToolUserInputQuestion | null {
   if (!isObjectRecord(input)) {
     return null;
@@ -5640,6 +5723,58 @@ function createPendingToolUserInput(serverRequest: JsonRpcServerRequest): Pendin
     itemId: extractItemId(serverRequest.params),
     summary: buildToolUserInputSummary(serverRequest.params),
     questions,
+    details: serverRequest.params,
+    createdAt: new Date().toISOString(),
+    status: "pending"
+  };
+}
+
+function buildDynamicToolCallSummary(params: Record<string, unknown>): string {
+  const tool = typeof params.tool === "string" && params.tool.trim().length > 0 ? params.tool.trim() : "unknown";
+  return `Tool call requested: ${tool}`;
+}
+
+function nextDynamicToolCallTranscriptMessageId(requestId: string): string {
+  const sequence = dynamicToolCallTranscriptSequence++;
+  return `tool-call-${requestId}-${sequence}`;
+}
+
+function createPendingDynamicToolCall(serverRequest: JsonRpcServerRequest): PendingDynamicToolCallRecord | null {
+  if (serverRequest.method !== "item/tool/call") {
+    return null;
+  }
+
+  if (!isObjectRecord(serverRequest.params)) {
+    return null;
+  }
+
+  const threadId = extractThreadId(serverRequest.params);
+  if (!threadId) {
+    return null;
+  }
+
+  const tool = typeof serverRequest.params.tool === "string" ? serverRequest.params.tool.trim() : "";
+  if (!tool) {
+    return null;
+  }
+
+  const callIdValue = serverRequest.params.callId;
+  const callId = typeof callIdValue === "string" && callIdValue.trim().length > 0 ? callIdValue.trim() : null;
+
+  const requestId = String(serverRequest.id);
+  const turnId = extractTurnId(serverRequest.params) ?? activeTurnByThread.get(threadId) ?? null;
+  return {
+    requestId,
+    rpcId: serverRequest.id,
+    transcriptMessageId: nextDynamicToolCallTranscriptMessageId(requestId),
+    method: serverRequest.method,
+    threadId,
+    turnId,
+    itemId: extractItemId(serverRequest.params),
+    callId,
+    tool,
+    arguments: serverRequest.params.arguments ?? null,
+    summary: buildDynamicToolCallSummary(serverRequest.params),
     details: serverRequest.params,
     createdAt: new Date().toISOString(),
     status: "pending"
@@ -5731,6 +5866,52 @@ function toolInputResolutionToTranscriptEntry(
   };
 }
 
+function dynamicToolCallToTranscriptEntry(request: PendingDynamicToolCallRecord): TranscriptEntry {
+  const startedAt = coerceEpochMs(request.createdAt) ?? Date.now();
+  return {
+    messageId: request.transcriptMessageId,
+    turnId: request.turnId ?? "tool-call",
+    role: "system",
+    type: "tool_call.request",
+    content: request.summary,
+    details: stringifyDetails({
+      method: request.method,
+      createdAt: request.createdAt,
+      tool: request.tool,
+      callId: request.callId,
+      arguments: request.arguments,
+      ...request.details
+    }),
+    startedAt,
+    status: "complete"
+  };
+}
+
+function dynamicToolCallResolutionToTranscriptEntry(
+  request: PendingDynamicToolCallRecord,
+  payload: { status: string; success?: boolean }
+): TranscriptEntry {
+  const statusText = typeof payload.status === "string" ? payload.status : "resolved";
+  const successSuffix = typeof payload.success === "boolean" ? ` (success=${payload.success ? "true" : "false"})` : "";
+  const completedAt = Date.now();
+  const startedAt = coerceEpochMs(request.createdAt) ?? completedAt;
+  return {
+    messageId: request.transcriptMessageId,
+    turnId: request.turnId ?? "tool-call",
+    role: "system",
+    type: "tool_call.resolved",
+    content: `Tool call ${statusText}${successSuffix}`,
+    details: stringifyDetails({
+      requestId: request.requestId,
+      status: statusText,
+      ...(typeof payload.success === "boolean" ? { success: payload.success } : {})
+    }),
+    startedAt,
+    completedAt,
+    status: "complete"
+  };
+}
+
 function clearPendingToolInputsForThread(threadId: string): void {
   for (const [requestId, pending] of pendingToolUserInputs.entries()) {
     if (pending.threadId !== threadId) {
@@ -5769,6 +5950,58 @@ function clearPendingToolInputsForTurn(threadId: string, turnId: string): void {
   }
 }
 
+function clearPendingDynamicToolCallsForThread(threadId: string): void {
+  for (const [requestId, pending] of pendingDynamicToolCalls.entries()) {
+    if (pending.threadId !== threadId) {
+      continue;
+    }
+
+    upsertSupplementalTranscriptEntry(
+      threadId,
+      dynamicToolCallResolutionToTranscriptEntry(pending, {
+        status: "expired",
+        success: false
+      })
+    );
+    pendingDynamicToolCalls.delete(requestId);
+    publishToSockets(
+      "tool_call_resolved",
+      {
+        requestId,
+        status: "expired",
+        success: false
+      },
+      threadId
+    );
+  }
+}
+
+function clearPendingDynamicToolCallsForTurn(threadId: string, turnId: string): void {
+  for (const [requestId, pending] of pendingDynamicToolCalls.entries()) {
+    if (pending.threadId !== threadId || pending.turnId !== turnId) {
+      continue;
+    }
+
+    upsertSupplementalTranscriptEntry(
+      threadId,
+      dynamicToolCallResolutionToTranscriptEntry(pending, {
+        status: "expired",
+        success: false
+      })
+    );
+    pendingDynamicToolCalls.delete(requestId);
+    publishToSockets(
+      "tool_call_resolved",
+      {
+        requestId,
+        status: "expired",
+        success: false
+      },
+      threadId
+    );
+  }
+}
+
 function toolUserInputResponsePayload(body: {
   decision: ToolUserInputDecisionInput;
   answers?: Record<string, { answers: Array<string> }>;
@@ -5786,6 +6019,29 @@ function toolUserInputResponsePayload(body: {
 
   return {
     status: body.decision
+  };
+}
+
+function dynamicToolCallResponsePayload(body: {
+  success?: boolean;
+  contentItems?: Array<DynamicToolCallOutputContentItem>;
+  text?: string;
+  response?: unknown;
+}): unknown {
+  if (body.response !== undefined) {
+    return body.response;
+  }
+
+  const success = body.success ?? true;
+  const contentItems = Array.isArray(body.contentItems)
+    ? body.contentItems
+    : typeof body.text === "string"
+      ? [{ type: "inputText", text: body.text }]
+      : [];
+
+  return {
+    success,
+    contentItems
   };
 }
 
@@ -6021,6 +6277,7 @@ function capabilityFeatures(): Record<string, boolean> {
     toolUserInput:
       methodCapabilityStatus("item/tool/requestUserInput") === "available" ||
       methodCapabilityStatus("tool/requestUserInput") === "available",
+    dynamicToolCall: methodCapabilityStatus("item/tool/call") === "available",
     threadFork: methodCapabilityStatus("thread/fork") === "available",
     threadCompact: methodCapabilityStatus("thread/compact/start") === "available",
     threadRollback: methodCapabilityStatus("thread/rollback") === "available",
@@ -6282,6 +6539,7 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
     activeTurnByThread.has(sessionId) ||
     hasPendingApprovalsForThread(sessionId) ||
     hasPendingToolInputsForThread(sessionId) ||
+    hasPendingToolCallsForThread(sessionId) ||
     sessionReadSucceeded ||
     knownPath !== null;
   if (!existsInMemory && deletedPaths.length === 0) {
@@ -6313,9 +6571,10 @@ async function hardDeleteSession(sessionId: string): Promise<HardDeleteSessionOu
 
   activeTurnByThread.delete(sessionId);
   clearFileChangeEventsForThread(sessionId);
-  clearSupplementalTranscriptEntries(sessionId);
   clearPendingApprovalsForThread(sessionId);
   clearPendingToolInputsForThread(sessionId);
+  clearPendingDynamicToolCallsForThread(sessionId);
+  clearSupplementalTranscriptEntries(sessionId);
   purgedSessionIds.add(sessionId);
 
   const wasSystemOwned = isSystemOwnedSession(sessionId);
@@ -7961,6 +8220,7 @@ codexRuntime.on("notification", (notification: JsonRpcNotification) => {
 
         clearPendingApprovalsForTurn(params.threadId, params.turn.id);
         clearPendingToolInputsForTurn(params.threadId, params.turn.id);
+        clearPendingDynamicToolCallsForTurn(params.threadId, params.turn.id);
 
         if (notification.method === "turn/completed" && !isSystemOwnedSession(params.threadId)) {
           maybeEmitTurnCompletedAgentEvent(params.threadId, params.turn.id);
@@ -8086,6 +8346,37 @@ codexRuntime.on("serverRequest", (serverRequest: JsonRpcServerRequest) => {
       return;
     }
 
+    const dynamicToolCall = createPendingDynamicToolCall(serverRequest);
+    if (dynamicToolCall) {
+      upsertAgentWorkerLifecycleEntry({
+        sessionId: requestThreadId,
+        messageId: lifecycleMessageId,
+        turnId: lifecycleTurnId,
+        status: "complete",
+        content: "Auto-failed dynamic tool-call request in system-owned session.",
+        details: {
+          phase: "system_request_reconciliation",
+          requestId: String(serverRequest.id),
+          method: serverRequest.method,
+          decision: "error"
+        }
+      });
+      void codexRuntime
+        .respond(serverRequest.id, {
+          success: false,
+          contentItems: [
+            {
+              type: "inputText",
+              text: "dynamic tool calls are not supported in system-owned sessions"
+            }
+          ]
+        })
+        .catch((error) => {
+          app.log.warn({ error, threadId: requestThreadId }, "failed to fail system session dynamic tool call request");
+        });
+      return;
+    }
+
     upsertAgentWorkerLifecycleEntry({
       sessionId: requestThreadId,
       messageId: lifecycleMessageId,
@@ -8151,6 +8442,14 @@ codexRuntime.on("serverRequest", (serverRequest: JsonRpcServerRequest) => {
     pendingToolUserInputs.set(toolUserInput.requestId, toolUserInput);
     upsertSupplementalTranscriptEntry(toolUserInput.threadId, toolInputToTranscriptEntry(toolUserInput));
     publishToSockets("tool_user_input_requested", toPublicToolUserInput(toolUserInput), toolUserInput.threadId);
+    return;
+  }
+
+  const dynamicToolCall = createPendingDynamicToolCall(serverRequest);
+  if (dynamicToolCall) {
+    pendingDynamicToolCalls.set(dynamicToolCall.requestId, dynamicToolCall);
+    upsertSupplementalTranscriptEntry(dynamicToolCall.threadId, dynamicToolCallToTranscriptEntry(dynamicToolCall));
+    publishToSockets("tool_call_requested", toPublicDynamicToolCall(dynamicToolCall), dynamicToolCall.threadId);
     return;
   }
 
@@ -9864,6 +10163,23 @@ app.get("/api/sessions/:sessionId/tool-input", async (request, reply) => {
   };
 });
 
+app.get("/api/sessions/:sessionId/tool-calls", async (request, reply) => {
+  const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
+  if (isSessionPurged(params.sessionId)) {
+    reply.code(410);
+    return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
+  }
+
+  return {
+    data: listPendingDynamicToolCallsByThread(params.sessionId)
+  };
+});
+
 app.post("/api/sessions/:sessionId/resume", async (request, reply) => {
   const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
   if (isSessionPurged(params.sessionId)) {
@@ -10609,6 +10925,74 @@ app.post("/api/sessions/:sessionId/interrupt", async (request, reply) => {
   };
 });
 
+app.post("/api/tool-calls/:requestId/response", async (request, reply) => {
+  const params = z.object({ requestId: z.string().min(1) }).parse(request.params);
+  const body = dynamicToolCallResponseBodySchema.parse(request.body);
+
+  if (respondingDynamicToolCalls.has(params.requestId)) {
+    reply.code(409);
+    return {
+      status: "conflict",
+      code: "in_flight",
+      requestId: params.requestId
+    };
+  }
+
+  const pending = pendingDynamicToolCalls.get(params.requestId);
+  if (!pending) {
+    reply.code(404);
+    return {
+      status: "not_found",
+      requestId: params.requestId
+    };
+  }
+
+  respondingDynamicToolCalls.add(params.requestId);
+  pendingDynamicToolCalls.delete(params.requestId);
+  try {
+    const payload = dynamicToolCallResponsePayload(body);
+    const normalizedPayload = isObjectRecord(payload) ? payload : {};
+    const success = typeof normalizedPayload.success === "boolean" ? normalizedPayload.success : true;
+    await codexRuntime.respond(pending.rpcId, payload);
+    if (!isSessionPurged(pending.threadId)) {
+      upsertSupplementalTranscriptEntry(
+        pending.threadId,
+        dynamicToolCallResolutionToTranscriptEntry(pending, {
+          status: "resolved",
+          success
+        })
+      );
+      publishToSockets(
+        "tool_call_resolved",
+        {
+          requestId: params.requestId,
+          status: "resolved",
+          success
+        },
+        pending.threadId
+      );
+    }
+
+    return {
+      status: "ok",
+      requestId: params.requestId,
+      threadId: pending.threadId
+    };
+  } catch (error) {
+    if (!isSessionPurged(pending.threadId)) {
+      pendingDynamicToolCalls.set(params.requestId, pending);
+    }
+    app.log.error({ error, requestId: params.requestId }, "failed to submit dynamic tool call response");
+    reply.code(500);
+    return {
+      status: "error",
+      requestId: params.requestId
+    };
+  } finally {
+    respondingDynamicToolCalls.delete(params.requestId);
+  }
+});
+
 app.post("/api/tool-input/:requestId/decision", async (request, reply) => {
   const params = z.object({ requestId: z.string().min(1) }).parse(request.params);
   const body = toolUserInputDecisionBodySchema.parse(request.body);
@@ -10768,6 +11152,8 @@ app.addHook("onClose", async () => {
   projectAgentSessionEnsureInFlightByKey.clear();
   pendingApprovals.clear();
   pendingToolUserInputs.clear();
+  pendingDynamicToolCalls.clear();
+  respondingDynamicToolCalls.clear();
   if (orchestratorQueue) {
     await orchestratorQueue.stop({ drainMs: 2_000 });
   }

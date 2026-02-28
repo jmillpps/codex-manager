@@ -34,6 +34,10 @@ def _namespace_parts(namespace: str) -> list[str]:
     return [part for part in namespace.split(".") if part]
 
 
+def _omit_none_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if value is not None}
+
+
 class RawApi:
     def __init__(self, request: RequestFn) -> None:
         self._request = request
@@ -194,7 +198,7 @@ class McpApi:
             "mcp.oauth.login",
             "POST",
             f"/mcp/servers/{server_name}/oauth/login",
-            json_body={"scopes": scopes, "timeoutSecs": timeout_secs},
+            json_body=_omit_none_fields({"scopes": scopes, "timeoutSecs": timeout_secs}),
             allow_statuses=(200, 501),
         )
 
@@ -286,8 +290,8 @@ class ConfigApi:
                 "keyPath": key_path,
                 "mergeStrategy": merge_strategy,
                 "value": value,
-                "expectedVersion": expected_version,
-                "filePath": file_path,
+                **({"expectedVersion": expected_version} if expected_version is not None else {}),
+                **({"filePath": file_path} if file_path is not None else {}),
             },
             allow_statuses=(200, 501),
         )
@@ -303,7 +307,7 @@ class ConfigApi:
             "config.batch_set",
             "POST",
             "/config/batch",
-            json_body={"edits": edits, "expectedVersion": expected_version, "filePath": file_path},
+            json_body=_omit_none_fields({"edits": edits, "expectedVersion": expected_version, "filePath": file_path}),
             allow_statuses=(200, 501),
         )
 
@@ -317,7 +321,7 @@ class RuntimeApi:
             "runtime.exec",
             "POST",
             "/commands/exec",
-            json_body={"command": command, "cwd": cwd, "timeoutMs": timeout_ms},
+            json_body=_omit_none_fields({"command": command, "cwd": cwd, "timeoutMs": timeout_ms}),
             allow_statuses=(200, 501),
         )
 
@@ -338,12 +342,14 @@ class FeedbackApi:
             "feedback.submit",
             "POST",
             "/feedback",
-            json_body={
-                "classification": classification,
-                "includeLogs": include_logs,
-                "reason": reason,
-                "threadId": thread_id,
-            },
+            json_body=_omit_none_fields(
+                {
+                    "classification": classification,
+                    "includeLogs": include_logs,
+                    "reason": reason,
+                    "threadId": thread_id,
+                }
+            ),
             allow_statuses=(200, 501),
         )
 
@@ -452,8 +458,8 @@ class ApprovalsApi:
             "approvals.decide",
             "POST",
             f"/approvals/{approval_id}/decision",
-            json_body={"decision": decision, "scope": scope},
-            allow_statuses=(200, 404),
+            json_body=_omit_none_fields({"decision": decision, "scope": scope}),
+            allow_statuses=(200, 404, 409, 500),
         )
 
 
@@ -473,8 +479,37 @@ class ToolInputApi:
             "tool_input.decide",
             "POST",
             f"/tool-input/{request_id}/decision",
-            json_body={"decision": decision, "answers": answers, "response": response},
-            allow_statuses=(200, 404),
+            json_body=_omit_none_fields({"decision": decision, "answers": answers, "response": response}),
+            allow_statuses=(200, 404, 500),
+        )
+
+
+class ToolCallsApi:
+    def __init__(self, request: RequestFn) -> None:
+        self._request = request
+
+    def respond(
+        self,
+        *,
+        request_id: str,
+        success: bool | None = None,
+        text: str | None = None,
+        content_items: list[dict[str, Any]] | None = None,
+        response: Any | None = None,
+    ) -> Any:
+        return self._request(
+            "tool_calls.respond",
+            "POST",
+            f"/tool-calls/{request_id}/response",
+            json_body=_omit_none_fields(
+                {
+                    "success": success,
+                    "text": text,
+                    "contentItems": content_items,
+                    "response": response,
+                }
+            ),
+            allow_statuses=(200, 404, 409),
         )
 
 
@@ -515,13 +550,15 @@ class SessionsApi:
             "sessions.create",
             "POST",
             "/sessions",
-            json_body={
-                "cwd": cwd,
-                "model": model,
-                "approvalPolicy": approval_policy,
-                "networkAccess": network_access,
-                "filesystemSandbox": filesystem_sandbox,
-            },
+            json_body=_omit_none_fields(
+                {
+                    "cwd": cwd,
+                    "model": model,
+                    "approvalPolicy": approval_policy,
+                    "networkAccess": network_access,
+                    "filesystemSandbox": filesystem_sandbox,
+                }
+            ),
         )
 
     def get(self, *, session_id: str) -> Any:
@@ -573,14 +610,16 @@ class SessionsApi:
             "sessions.review",
             "POST",
             f"/sessions/{session_id}/review",
-            json_body={
-                "delivery": delivery,
-                "targetType": target_type,
-                "branch": branch,
-                "sha": sha,
-                "title": title,
-                "instructions": instructions,
-            },
+            json_body=_omit_none_fields(
+                {
+                    "delivery": delivery,
+                    "targetType": target_type,
+                    "branch": branch,
+                    "sha": sha,
+                    "title": title,
+                    "instructions": instructions,
+                }
+            ),
             allow_statuses=(200, 410, 501),
         )
 
@@ -631,6 +670,14 @@ class SessionsApi:
             allow_statuses=(200, 410),
         )
 
+    def tool_calls(self, *, session_id: str) -> Any:
+        return self._request(
+            "sessions.tool_calls.list",
+            "GET",
+            f"/sessions/{session_id}/tool-calls",
+            allow_statuses=(200, 403, 410),
+        )
+
     def controls_get(self, *, session_id: str) -> Any:
         return self._request(
             "sessions.controls.get",
@@ -652,7 +699,7 @@ class SessionsApi:
             "sessions.controls.apply",
             "POST",
             f"/sessions/{session_id}/session-controls",
-            json_body={"scope": scope, "actor": actor, "source": source, "controls": controls},
+            json_body=_omit_none_fields({"scope": scope, "actor": actor, "source": source, "controls": controls}),
             allow_statuses=(200, 400, 404, 410, 423),
         )
 
@@ -688,7 +735,11 @@ class SessionsApi:
         if settings is not None and key is not None:
             raise ValueError("settings_set accepts either settings or key/value, not both")
 
-        body: dict[str, Any] = {"scope": scope, "actor": actor, "source": source}
+        body: dict[str, Any] = {"scope": scope}
+        if actor is not None:
+            body["actor"] = actor
+        if source is not None:
+            body["source"] = source
         if settings is not None:
             body["settings"] = settings
             body["mode"] = mode
@@ -735,7 +786,7 @@ class SessionsApi:
             "sessions.suggest_request",
             "POST",
             f"/sessions/{session_id}/suggested-request",
-            json_body={"model": model, "effort": effort, "draft": draft},
+            json_body=_omit_none_fields({"model": model, "effort": effort, "draft": draft}),
             allow_statuses=(200, 202, 409, 410),
         )
 
@@ -751,7 +802,7 @@ class SessionsApi:
             "sessions.suggest_request.enqueue",
             "POST",
             f"/sessions/{session_id}/suggested-request/jobs",
-            json_body={"model": model, "effort": effort, "draft": draft},
+            json_body=_omit_none_fields({"model": model, "effort": effort, "draft": draft}),
             allow_statuses=(202, 404, 410),
         )
 
@@ -768,12 +819,14 @@ class SessionsApi:
             "sessions.suggest_request.upsert",
             "POST",
             f"/sessions/{session_id}/suggested-request/upsert",
-            json_body={
-                "requestKey": request_key,
-                "status": status,
-                "suggestion": suggestion,
-                "error": error,
-            },
+            json_body=_omit_none_fields(
+                {
+                    "requestKey": request_key,
+                    "status": status,
+                    "suggestion": suggestion,
+                    "error": error,
+                }
+            ),
         )
 
     def transcript_upsert(
@@ -794,17 +847,19 @@ class SessionsApi:
             "sessions.transcript.upsert",
             "POST",
             f"/sessions/{session_id}/transcript/upsert",
-            json_body={
-                "messageId": message_id,
-                "turnId": turn_id,
-                "role": role,
-                "type": entry_type,
-                "content": content,
-                "status": status,
-                "details": details,
-                "startedAt": started_at,
-                "completedAt": completed_at,
-            },
+            json_body=_omit_none_fields(
+                {
+                    "messageId": message_id,
+                    "turnId": turn_id,
+                    "role": role,
+                    "type": entry_type,
+                    "content": content,
+                    "status": status,
+                    "details": details,
+                    "startedAt": started_at,
+                    "completedAt": completed_at,
+                }
+            ),
             allow_statuses=(200, 404, 410),
         )
 
@@ -823,14 +878,16 @@ class SessionsApi:
             "sessions.send_message",
             "POST",
             f"/sessions/{session_id}/messages",
-            json_body={
-                "text": text,
-                "model": model,
-                "effort": effort,
-                "approvalPolicy": approval_policy,
-                "networkAccess": network_access,
-                "filesystemSandbox": filesystem_sandbox,
-            },
+            json_body=_omit_none_fields(
+                {
+                    "text": text,
+                    "model": model,
+                    "effort": effort,
+                    "approvalPolicy": approval_policy,
+                    "networkAccess": network_access,
+                    "filesystemSandbox": filesystem_sandbox,
+                }
+            ),
             allow_statuses=(202, 404, 410),
         )
 
@@ -1013,6 +1070,15 @@ class SessionToolInputScope:
         return self.sessions.tool_input(session_id=self.session_id)
 
 
+@dataclass(slots=True)
+class SessionToolCallsScope:
+    sessions: SessionsApi
+    session_id: str
+
+    def list(self) -> Any:
+        return self.sessions.tool_calls(session_id=self.session_id)
+
+
 class SessionScope:
     def __init__(self, sessions: SessionsApi, session_id: str) -> None:
         self._sessions = sessions
@@ -1022,6 +1088,7 @@ class SessionScope:
         self.settings = SessionSettingsScope(sessions=sessions, session_id=session_id)
         self.approvals = SessionApprovalsScope(sessions=sessions, session_id=session_id)
         self.tool_input = SessionToolInputScope(sessions=sessions, session_id=session_id)
+        self.tool_calls = SessionToolCallsScope(sessions=sessions, session_id=session_id)
 
     def get(self) -> Any:
         return self._sessions.get(session_id=self.session_id)

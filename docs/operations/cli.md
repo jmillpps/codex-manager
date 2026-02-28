@@ -97,8 +97,9 @@ The CLI is organized by endpoint domains:
 - `agents extensions` (`list`, `reload`)
 - `orchestrator jobs` (`get`, `list`, `wait`, `cancel`)
 - `projects` (`list`, `create`, `rename`, `delete`, `agent-sessions list`, `chats move-all|delete-all`)
-- `sessions` (`list`, `create`, `get`, `send`, lifecycle/thread-actions, approvals/tool-input/transcript/suggest-request`)
+- `sessions` (`list`, `create`, `get`, `send`, lifecycle/thread-actions, approvals/tool-input/tool-calls/transcript/suggest-request`)
 - `approvals` (`decide`)
+- `tool-calls` (`respond`)
 - `tool-input` (`decide`)
 - `stream events` (websocket event stream)
 - `api request` (raw fallback HTTP request)
@@ -149,6 +150,7 @@ pnpm --filter @repo/cli dev stream events --session-id <sessionId>
 # 6) Enumerate pending approval/tool-input requests before deciding.
 pnpm --filter @repo/cli dev sessions approvals list --session-id <sessionId>
 pnpm --filter @repo/cli dev sessions tool-input list --session-id <sessionId>
+pnpm --filter @repo/cli dev sessions tool-calls list --session-id <sessionId>
 
 # 7) Query project->agent worker mappings.
 pnpm --filter @repo/cli dev projects agent-sessions list --project-id <projectId>
@@ -166,6 +168,13 @@ Operational guidance:
 ```bash
 pnpm --filter @repo/cli dev sessions approvals list --session-id <sessionId>
 pnpm --filter @repo/cli dev approvals decide --approval-id <approvalId> --decision approve
+```
+
+### Respond to dynamic tool calls
+
+```bash
+pnpm --filter @repo/cli dev sessions tool-calls list --session-id <sessionId>
+pnpm --filter @repo/cli dev tool-calls respond --request-id <requestId> --text "lookup complete" --success true
 ```
 
 ### Suggest request and queue visibility

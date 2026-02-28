@@ -11,6 +11,7 @@ Use it when you need Python workflows to:
 - read/write per-session settings used by UI and extensions
 - subscribe to realtime events and app-server signal pass-through
 - orchestrate queue/supervisor automation
+- handle dynamic `item/tool/call` requests with Python remote-skill handlers through codex-manager routes
 
 ## Practical workflow categories
 
@@ -73,6 +74,7 @@ Hook middleware objects can be registered directly with `use_middleware(...)` in
 - Practical recipes: `docs/python/practical-recipes.md`
 - API domain map: `docs/python/api-surface.md`
 - Streaming + decorators + handlers: `docs/python/streaming-and-handlers.md`
+- Remote-skill bridge: `docs/python/remote-skills.md`
 - Session settings + automation patterns: `docs/python/settings-and-automation.md`
 - Protocol-oriented implementation contract: `docs/python/protocol-interfaces.md`
 - Typed model/facade + boundary validation implementation: `docs/python/typed-models.md`
@@ -86,6 +88,8 @@ Hook middleware objects can be registered directly with `use_middleware(...)` in
   - `docs/python/practical-recipes.md`
 - "I need event-driven workflows":
   - `docs/python/streaming-and-handlers.md`
+- "I need dynamic tool calls backed by Python handlers":
+  - `docs/python/remote-skills.md`
 - "I need settings-driven supervisor automation":
   - `docs/python/settings-and-automation.md`
 - "I want stronger typed request/response handling":

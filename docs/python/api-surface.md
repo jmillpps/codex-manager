@@ -19,6 +19,8 @@ Both `CodexManager` and `AsyncCodexManager` expose the same domains:
 - `sessions`
 - `approvals`
 - `tool_input`
+- `tool_calls`
+- `remote_skills`
 - `raw`
 
 ## Typed facade
@@ -87,6 +89,7 @@ These hooks are additive and do not change default behavior when omitted.
 - `settings.get()` / `settings.set()` / `settings.unset()` / `settings.namespace(...)`
 - `approvals.list()`
 - `tool_input.list()`
+- `tool_calls.list()`
 - `get()`, `rename()`, `archive()`, `unarchive()`, `resume()`, `interrupt()`, `suggest_request(...)`
 
 ## Route coverage
@@ -143,3 +146,24 @@ for req in requests.get("data", []):
         response={"note": "automation policy: manual review required"},
     )
 ```
+
+### Inspect and respond to dynamic tool calls
+
+```python
+pending = cm.session(session_id).tool_calls.list()
+for req in pending.get("data", []):
+    cm.tool_calls.respond(
+        request_id=req["requestId"],
+        text=f"Handled tool {req['tool']}",
+        success=True,
+    )
+```
+
+### Session-scoped remote-skill bridge
+
+Use the built-in wrapper for registration, instruction injection, and signal response:
+
+- `cm.remote_skills.session(session_id)`
+- `acm.remote_skills.session(session_id)`
+
+See `docs/python/remote-skills.md` for end-to-end examples with `app_server.request.item.tool.call`.

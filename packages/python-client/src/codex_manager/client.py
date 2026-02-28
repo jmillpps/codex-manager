@@ -25,12 +25,14 @@ from .api import (
     SessionsApi,
     SkillsApi,
     SystemApi,
+    ToolCallsApi,
     ToolInputApi,
 )
 from .config import ClientConfig
 from .errors import ApiError, TypedModelValidationError
 from .hooks import HookRegistry, RequestCall
 from .plugins import PluginRegistry
+from .remote_skills import AsyncRemoteSkillsFacade, RemoteSkillsFacade
 from .protocols import (
     AsyncClientPlugin,
     AsyncHeaderProvider,
@@ -141,8 +143,10 @@ class CodexManager:
         self.sessions = SessionsApi(self._request)
         self.approvals = ApprovalsApi(self._request)
         self.tool_input = ToolInputApi(self._request)
+        self.tool_calls = ToolCallsApi(self._request)
         self.raw = RawApi(self._request)
         self.typed = TypedCodexManagerFacade(self)
+        self.remote_skills = RemoteSkillsFacade(self)
 
         async_stream = AsyncEventStream(
             base_url=self.client_config.base_url,
@@ -377,8 +381,10 @@ class AsyncCodexManager:
         self.sessions = SessionsApi(self._request)
         self.approvals = ApprovalsApi(self._request)
         self.tool_input = ToolInputApi(self._request)
+        self.tool_calls = ToolCallsApi(self._request)
         self.raw = RawApi(self._request)
         self.typed = AsyncTypedCodexManagerFacade(self)
+        self.remote_skills = AsyncRemoteSkillsFacade(self)
 
         self.stream = AsyncEventStream(
             base_url=self.client_config.base_url,

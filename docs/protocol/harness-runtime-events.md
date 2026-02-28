@@ -252,6 +252,29 @@ Client rule:
 
 - websocket events are primary; REST polling/reload is reconcile fallback.
 
+## Interactive request websocket events
+
+Websocket events for server-initiated decision flows:
+
+- `approval` / `approval_resolved`
+- `tool_user_input_requested` / `tool_user_input_resolved`
+- `tool_call_requested` / `tool_call_resolved`
+
+`tool_call_requested` payload mirrors pending `item/tool/call` records, including:
+
+- `requestId`
+- `threadId`
+- `turnId`
+- `callId`
+- `tool`
+- `arguments`
+
+`tool_call_resolved` payload includes:
+
+- `requestId`
+- `status` (`resolved` | `expired`)
+- `success` (`boolean`)
+
 ## Transcript delta and upsert contract
 
 ### Websocket delta event

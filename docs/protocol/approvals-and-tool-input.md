@@ -104,3 +104,27 @@ Example:
   }
 }
 ```
+
+### codex-manager bridge routes
+
+codex-manager now exposes first-class dynamic tool-call bridge routes:
+
+- `GET /api/sessions/:sessionId/tool-calls` to list pending `item/tool/call` requests.
+- `POST /api/tool-calls/:requestId/response` to submit tool-call output payloads (`success`, `contentItems`, or raw `response`).
+
+Route status contracts:
+
+- `GET /api/sessions/:sessionId/tool-calls`:
+  - `200` pending request list
+  - `403` system-owned session
+  - `410` deleted session
+- `POST /api/tool-calls/:requestId/response`:
+  - `200` response accepted
+  - `404` request not found/already resolved
+  - `409` response already in flight (`code: "in_flight"`)
+  - `500` runtime respond failure
+
+Pending requests are also forwarded on websocket as:
+
+- `tool_call_requested`
+- `tool_call_resolved`

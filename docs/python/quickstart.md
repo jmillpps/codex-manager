@@ -94,5 +94,6 @@ with CodexManager(validation_mode="off") as cm_off:
 - For copy-paste recipes, open `docs/python/practical-recipes.md`
 - For endpoint/domain coverage, open `docs/python/api-surface.md`
 - For event handlers and decorators, open `docs/python/streaming-and-handlers.md`
+- For dynamic tool-call bridging with Python handlers, open `docs/python/remote-skills.md`
 - For protocol injection architecture and contracts, open `docs/python/protocol-interfaces.md`
 - For generated typed model architecture, operation coverage, and boundary validation behavior, open `docs/python/typed-models.md`

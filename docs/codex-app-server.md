@@ -50,6 +50,9 @@ The previous single-file reference was split into focused documents so protocol 
 - Server-initiated tool-input requests (`tool/requestUserInput`) are persisted in memory and surfaced via:
   - WebSocket events: `tool_user_input_requested`, `tool_user_input_resolved`
   - REST endpoints: `GET /api/sessions/:sessionId/tool-input`, `POST /api/tool-input/:requestId/decision`
+- Server-initiated dynamic tool calls (`item/tool/call`) are persisted in memory and surfaced via:
+  - WebSocket events: `tool_call_requested`, `tool_call_resolved`
+  - REST endpoints: `GET /api/sessions/:sessionId/tool-calls`, `POST /api/tool-calls/:requestId/response`
 - Turn insight events are surfaced via:
   - `turn_plan_updated`
   - `turn_diff_updated`

@@ -936,6 +936,18 @@ const openApiDocument = {
         ])
       }
     },
+    "/api/sessions/{sessionId}/tool-calls": {
+      get: {
+        summary: "List pending dynamic tool-call requests for a session",
+        operationId: "listSessionToolCalls",
+        parameters: [pathParam("sessionId", "Session id")],
+        responses: responses([
+          [200, jsonResponse("Pending dynamic tool-call requests", schemaRef("ListSessionToolCallsResponse"))],
+          [403, jsonResponse("System-owned session", schemaRef("SystemSessionError"))],
+          [410, "Session deleted"]
+        ])
+      }
+    },
     "/api/sessions/{sessionId}/session-controls": {
       get: {
         summary: "Read session/default controls tuple",
@@ -1187,6 +1199,20 @@ const openApiDocument = {
         ])
       }
     },
+    "/api/tool-calls/{requestId}/response": {
+      post: {
+        summary: "Submit dynamic tool-call response",
+        operationId: "respondToolCall",
+        parameters: [pathParam("requestId", "Dynamic tool-call request id")],
+        requestBody: requestBody(schemaRef("ToolCallResponseRequest")),
+        responses: responses([
+          [200, jsonResponse("Response submitted", schemaRef("ToolCallResponseSuccessResponse"))],
+          [404, jsonResponse("Request not found", schemaRef("ToolCallResponseNotFoundResponse"))],
+          [409, jsonResponse("Response in flight", schemaRef("ToolCallResponseConflictResponse"))],
+          [500, jsonResponse("Response failed", schemaRef("ToolCallResponseErrorResponse"))]
+        ])
+      }
+    },
     "/api/approvals/{approvalId}/decision": {
       post: {
         summary: "Submit approval decision",
@@ -1424,6 +1450,81 @@ const openApiDocument = {
           response: {}
         }
       },
+      DynamicToolCallOutputContentItem: {
+        oneOf: [
+          schemaRef("DynamicToolCallTextContentItem"),
+          schemaRef("DynamicToolCallImageContentItem")
+        ]
+      },
+      DynamicToolCallTextContentItem: {
+        type: "object",
+        required: ["type", "text"],
+        properties: {
+          type: { type: "string", enum: ["inputText"] },
+          text: { type: "string" }
+        }
+      },
+      DynamicToolCallImageContentItem: {
+        type: "object",
+        required: ["type", "imageUrl"],
+        properties: {
+          type: { type: "string", enum: ["inputImage"] },
+          imageUrl: { type: "string" }
+        }
+      },
+      PendingToolCall: {
+        type: "object",
+        required: [
+          "requestId",
+          "method",
+          "threadId",
+          "turnId",
+          "itemId",
+          "callId",
+          "tool",
+          "arguments",
+          "summary",
+          "details",
+          "createdAt",
+          "status"
+        ],
+        properties: {
+          requestId: { type: "string" },
+          method: { type: "string", enum: ["item/tool/call"] },
+          threadId: { type: "string" },
+          turnId: { type: ["string", "null"] },
+          itemId: { type: ["string", "null"] },
+          callId: { type: ["string", "null"] },
+          tool: { type: "string" },
+          arguments: {},
+          summary: { type: "string" },
+          details: { type: "object", additionalProperties: true },
+          createdAt: { type: "string" },
+          status: { type: "string", enum: ["pending"] }
+        }
+      },
+      ListSessionToolCallsResponse: {
+        type: "object",
+        required: ["data"],
+        properties: {
+          data: {
+            type: "array",
+            items: schemaRef("PendingToolCall")
+          }
+        }
+      },
+      ToolCallResponseRequest: {
+        type: "object",
+        properties: {
+          success: { type: "boolean" },
+          text: { type: "string" },
+          contentItems: {
+            type: "array",
+            items: schemaRef("DynamicToolCallOutputContentItem")
+          },
+          response: {}
+        }
+      },
       CreateSessionResponse: {
         type: "object",
         required: ["session", "thread"],
@@ -1654,6 +1755,40 @@ const openApiDocument = {
         }
       },
       ToolInputDecisionErrorResponse: {
+        type: "object",
+        required: ["status", "requestId"],
+        properties: {
+          status: { type: "string", enum: ["error"] },
+          requestId: { type: "string" }
+        }
+      },
+      ToolCallResponseSuccessResponse: {
+        type: "object",
+        required: ["status", "requestId", "threadId"],
+        properties: {
+          status: { type: "string", enum: ["ok"] },
+          requestId: { type: "string" },
+          threadId: { type: "string" }
+        }
+      },
+      ToolCallResponseNotFoundResponse: {
+        type: "object",
+        required: ["status", "requestId"],
+        properties: {
+          status: { type: "string", enum: ["not_found"] },
+          requestId: { type: "string" }
+        }
+      },
+      ToolCallResponseConflictResponse: {
+        type: "object",
+        required: ["status", "code", "requestId"],
+        properties: {
+          status: { type: "string", enum: ["conflict"] },
+          code: { type: "string", enum: ["in_flight"] },
+          requestId: { type: "string" }
+        }
+      },
+      ToolCallResponseErrorResponse: {
         type: "object",
         required: ["status", "requestId"],
         properties: {
