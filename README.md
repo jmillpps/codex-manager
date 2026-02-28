@@ -97,7 +97,7 @@ For complete runbooks: [`docs/operations/troubleshooting.md`](docs/operations/tr
 ## Architecture At A Glance
 
 ```mermaid
-flowchart LR
+flowchart TD
     CLIENTS["Web UI / CLI / Python SDK"] --> API["codex-manager API control plane"]
     API --> RUNTIME["codex app-server runtime (supervised over STDIO)"]
     RUNTIME --> STREAM["WebSocket protocol event stream"]
