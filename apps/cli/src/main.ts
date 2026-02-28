@@ -1010,6 +1010,25 @@ function buildProgram(): Command {
       })
     );
 
+  const projectAgentSessions = projects.command("agent-sessions").description("Project-owned agent session mappings");
+  projectAgentSessions
+    .command("list")
+    .requiredOption("--project-id <id>")
+    .action(
+      withRuntime("projects agent-sessions list", async (ctx, args) => {
+        const options = args[0] as { projectId: string };
+        await runApiCall(ctx, {
+          command: "projects agent-sessions list",
+          method: "GET",
+          pathTemplate: "/api/projects/:projectId/agent-sessions",
+          pathParams: {
+            projectId: options.projectId
+          },
+          allowStatuses: [200, 404]
+        });
+      })
+    );
+
   projects
     .command("create")
     .requiredOption("--name <name>")
@@ -1706,6 +1725,179 @@ function buildProgram(): Command {
             ...(options.source ? { source: options.source } : {})
           },
           allowStatuses: [200, 400, 404, 410, 423]
+        });
+      })
+    );
+
+  const sessionsSettings = sessions.command("settings").description("Generic session settings storage");
+  sessionsSettings
+    .command("get")
+    .requiredOption("--session-id <id>")
+    .option("--scope <scope>", "session|default", "session")
+    .option("--key <key>", "Return a single key from settings")
+    .action(
+      withRuntime("sessions settings get", async (ctx, args) => {
+        const options = args[0] as { sessionId: string; scope?: "session" | "default"; key?: string };
+        const scope = options.scope === "default" ? "default" : "session";
+        await runApiCall(ctx, {
+          command: "sessions settings get",
+          method: "GET",
+          pathTemplate: "/api/sessions/:sessionId/settings",
+          pathParams: {
+            sessionId: options.sessionId
+          },
+          query: {
+            scope,
+            key: options.key
+          },
+          allowStatuses: [200, 404, 410]
+        });
+      })
+    );
+
+  sessionsSettings
+    .command("set")
+    .requiredOption("--session-id <id>")
+    .requiredOption("--scope <scope>", "session|default")
+    .option("--key <key>", "Top-level settings key to set")
+    .option("--value <value>", "JSON value for --key (falls back to plain string)")
+    .option("--value-file <path>", "File with value payload for --key")
+    .option("--settings <json>", "JSON object payload")
+    .option("--settings-file <path>", "Path to JSON object payload")
+    .option("--mode <mode>", "merge|replace", "merge")
+    .option("--actor <actor>")
+    .option("--source <source>")
+    .action(
+      withRuntime("sessions settings set", async (ctx, args) => {
+        const options = args[0] as {
+          sessionId: string;
+          scope: "session" | "default";
+          key?: string;
+          value?: string;
+          valueFile?: string;
+          settings?: string;
+          settingsFile?: string;
+          mode?: "merge" | "replace";
+          actor?: string;
+          source?: string;
+        };
+        const scope = options.scope === "default" ? "default" : "session";
+        const key = options.key?.trim();
+        const mode = options.mode === "replace" ? "replace" : "merge";
+        const hasSettingsInput =
+          (typeof options.settings === "string" && options.settings.trim().length > 0) ||
+          (typeof options.settingsFile === "string" && options.settingsFile.trim().length > 0);
+
+        if (key && hasSettingsInput) {
+          throw new Error("--key/--value cannot be combined with --settings/--settings-file");
+        }
+
+        if (key) {
+          const valueRaw = await parseTextInput({
+            value: options.value,
+            file: options.valueFile,
+            field: "value",
+            required: true
+          });
+          if (typeof valueRaw !== "string") {
+            throw new Error("value payload is required");
+          }
+          const trimmedValue = valueRaw.trim();
+          let parsedValue: unknown = valueRaw;
+          if (trimmedValue.startsWith("@")) {
+            parsedValue = await parseJsonInput(trimmedValue);
+          } else {
+            try {
+              parsedValue = await parseJsonInput(valueRaw);
+            } catch {
+              parsedValue = valueRaw;
+            }
+          }
+
+          await runApiCall(ctx, {
+            command: "sessions settings set",
+            method: "POST",
+            pathTemplate: "/api/sessions/:sessionId/settings",
+            pathParams: {
+              sessionId: options.sessionId
+            },
+            body: {
+              scope,
+              key,
+              value: parsedValue,
+              ...(options.actor ? { actor: options.actor } : {}),
+              ...(options.source ? { source: options.source } : {})
+            },
+            allowStatuses: [200, 400, 404, 410, 423]
+          });
+          return;
+        }
+
+        const settingsRaw = await parseTextInput({
+          value: options.settings,
+          file: options.settingsFile,
+          field: "settings",
+          required: true
+        });
+        if (typeof settingsRaw !== "string") {
+          throw new Error("settings payload is required");
+        }
+        const parsedSettings = await parseJsonInput(settingsRaw);
+        const nextSettingsInput = asObjectRecord(parsedSettings);
+        if (!nextSettingsInput) {
+          throw new Error("settings payload must be a JSON object");
+        }
+
+        await runApiCall(ctx, {
+          command: "sessions settings set",
+          method: "POST",
+          pathTemplate: "/api/sessions/:sessionId/settings",
+          pathParams: {
+            sessionId: options.sessionId
+          },
+          body: {
+            scope,
+            settings: nextSettingsInput,
+            mode,
+            ...(options.actor ? { actor: options.actor } : {}),
+            ...(options.source ? { source: options.source } : {})
+          },
+          allowStatuses: [200, 400, 404, 410, 423]
+        });
+      })
+    );
+
+  sessionsSettings
+    .command("unset")
+    .requiredOption("--session-id <id>")
+    .requiredOption("--scope <scope>", "session|default")
+    .requiredOption("--key <key>")
+    .option("--actor <actor>")
+    .option("--source <source>")
+    .action(
+      withRuntime("sessions settings unset", async (ctx, args) => {
+        const options = args[0] as {
+          sessionId: string;
+          scope: "session" | "default";
+          key: string;
+          actor?: string;
+          source?: string;
+        };
+        const scope = options.scope === "default" ? "default" : "session";
+        await runApiCall(ctx, {
+          command: "sessions settings unset",
+          method: "DELETE",
+          pathTemplate: "/api/sessions/:sessionId/settings/:key",
+          pathParams: {
+            sessionId: options.sessionId,
+            key: options.key
+          },
+          query: {
+            scope,
+            actor: options.actor,
+            source: options.source
+          },
+          allowStatuses: [200, 404, 410, 423]
         });
       })
     );

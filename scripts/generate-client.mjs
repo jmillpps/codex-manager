@@ -472,6 +472,18 @@ export async function deleteProject(
   );
 }
 
+export async function listProjectAgentSessions(
+  projectId: string,
+  baseUrl = "/api"
+): Promise<{ status: string; projectId: string; data: Array<{ agent: string; sessionId: string; systemOwned: boolean }> }> {
+  return requestJson<{ status: string; projectId: string; data: Array<{ agent: string; sessionId: string; systemOwned: boolean }> }>(
+    baseUrl + "/projects/" + encodeURIComponent(projectId) + "/agent-sessions",
+    {},
+    "list project agent sessions failed",
+    [200, 404]
+  );
+}
+
 export async function moveProjectChats(
   projectId: string,
   destination: "unassigned" | "archive",
@@ -734,6 +746,103 @@ export async function listSessionToolInput(sessionId: string, baseUrl = "/api"):
     {},
     "list tool input failed",
     [200, 410]
+  );
+}
+
+export async function getSessionControls(sessionId: string, baseUrl = "/api"): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/session-controls",
+    {},
+    "get session controls failed",
+    [200, 404, 410]
+  );
+}
+
+export async function applySessionControls(
+  sessionId: string,
+  body: {
+    scope: "session" | "default";
+    controls: {
+      model: string | null;
+      approvalPolicy: "untrusted" | "on-failure" | "on-request" | "never";
+      networkAccess: "restricted" | "enabled";
+      filesystemSandbox: "read-only" | "workspace-write" | "danger-full-access";
+      settings?: Record<string, unknown>;
+    };
+    actor?: string;
+    source?: string;
+  },
+  baseUrl = "/api"
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/session-controls",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    },
+    "apply session controls failed",
+    [200, 400, 404, 410, 423]
+  );
+}
+
+export async function getSessionSettings(
+  sessionId: string,
+  baseUrl = "/api",
+  options: { scope?: "session" | "default"; key?: string } = {}
+): Promise<Record<string, unknown>> {
+  const path = withQuery(baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/settings", options);
+  return requestJson<Record<string, unknown>>(path, {}, "get session settings failed", [200, 404, 410]);
+}
+
+export async function setSessionSettings(
+  sessionId: string,
+  body:
+    | {
+        scope: "session" | "default";
+        settings: Record<string, unknown>;
+        mode?: "merge" | "replace";
+        actor?: string;
+        source?: string;
+      }
+    | {
+        scope: "session" | "default";
+        key: string;
+        value: unknown;
+        actor?: string;
+        source?: string;
+      },
+  baseUrl = "/api"
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/settings",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    },
+    "set session settings failed",
+    [200, 400, 404, 410, 423]
+  );
+}
+
+export async function deleteSessionSetting(
+  sessionId: string,
+  key: string,
+  baseUrl = "/api",
+  options: { scope?: "session" | "default"; actor?: string; source?: string } = {}
+): Promise<Record<string, unknown>> {
+  const path = withQuery(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/settings/" + encodeURIComponent(key),
+    options
+  );
+  return requestJson<Record<string, unknown>>(
+    path,
+    {
+      method: "DELETE"
+    },
+    "delete session setting failed",
+    [200, 404, 410, 423]
   );
 }
 

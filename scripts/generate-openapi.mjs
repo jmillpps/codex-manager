@@ -522,6 +522,17 @@ const openApiDocument = {
         ])
       }
     },
+    "/api/projects/{projectId}/agent-sessions": {
+      get: {
+        summary: "List project-owned agent sessions",
+        operationId: "listProjectAgentSessions",
+        parameters: [pathParam("projectId", "Project id")],
+        responses: responses([
+          [200, "Project agent sessions"],
+          [404, "Project not found"]
+        ])
+      }
+    },
     "/api/projects/{projectId}/chats/move-all": {
       post: {
         summary: "Move all project chats",
@@ -772,6 +783,110 @@ const openApiDocument = {
         responses: responses([
           [200, "Pending tool-input requests"],
           [410, "Session deleted"]
+        ])
+      }
+    },
+    "/api/sessions/{sessionId}/session-controls": {
+      get: {
+        summary: "Read session/default controls tuple",
+        operationId: "getSessionControls",
+        parameters: [pathParam("sessionId", "Session id")],
+        responses: responses([
+          [200, "Session controls"],
+          [404, "Session not found"],
+          [410, "Session deleted"]
+        ])
+      },
+      post: {
+        summary: "Apply session/default controls tuple",
+        operationId: "applySessionControls",
+        parameters: [pathParam("sessionId", "Session id")],
+        requestBody: requestBody({
+          type: "object",
+          required: ["scope", "controls"],
+          properties: {
+            scope: { type: "string", enum: ["session", "default"] },
+            controls: {
+              type: "object",
+              required: ["model", "approvalPolicy", "networkAccess", "filesystemSandbox"],
+              properties: {
+                model: { type: ["string", "null"] },
+                approvalPolicy: { type: "string", enum: ["untrusted", "on-failure", "on-request", "never"] },
+                networkAccess: { type: "string", enum: ["restricted", "enabled"] },
+                filesystemSandbox: { type: "string", enum: ["read-only", "workspace-write", "danger-full-access"] },
+                settings: { type: "object", additionalProperties: true }
+              }
+            },
+            actor: { type: "string" },
+            source: { type: "string" }
+          }
+        }),
+        responses: responses([
+          [200, "Session controls applied"],
+          [400, "Invalid request"],
+          [404, "Session not found"],
+          [410, "Session deleted"],
+          [423, "Default controls locked"]
+        ])
+      }
+    },
+    "/api/sessions/{sessionId}/settings": {
+      get: {
+        summary: "Read session settings",
+        operationId: "getSessionSettings",
+        parameters: [
+          pathParam("sessionId", "Session id"),
+          queryParam("scope", { type: "string", enum: ["session", "default"] }, "Settings scope"),
+          queryParam("key", { type: "string" }, "Optional top-level settings key")
+        ],
+        responses: responses([
+          [200, "Session settings"],
+          [404, "Session not found"],
+          [410, "Session deleted"]
+        ])
+      },
+      post: {
+        summary: "Upsert session settings",
+        operationId: "setSessionSettings",
+        parameters: [pathParam("sessionId", "Session id")],
+        requestBody: requestBody({
+          type: "object",
+          required: ["scope"],
+          properties: {
+            scope: { type: "string", enum: ["session", "default"] },
+            key: { type: "string" },
+            value: {},
+            settings: { type: "object", additionalProperties: true },
+            mode: { type: "string", enum: ["merge", "replace"] },
+            actor: { type: "string" },
+            source: { type: "string" }
+          }
+        }),
+        responses: responses([
+          [200, "Session settings updated"],
+          [400, "Invalid request"],
+          [404, "Session not found"],
+          [410, "Session deleted"],
+          [423, "Default settings locked"]
+        ])
+      }
+    },
+    "/api/sessions/{sessionId}/settings/{key}": {
+      delete: {
+        summary: "Delete one top-level session setting",
+        operationId: "deleteSessionSetting",
+        parameters: [
+          pathParam("sessionId", "Session id"),
+          pathParam("key", "Top-level settings key"),
+          queryParam("scope", { type: "string", enum: ["session", "default"] }, "Settings scope"),
+          queryParam("actor", { type: "string" }, "Optional audit actor"),
+          queryParam("source", { type: "string" }, "Optional audit source")
+        ],
+        responses: responses([
+          [200, "Session setting deleted or unchanged"],
+          [404, "Session not found"],
+          [410, "Session deleted"],
+          [423, "Default settings locked"]
         ])
       }
     },

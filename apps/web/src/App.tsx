@@ -220,12 +220,24 @@ type ApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
 type SessionControlApprovalPolicy = ApprovalPolicy;
 type NetworkAccess = "restricted" | "enabled";
 type FilesystemSandbox = "read-only" | "workspace-write" | "danger-full-access";
+type SupervisorRiskThreshold = "low" | "med" | "high";
+type SupervisorAutoActionControls = {
+  enabled: boolean;
+  threshold: SupervisorRiskThreshold;
+};
+type SessionSupervisorControls = {
+  diffExplainability: boolean;
+  autoApprove: SupervisorAutoActionControls;
+  autoReject: SupervisorAutoActionControls;
+  autoSteer: SupervisorAutoActionControls;
+};
 type SessionControlScope = "session" | "default";
 type SessionControlsTuple = {
   model: string | null;
   approvalPolicy: SessionControlApprovalPolicy;
   networkAccess: NetworkAccess;
   filesystemSandbox: FilesystemSandbox;
+  settings: Record<string, unknown>;
 };
 type SessionControlsSummaryPart = {
   value: string;
@@ -291,11 +303,28 @@ const mobileViewportMediaQuery = `(max-width: ${mobileViewportMaxWidthPx}px)`;
 const sessionControlApprovalPolicies: Array<SessionControlApprovalPolicy> = ["untrusted", "on-failure", "on-request", "never"];
 const networkAccessModes: Array<NetworkAccess> = ["restricted", "enabled"];
 const filesystemSandboxModes: Array<FilesystemSandbox> = ["read-only", "workspace-write", "danger-full-access"];
+const supervisorRiskThresholds: Array<SupervisorRiskThreshold> = ["low", "med", "high"];
+const defaultSessionSupervisorControls: SessionSupervisorControls = {
+  diffExplainability: true,
+  autoApprove: {
+    enabled: false,
+    threshold: "low"
+  },
+  autoReject: {
+    enabled: false,
+    threshold: "high"
+  },
+  autoSteer: {
+    enabled: false,
+    threshold: "high"
+  }
+};
 const defaultSessionControlsTuple: SessionControlsTuple = {
   model: null,
   approvalPolicy: "untrusted",
   networkAccess: "restricted",
-  filesystemSandbox: "read-only"
+  filesystemSandbox: "read-only",
+  settings: {}
 };
 const sessionControlApprovalPolicyLabel: Record<SessionControlApprovalPolicy, string> = {
   untrusted: "Unless Trusted",
@@ -325,6 +354,11 @@ const filesystemSandboxHelperText: Record<FilesystemSandbox, string> = {
   "read-only": "Read-only filesystem sandbox.",
   "workspace-write": "Allow writes in workspace paths.",
   "danger-full-access": "Full filesystem access."
+};
+const supervisorRiskThresholdHelperText: Record<SupervisorRiskThreshold, string> = {
+  low: "Trigger only on low-risk outcomes.",
+  med: "Trigger on medium or higher risk outcomes.",
+  high: "Trigger only on high-risk outcomes."
 };
 
 function isReasoningEffortSupportedByModel(model: ModelOption | null, effort: ReasoningEffort): boolean {
@@ -658,6 +692,115 @@ function isFilesystemSandbox(value: unknown): value is FilesystemSandbox {
   return value === "read-only" || value === "workspace-write" || value === "danger-full-access";
 }
 
+function isSupervisorRiskThreshold(value: unknown): value is SupervisorRiskThreshold {
+  return value === "low" || value === "med" || value === "high";
+}
+
+function normalizeSupervisorRiskThreshold(value: unknown, fallback: SupervisorRiskThreshold): SupervisorRiskThreshold {
+  if (value === "medium") {
+    return "med";
+  }
+  return isSupervisorRiskThreshold(value) ? value : fallback;
+}
+
+function normalizeSupervisorAutoActionControls(
+  input: unknown,
+  fallback: SupervisorAutoActionControls
+): SupervisorAutoActionControls {
+  const value = asRecord(input);
+  if (!value) {
+    return {
+      enabled: fallback.enabled,
+      threshold: fallback.threshold
+    };
+  }
+  return {
+    enabled: value.enabled === true,
+    threshold: normalizeSupervisorRiskThreshold(value.threshold, fallback.threshold)
+  };
+}
+
+function cloneSettingsObject(input: unknown): Record<string, unknown> {
+  const value = asRecord(input);
+  if (!value) {
+    return {};
+  }
+
+  try {
+    const cloned = structuredClone(value);
+    return asRecord(cloned) ?? {};
+  } catch {
+    try {
+      const serialized = JSON.stringify(value);
+      if (typeof serialized !== "string") {
+        return {};
+      }
+      const parsed = JSON.parse(serialized);
+      return asRecord(parsed) ?? {};
+    } catch {
+      return {};
+    }
+  }
+}
+
+function normalizeSessionSupervisorControlsFromSettings(settings: Record<string, unknown>): SessionSupervisorControls {
+  const supervisor = asRecord(settings.supervisor);
+  const fileChange = asRecord(supervisor?.fileChange);
+  if (!fileChange) {
+    return {
+      diffExplainability: defaultSessionSupervisorControls.diffExplainability,
+      autoApprove: { ...defaultSessionSupervisorControls.autoApprove },
+      autoReject: { ...defaultSessionSupervisorControls.autoReject },
+      autoSteer: { ...defaultSessionSupervisorControls.autoSteer }
+    };
+  }
+
+  return {
+    diffExplainability: fileChange.diffExplainability !== false,
+    autoApprove: normalizeSupervisorAutoActionControls(
+      asRecord(fileChange.autoActions)?.approve ?? fileChange.autoApprove,
+      defaultSessionSupervisorControls.autoApprove
+    ),
+    autoReject: normalizeSupervisorAutoActionControls(
+      asRecord(fileChange.autoActions)?.reject ?? fileChange.autoReject,
+      defaultSessionSupervisorControls.autoReject
+    ),
+    autoSteer: normalizeSupervisorAutoActionControls(
+      asRecord(fileChange.autoActions)?.steer ?? fileChange.autoSteer,
+      defaultSessionSupervisorControls.autoSteer
+    )
+  };
+}
+
+function withSessionSupervisorControls(
+  settings: Record<string, unknown>,
+  supervisorControls: SessionSupervisorControls
+): Record<string, unknown> {
+  const nextSettings = cloneSettingsObject(settings);
+  const existingSupervisor = asRecord(nextSettings.supervisor) ?? {};
+  nextSettings.supervisor = {
+    ...existingSupervisor,
+    fileChange: {
+      diffExplainability: supervisorControls.diffExplainability,
+      autoActions: {
+        approve: {
+          enabled: supervisorControls.autoApprove.enabled,
+          threshold: supervisorControls.autoApprove.threshold
+        },
+        reject: {
+          enabled: supervisorControls.autoReject.enabled,
+          threshold: supervisorControls.autoReject.threshold
+        },
+        steer: {
+          enabled: supervisorControls.autoSteer.enabled,
+          threshold: supervisorControls.autoSteer.threshold
+        }
+      }
+    }
+  };
+  return nextSettings;
+}
+
 function sessionControlApprovalPolicyFromProtocol(policy: ApprovalPolicy): SessionControlApprovalPolicy {
   return policy;
 }
@@ -680,11 +823,20 @@ function normalizeSessionControlsTuple(input: unknown): SessionControlsTuple | n
   }
 
   const model = typeof value.model === "string" && value.model.trim().length > 0 ? value.model.trim() : null;
+  let settings = cloneSettingsObject(value.settings);
+  if (Object.keys(settings).length === 0 && asRecord(value.supervisor)) {
+    settings = {
+      supervisor: {
+        fileChange: cloneSettingsObject(value.supervisor)
+      }
+    };
+  }
   return {
     model,
     approvalPolicy,
     networkAccess,
-    filesystemSandbox
+    filesystemSandbox,
+    settings
   };
 }
 
@@ -794,12 +946,37 @@ function SessionControlsSummaryCode({ parts }: { parts: SessionControlsSummaryPa
   );
 }
 
+function canonicalizeJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => canonicalizeJsonValue(entry));
+  }
+  const objectValue = asRecord(value);
+  if (!objectValue) {
+    return value;
+  }
+
+  const normalized: Record<string, unknown> = {};
+  for (const key of Object.keys(objectValue).sort()) {
+    normalized[key] = canonicalizeJsonValue(objectValue[key]);
+  }
+  return normalized;
+}
+
+function serializeSessionSettings(settings: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(canonicalizeJsonValue(settings));
+  } catch {
+    return "{}";
+  }
+}
+
 function sessionControlsEqual(left: SessionControlsTuple, right: SessionControlsTuple): boolean {
   return (
     left.model === right.model &&
     left.approvalPolicy === right.approvalPolicy &&
     left.networkAccess === right.networkAccess &&
-    left.filesystemSandbox === right.filesystemSandbox
+    left.filesystemSandbox === right.filesystemSandbox &&
+    serializeSessionSettings(left.settings) === serializeSessionSettings(right.settings)
   );
 }
 
@@ -2501,7 +2678,8 @@ export function App() {
     return {
       ...defaultSessionControlsTuple,
       model,
-      approvalPolicy
+      approvalPolicy,
+      settings: cloneSettingsObject(defaultSessionControlsTuple.settings)
     };
   }, [selectedSession, selectedSessionId, sessionModelById, defaultModelId]);
   const effectiveSessionControlsForChat = useMemo<SessionControlsTuple>(() => {
@@ -2578,6 +2756,13 @@ export function App() {
   const approvalPolicyTooltip = sessionControlApprovalPolicyHelperText[controlsDraftForScope.approvalPolicy];
   const networkAccessTooltip = networkAccessHelperText[controlsDraftForScope.networkAccess];
   const filesystemSandboxTooltip = filesystemSandboxHelperText[controlsDraftForScope.filesystemSandbox];
+  const supervisorControls = normalizeSessionSupervisorControlsFromSettings(controlsDraftForScope.settings);
+  const diffExplainabilityTooltip = supervisorControls.diffExplainability
+    ? "Enabled: queue diff explainability + supervisor insight on file-change approvals."
+    : "Disabled: skip diff explainability/supervisor insight jobs for file-change approvals.";
+  const autoApproveThresholdTooltip = supervisorRiskThresholdHelperText[supervisorControls.autoApprove.threshold];
+  const autoRejectThresholdTooltip = supervisorRiskThresholdHelperText[supervisorControls.autoReject.threshold];
+  const autoSteerThresholdTooltip = supervisorRiskThresholdHelperText[supervisorControls.autoSteer.threshold];
   const pendingApprovalsById = useMemo(() => {
     return new Map(pendingApprovals.map((approval) => [approval.approvalId, approval]));
   }, [pendingApprovals]);
@@ -4848,6 +5033,40 @@ export function App() {
         }
       }
     }
+  };
+
+  const updateSupervisorDiffExplainability = (enabled: boolean): void => {
+    setSessionControlsDraft((current) => {
+      const base = current ?? controlsTargetForScope;
+      const supervisor = normalizeSessionSupervisorControlsFromSettings(base.settings);
+      return {
+        ...base,
+        settings: withSessionSupervisorControls(base.settings, {
+          ...supervisor,
+          diffExplainability: enabled
+        })
+      };
+    });
+  };
+
+  const updateSupervisorAutoAction = (
+    action: "autoApprove" | "autoReject" | "autoSteer",
+    patch: Partial<SupervisorAutoActionControls>
+  ): void => {
+    setSessionControlsDraft((current) => {
+      const base = current ?? controlsTargetForScope;
+      const supervisor = normalizeSessionSupervisorControlsFromSettings(base.settings);
+      return {
+        ...base,
+        settings: withSessionSupervisorControls(base.settings, {
+          ...supervisor,
+          [action]: {
+            ...supervisor[action],
+            ...patch
+          }
+        })
+      };
+    });
   };
 
   const updateThinkingLevel = (value: ReasoningEffort): void => {
@@ -8715,6 +8934,207 @@ export function App() {
                 </select>
                 <small>{filesystemSandboxHelperText[controlsDraftForScope.filesystemSandbox]}</small>
               </label>
+              <label className="session-control-field session-control-field-supervisor">
+                <span className="session-control-label">
+                  Diff Explainability
+                  {defaultScopeReadOnly ? (
+                    <span className="session-control-lock" title="Managed by harness configuration" aria-label="Managed by harness configuration">
+                      🔒
+                    </span>
+                  ) : null}
+                </span>
+                <select
+                  aria-label="Diff Explainability selector"
+                  title={diffExplainabilityTooltip}
+                  value={supervisorControls.diffExplainability ? "enabled" : "disabled"}
+                  onChange={(event) => updateSupervisorDiffExplainability(event.target.value === "enabled")}
+                  disabled={
+                    !selectedSessionId ||
+                    sessionControlsLoading ||
+                    sessionControlsApplying ||
+                    defaultScopeReadOnly ||
+                    Boolean(sessionControlsError)
+                  }
+                >
+                  <option value="enabled">Enabled</option>
+                  <option value="disabled">Disabled</option>
+                </select>
+                <small>{diffExplainabilityTooltip}</small>
+              </label>
+              <div className="session-control-field session-control-field-supervisor">
+                <span className="session-control-label">
+                  Auto Approve
+                  {defaultScopeReadOnly ? (
+                    <span className="session-control-lock" title="Managed by harness configuration" aria-label="Managed by harness configuration">
+                      🔒
+                    </span>
+                  ) : null}
+                </span>
+                <div className="session-control-inline">
+                  <select
+                    aria-label="Auto Approve enabled selector"
+                    value={supervisorControls.autoApprove.enabled ? "enabled" : "disabled"}
+                    onChange={(event) => updateSupervisorAutoAction("autoApprove", { enabled: event.target.value === "enabled" })}
+                    disabled={
+                      !selectedSessionId ||
+                      sessionControlsLoading ||
+                      sessionControlsApplying ||
+                      defaultScopeReadOnly ||
+                      Boolean(sessionControlsError)
+                    }
+                  >
+                    <option value="disabled">Off</option>
+                    <option value="enabled">On</option>
+                  </select>
+                  <select
+                    aria-label="Auto Approve threshold selector"
+                    title={autoApproveThresholdTooltip}
+                    value={supervisorControls.autoApprove.threshold}
+                    onChange={(event) =>
+                      updateSupervisorAutoAction("autoApprove", {
+                        threshold: normalizeSupervisorRiskThreshold(
+                          event.target.value,
+                          supervisorControls.autoApprove.threshold
+                        )
+                      })
+                    }
+                    disabled={
+                      !selectedSessionId ||
+                      sessionControlsLoading ||
+                      sessionControlsApplying ||
+                      defaultScopeReadOnly ||
+                      Boolean(sessionControlsError)
+                    }
+                  >
+                    {supervisorRiskThresholds.map((threshold) => (
+                      <option key={threshold} value={threshold} title={supervisorRiskThresholdHelperText[threshold]}>
+                        {threshold}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <small>
+                  {supervisorControls.autoApprove.enabled
+                    ? `Enabled at ${supervisorControls.autoApprove.threshold}.`
+                    : `Disabled (threshold ${supervisorControls.autoApprove.threshold}).`}
+                </small>
+              </div>
+              <div className="session-control-field session-control-field-supervisor">
+                <span className="session-control-label">
+                  Auto Reject
+                  {defaultScopeReadOnly ? (
+                    <span className="session-control-lock" title="Managed by harness configuration" aria-label="Managed by harness configuration">
+                      🔒
+                    </span>
+                  ) : null}
+                </span>
+                <div className="session-control-inline">
+                  <select
+                    aria-label="Auto Reject enabled selector"
+                    value={supervisorControls.autoReject.enabled ? "enabled" : "disabled"}
+                    onChange={(event) => updateSupervisorAutoAction("autoReject", { enabled: event.target.value === "enabled" })}
+                    disabled={
+                      !selectedSessionId ||
+                      sessionControlsLoading ||
+                      sessionControlsApplying ||
+                      defaultScopeReadOnly ||
+                      Boolean(sessionControlsError)
+                    }
+                  >
+                    <option value="disabled">Off</option>
+                    <option value="enabled">On</option>
+                  </select>
+                  <select
+                    aria-label="Auto Reject threshold selector"
+                    title={autoRejectThresholdTooltip}
+                    value={supervisorControls.autoReject.threshold}
+                    onChange={(event) =>
+                      updateSupervisorAutoAction("autoReject", {
+                        threshold: normalizeSupervisorRiskThreshold(
+                          event.target.value,
+                          supervisorControls.autoReject.threshold
+                        )
+                      })
+                    }
+                    disabled={
+                      !selectedSessionId ||
+                      sessionControlsLoading ||
+                      sessionControlsApplying ||
+                      defaultScopeReadOnly ||
+                      Boolean(sessionControlsError)
+                    }
+                  >
+                    {supervisorRiskThresholds.map((threshold) => (
+                      <option key={threshold} value={threshold} title={supervisorRiskThresholdHelperText[threshold]}>
+                        {threshold}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <small>
+                  {supervisorControls.autoReject.enabled
+                    ? `Enabled at ${supervisorControls.autoReject.threshold}.`
+                    : `Disabled (threshold ${supervisorControls.autoReject.threshold}).`}
+                </small>
+              </div>
+              <div className="session-control-field session-control-field-supervisor">
+                <span className="session-control-label">
+                  Auto Steer
+                  {defaultScopeReadOnly ? (
+                    <span className="session-control-lock" title="Managed by harness configuration" aria-label="Managed by harness configuration">
+                      🔒
+                    </span>
+                  ) : null}
+                </span>
+                <div className="session-control-inline">
+                  <select
+                    aria-label="Auto Steer enabled selector"
+                    value={supervisorControls.autoSteer.enabled ? "enabled" : "disabled"}
+                    onChange={(event) => updateSupervisorAutoAction("autoSteer", { enabled: event.target.value === "enabled" })}
+                    disabled={
+                      !selectedSessionId ||
+                      sessionControlsLoading ||
+                      sessionControlsApplying ||
+                      defaultScopeReadOnly ||
+                      Boolean(sessionControlsError)
+                    }
+                  >
+                    <option value="disabled">Off</option>
+                    <option value="enabled">On</option>
+                  </select>
+                  <select
+                    aria-label="Auto Steer threshold selector"
+                    title={autoSteerThresholdTooltip}
+                    value={supervisorControls.autoSteer.threshold}
+                    onChange={(event) =>
+                      updateSupervisorAutoAction("autoSteer", {
+                        threshold: normalizeSupervisorRiskThreshold(
+                          event.target.value,
+                          supervisorControls.autoSteer.threshold
+                        )
+                      })
+                    }
+                    disabled={
+                      !selectedSessionId ||
+                      sessionControlsLoading ||
+                      sessionControlsApplying ||
+                      defaultScopeReadOnly ||
+                      Boolean(sessionControlsError)
+                    }
+                  >
+                    {supervisorRiskThresholds.map((threshold) => (
+                      <option key={threshold} value={threshold} title={supervisorRiskThresholdHelperText[threshold]}>
+                        {threshold}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <small>
+                  {supervisorControls.autoSteer.enabled
+                    ? `Enabled at ${supervisorControls.autoSteer.threshold}.`
+                    : `Disabled (threshold ${supervisorControls.autoSteer.threshold}).`}
+                </small>
+              </div>
             </div>
             {defaultScopeReadOnly ? (
               <p className="session-controls-lock-reason">
