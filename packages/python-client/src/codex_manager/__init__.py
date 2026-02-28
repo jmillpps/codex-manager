@@ -32,6 +32,12 @@ __all__ = [
     "NotFoundError",
     "PluginLifecycle",
     "PluginRegistry",
+    "RemoteSkill",
+    "RemoteSkillDispatch",
+    "RemoteSkillSession",
+    "RemoteSkillsFacade",
+    "AsyncRemoteSkillSession",
+    "AsyncRemoteSkillsFacade",
     "ReasoningEffort",
     "RetryPolicy",
     "ServerError",
@@ -91,6 +97,12 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "AsyncClientPlugin": (".protocols", "AsyncClientPlugin"),
     "SyncClientPlugin": (".protocols", "SyncClientPlugin"),
     "PluginLifecycle": (".protocols", "PluginLifecycle"),
+    "RemoteSkill": (".remote_skills", "RemoteSkill"),
+    "RemoteSkillDispatch": (".remote_skills", "RemoteSkillDispatch"),
+    "RemoteSkillSession": (".remote_skills", "RemoteSkillSession"),
+    "RemoteSkillsFacade": (".remote_skills", "RemoteSkillsFacade"),
+    "AsyncRemoteSkillSession": (".remote_skills", "AsyncRemoteSkillSession"),
+    "AsyncRemoteSkillsFacade": (".remote_skills", "AsyncRemoteSkillsFacade"),
 }
 
 if TYPE_CHECKING:
@@ -121,6 +133,14 @@ if TYPE_CHECKING:
     )
     from .models import AppServerSignal, StreamEvent
     from .plugins import PluginRegistry
+    from .remote_skills import (
+        AsyncRemoteSkillSession,
+        AsyncRemoteSkillsFacade,
+        RemoteSkill,
+        RemoteSkillDispatch,
+        RemoteSkillSession,
+        RemoteSkillsFacade,
+    )
     from .protocols import (
         AsyncClientPlugin,
         AsyncHeaderProvider,

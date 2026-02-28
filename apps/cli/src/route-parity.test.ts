@@ -17,6 +17,10 @@ function parseApiRouteKeys(source: string): Set<string> {
   return keys;
 }
 
+function toOpenApiPath(pathTemplate: string): string {
+  return pathTemplate.replace(/:([A-Za-z0-9_]+)/g, "{$1}");
+}
+
 test("cli route coverage list has unique entries", () => {
   assert.equal(CLI_ROUTE_BINDINGS.length, CLI_ROUTE_KEY_SET.size, "duplicate CLI route coverage entries found");
 });
@@ -43,4 +47,37 @@ test("cli route coverage matches api route registrations", async () => {
     },
     `route parity mismatch\nmissing: ${missing.join(", ")}\nextra: ${extra.join(", ")}`
   );
+});
+
+test("cli annotated allow-statuses match openapi non-5xx status contracts", async () => {
+  const currentDir = path.dirname(fileURLToPath(import.meta.url));
+  const openApiPath = path.resolve(currentDir, "../../api/openapi/openapi.json");
+  const openApiRaw = await readFile(openApiPath, "utf8");
+  const openApi = JSON.parse(openApiRaw) as {
+    paths?: Record<string, Record<string, { responses?: Record<string, unknown> }>>;
+  };
+
+  for (const binding of CLI_ROUTE_BINDINGS) {
+    if (!binding.allowStatuses) {
+      continue;
+    }
+
+    const openApiPathKey = toOpenApiPath(binding.path);
+    const methodKey = binding.method.toLowerCase();
+    const routeSpec = openApi.paths?.[openApiPathKey]?.[methodKey];
+    assert.ok(routeSpec, `missing OpenAPI route for ${binding.method} ${binding.path}`);
+
+    const openApiStatuses = Object.keys(routeSpec.responses ?? {})
+      .map((value) => Number.parseInt(value, 10))
+      .filter((value) => Number.isFinite(value))
+      .filter((value) => value < 500)
+      .sort((left, right) => left - right);
+    const cliStatuses = [...binding.allowStatuses].sort((left, right) => left - right);
+
+    assert.deepEqual(
+      cliStatuses,
+      openApiStatuses,
+      `allow-status parity mismatch for ${binding.command} (${binding.method} ${binding.path})`
+    );
+  }
 });

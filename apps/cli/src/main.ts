@@ -1963,6 +1963,25 @@ function buildProgram(): Command {
       })
     );
 
+  const sessionsToolCalls = sessions.command("tool-calls").description("Pending dynamic tool-call requests");
+  sessionsToolCalls
+    .command("list")
+    .requiredOption("--session-id <id>")
+    .action(
+      withRuntime("sessions tool-calls list", async (ctx, args) => {
+        const options = args[0] as { sessionId: string };
+        await runApiCall(ctx, {
+          command: "sessions tool-calls list",
+          method: "GET",
+          pathTemplate: "/api/sessions/:sessionId/tool-calls",
+          pathParams: {
+            sessionId: options.sessionId
+          },
+          allowStatuses: [200, 403, 410]
+        });
+      })
+    );
+
   const sessionsTranscript = sessions.command("transcript").description("Supplemental transcript operations");
   sessionsTranscript
     .command("upsert")
@@ -2144,6 +2163,54 @@ function buildProgram(): Command {
             decision: options.decision,
             scope: options.scope
           },
+          allowStatuses: [200, 404, 409]
+        });
+      })
+    );
+
+  const toolCalls = program.command("tool-calls").description("Dynamic tool-call response endpoints");
+  toolCalls
+    .command("respond")
+    .requiredOption("--request-id <id>")
+    .option("--success <value>", "true|false")
+    .option("--text <text>", "Convenience text response")
+    .option("--content-items <json or @file>", "Dynamic tool-call contentItems payload")
+    .option("--response <json or @file>", "Raw response payload")
+    .action(
+      withRuntime("tool-calls respond", async (ctx, args) => {
+        const options = args[0] as {
+          requestId: string;
+          success?: string;
+          text?: string;
+          contentItems?: string;
+          response?: string;
+        };
+        const body: Record<string, unknown> = {};
+        if (typeof options.success === "string") {
+          const normalized = options.success.trim().toLowerCase();
+          if (normalized !== "true" && normalized !== "false") {
+            throw new Error("--success must be true or false");
+          }
+          body.success = normalized === "true";
+        }
+        if (typeof options.text === "string") {
+          body.text = options.text;
+        }
+        if (options.contentItems) {
+          body.contentItems = await parseJsonInput(options.contentItems);
+        }
+        if (options.response) {
+          body.response = await parseJsonInput(options.response);
+        }
+
+        await runApiCall(ctx, {
+          command: "tool-calls respond",
+          method: "POST",
+          pathTemplate: "/api/tool-calls/:requestId/response",
+          pathParams: {
+            requestId: options.requestId
+          },
+          body,
           allowStatuses: [200, 404, 409]
         });
       })

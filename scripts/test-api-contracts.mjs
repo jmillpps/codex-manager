@@ -1135,6 +1135,20 @@ async function main() {
     });
     assert.equal(missingToolDecision.status, 404);
 
+    const invalidToolCallResponse = await request("/tool-calls/not-a-real-id/response", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ success: "invalid" })
+    });
+    assert.equal(invalidToolCallResponse.status, 400);
+
+    const missingToolCallResponse = await request("/tool-calls/not-a-real-id/response", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "done" })
+    });
+    assert.equal(missingToolCallResponse.status, 404);
+
     const invalidAccountCancel = await request("/account/login/cancel", {
       method: "POST",
       headers: { "content-type": "application/json" },

@@ -2,6 +2,7 @@ export type CliRouteBinding = {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   path: string;
   command: string;
+  allowStatuses?: Array<number>;
 };
 
 export const CLI_ROUTE_BINDINGS: Array<CliRouteBinding> = [
@@ -65,6 +66,12 @@ export const CLI_ROUTE_BINDINGS: Array<CliRouteBinding> = [
   { method: "POST", path: "/api/sessions/:sessionId/suggested-request/jobs", command: "sessions suggest-request enqueue" },
   { method: "POST", path: "/api/sessions/:sessionId/suggested-request/upsert", command: "sessions suggest-request upsert" },
   { method: "GET", path: "/api/sessions/:sessionId/tool-input", command: "sessions tool-input list" },
+  {
+    method: "GET",
+    path: "/api/sessions/:sessionId/tool-calls",
+    command: "sessions tool-calls list",
+    allowStatuses: [200, 403, 410]
+  },
   { method: "POST", path: "/api/sessions/:sessionId/transcript/upsert", command: "sessions transcript upsert" },
   { method: "POST", path: "/api/sessions/:sessionId/turns/:turnId/steer", command: "sessions steer" },
   { method: "POST", path: "/api/sessions/:sessionId/unarchive", command: "sessions unarchive" },
@@ -73,6 +80,12 @@ export const CLI_ROUTE_BINDINGS: Array<CliRouteBinding> = [
   { method: "GET", path: "/api/skills/remote", command: "skills remote get" },
   { method: "POST", path: "/api/skills/remote", command: "skills remote set" },
   { method: "GET", path: "/api/stream", command: "stream events" },
+  {
+    method: "POST",
+    path: "/api/tool-calls/:requestId/response",
+    command: "tool-calls respond",
+    allowStatuses: [200, 404, 409]
+  },
   { method: "POST", path: "/api/tool-input/:requestId/decision", command: "tool-input decide" }
 ];
 
