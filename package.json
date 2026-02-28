@@ -12,6 +12,8 @@
     "dev:web": "pnpm --filter @repo/web dev",
     "openapi:gen": "node scripts/generate-openapi.mjs",
     "client:gen": "node scripts/generate-client.mjs",
+    "python:openapi:gen": "node scripts/generate-python-openapi-models.mjs",
+    "python:openapi:check": "pnpm python:openapi:gen && git diff --exit-code -- packages/python-client/src/codex_manager/generated/openapi_models.py packages/python-client/src/codex_manager/generated/__init__.py",
     "gen": "pnpm openapi:gen && pnpm client:gen",
     "codex:schema": "node scripts/generate-codex-schema.mjs",
     "smoke:runtime": "node scripts/smoke-runtime.mjs",

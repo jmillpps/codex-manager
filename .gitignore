@@ -10,6 +10,11 @@ coverage/
 !.env.example
 .DS_Store
 *.log
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
 apps/*/dist
 packages/*/dist
 tmp/
