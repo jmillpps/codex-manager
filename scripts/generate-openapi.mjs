@@ -1048,7 +1048,7 @@ const openApiDocument = {
         summary: "Resume a session",
         operationId: "resumeSession",
         parameters: [pathParam("sessionId", "Session id")],
-        requestBody: requestBody({ type: "object", additionalProperties: true }, false),
+        requestBody: requestBody(schemaRef("ResumeSessionRequest"), false),
         responses: responses([
           [200, "Session resumed"],
           [410, "Session deleted"]
@@ -1387,8 +1387,36 @@ const openApiDocument = {
           model: { type: "string" },
           approvalPolicy: schemaRef("ApprovalPolicy"),
           networkAccess: schemaRef("NetworkAccess"),
-          filesystemSandbox: schemaRef("FilesystemSandbox")
+          filesystemSandbox: schemaRef("FilesystemSandbox"),
+          dynamicTools: {
+            type: "array",
+            maxItems: 128,
+            items: schemaRef("DynamicToolDefinition")
+          }
         }
+      },
+      ResumeSessionRequest: {
+        type: "object",
+        properties: {
+          dynamicTools: {
+            type: "array",
+            maxItems: 128,
+            items: schemaRef("DynamicToolDefinition")
+          }
+        }
+      },
+      DynamicToolDefinition: {
+        type: "object",
+        required: ["name", "description", "inputSchema"],
+        properties: {
+          name: { type: "string", minLength: 1 },
+          description: { type: "string", minLength: 1 },
+          inputSchema: {
+            type: "object",
+            additionalProperties: true
+          }
+        },
+        additionalProperties: false
       },
       SendSessionMessageRequest: {
         type: "object",
@@ -1399,7 +1427,12 @@ const openApiDocument = {
           effort: reasoningEffortSchema,
           approvalPolicy: schemaRef("ApprovalPolicy"),
           networkAccess: schemaRef("NetworkAccess"),
-          filesystemSandbox: schemaRef("FilesystemSandbox")
+          filesystemSandbox: schemaRef("FilesystemSandbox"),
+          dynamicTools: {
+            type: "array",
+            maxItems: 128,
+            items: schemaRef("DynamicToolDefinition")
+          }
         }
       },
       SuggestedRequestBody: {

@@ -1184,6 +1184,7 @@ function buildProgram(): Command {
     .option("--approval-policy <policy>")
     .option("--network-access <mode>")
     .option("--filesystem-sandbox <mode>")
+    .option("--dynamic-tools <json or @file>")
     .action(
       withRuntime("sessions create", async (ctx, args) => {
         const options = args[0] as {
@@ -1192,7 +1193,9 @@ function buildProgram(): Command {
           approvalPolicy?: string;
           networkAccess?: string;
           filesystemSandbox?: string;
+          dynamicTools?: string;
         };
+        const dynamicTools = options.dynamicTools ? await parseJsonInput(options.dynamicTools) : undefined;
         await runApiCall(ctx, {
           command: "sessions create",
           method: "POST",
@@ -1202,7 +1205,8 @@ function buildProgram(): Command {
             ...(options.model ? { model: options.model } : {}),
             ...(options.approvalPolicy ? { approvalPolicy: options.approvalPolicy } : {}),
             ...(options.networkAccess ? { networkAccess: options.networkAccess } : {}),
-            ...(options.filesystemSandbox ? { filesystemSandbox: options.filesystemSandbox } : {})
+            ...(options.filesystemSandbox ? { filesystemSandbox: options.filesystemSandbox } : {}),
+            ...(dynamicTools !== undefined ? { dynamicTools } : {})
           }
         });
       })
@@ -1353,9 +1357,11 @@ function buildProgram(): Command {
   sessions
     .command("resume")
     .requiredOption("--session-id <id>")
+    .option("--dynamic-tools <json or @file>")
     .action(
       withRuntime("sessions resume", async (ctx, args) => {
-        const options = args[0] as { sessionId: string };
+        const options = args[0] as { sessionId: string; dynamicTools?: string };
+        const dynamicTools = options.dynamicTools ? await parseJsonInput(options.dynamicTools) : undefined;
         await runApiCall(ctx, {
           command: "sessions resume",
           method: "POST",
@@ -1363,7 +1369,7 @@ function buildProgram(): Command {
           pathParams: {
             sessionId: options.sessionId
           },
-          body: {},
+          body: dynamicTools === undefined ? {} : { dynamicTools },
           allowStatuses: [200, 410]
         });
       })
@@ -1460,6 +1466,7 @@ function buildProgram(): Command {
     .option("--approval-policy <policy>")
     .option("--network-access <mode>")
     .option("--filesystem-sandbox <mode>")
+    .option("--dynamic-tools <json or @file>")
     .action(
       withRuntime("sessions send", async (ctx, args) => {
         const options = args[0] as {
@@ -1470,7 +1477,9 @@ function buildProgram(): Command {
           approvalPolicy?: string;
           networkAccess?: string;
           filesystemSandbox?: string;
+          dynamicTools?: string;
         };
+        const dynamicTools = options.dynamicTools ? await parseJsonInput(options.dynamicTools) : undefined;
         await runApiCall(ctx, {
           command: "sessions send",
           method: "POST",
@@ -1484,7 +1493,8 @@ function buildProgram(): Command {
             ...(options.effort ? { effort: options.effort } : {}),
             ...(options.approvalPolicy ? { approvalPolicy: options.approvalPolicy } : {}),
             ...(options.networkAccess ? { networkAccess: options.networkAccess } : {}),
-            ...(options.filesystemSandbox ? { filesystemSandbox: options.filesystemSandbox } : {})
+            ...(options.filesystemSandbox ? { filesystemSandbox: options.filesystemSandbox } : {}),
+            ...(dynamicTools !== undefined ? { dynamicTools } : {})
           },
           allowStatuses: [202, 404, 410]
         });
@@ -2163,7 +2173,7 @@ function buildProgram(): Command {
             decision: options.decision,
             scope: options.scope
           },
-          allowStatuses: [200, 404, 409]
+          allowStatuses: [200, 404, 409, 500]
         });
       })
     );
@@ -2211,7 +2221,7 @@ function buildProgram(): Command {
             requestId: options.requestId
           },
           body,
-          allowStatuses: [200, 404, 409]
+          allowStatuses: [200, 404, 409, 500]
         });
       })
     );
@@ -2244,7 +2254,7 @@ function buildProgram(): Command {
             requestId: options.requestId
           },
           body,
-          allowStatuses: [200, 404]
+          allowStatuses: [200, 404, 500]
         });
       })
     );

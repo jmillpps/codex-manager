@@ -77,7 +77,9 @@ def _should_validate(mode: TypedValidationMode, override: bool | None) -> bool:
     return mode != "off"
 
 
-def _normalize_request_field_names(model_type: type[BaseModel], values: Mapping[str, Any]) -> dict[str, Any]:
+def _normalize_request_field_names(
+    model_type: type[BaseModel], values: Mapping[str, Any]
+) -> dict[str, Any]:
     alias_to_field_name: dict[str, str] = {}
     for field_name, field in model_type.model_fields.items():
         alias_to_field_name[field_name] = field_name
@@ -104,7 +106,9 @@ def _serialize_payload_without_validation(
         return {}
 
     if payload is not None and kwargs:
-        raise ValueError(f"{contract.operation_key} accepts either `payload` or keyword fields, not both")
+        raise ValueError(
+            f"{contract.operation_key} accepts either `payload` or keyword fields, not both"
+        )
 
     if payload is None:
         return _normalize_request_field_names(model_type, kwargs)
@@ -114,7 +118,8 @@ def _serialize_payload_without_validation(
         return _normalize_request_field_names(model_type, payload)
 
     raise ValueError(
-        f"{contract.operation_key} payload must be a pydantic model instance or mapping when validation is disabled"
+        f"{contract.operation_key} payload must be a pydantic model instance "
+        "or mapping when validation is disabled"
     )
 
 
@@ -135,7 +140,9 @@ def _serialize_request_payload(
         return {}
 
     if payload is not None and kwargs:
-        raise ValueError(f"{contract.operation_key} accepts either `payload` or keyword fields, not both")
+        raise ValueError(
+            f"{contract.operation_key} accepts either `payload` or keyword fields, not both"
+        )
 
     raw_input: Any = dict(kwargs) if payload is None else payload
     if isinstance(raw_input, model_type):
@@ -204,7 +211,13 @@ class TypedSessionsApi:
         self._sessions = sessions_api
         self._mode_getter = mode_getter
 
-    def create(self, payload: BaseModel | Mapping[str, Any] | None = None, *, validate: bool | None = None, **kwargs: Any) -> Any:
+    def create(
+        self,
+        payload: BaseModel | Mapping[str, Any] | None = None,
+        *,
+        validate: bool | None = None,
+        **kwargs: Any,
+    ) -> Any:
         contract = TYPED_OPERATION_CONTRACTS["sessions.create"]
         should_validate = _should_validate(_resolve_mode(self._mode_getter), validate)
         body = _serialize_request_payload(contract, payload, kwargs, validate=should_validate)
@@ -577,7 +590,9 @@ class AsyncTypedToolInputApi:
 
 class TypedCodexManagerFacade:
     def __init__(self, client: Any) -> None:
-        mode_getter = lambda: getattr(client, "_validation_mode", "typed-only")
+        def mode_getter() -> str:
+            return getattr(client, "_validation_mode", "typed-only")
+
         self.sessions = TypedSessionsApi(client.sessions, mode_getter)
         self.approvals = TypedApprovalsApi(client.approvals, mode_getter)
         self.tool_input = TypedToolInputApi(client.tool_input, mode_getter)
@@ -588,7 +603,9 @@ class TypedCodexManagerFacade:
 
 class AsyncTypedCodexManagerFacade:
     def __init__(self, client: Any) -> None:
-        mode_getter = lambda: getattr(client, "_validation_mode", "typed-only")
+        def mode_getter() -> str:
+            return getattr(client, "_validation_mode", "typed-only")
+
         self.sessions = AsyncTypedSessionsApi(client.sessions, mode_getter)
         self.approvals = AsyncTypedApprovalsApi(client.approvals, mode_getter)
         self.tool_input = AsyncTypedToolInputApi(client.tool_input, mode_getter)

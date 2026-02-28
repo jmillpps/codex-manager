@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 RequestFn = Callable[..., Any]
 ReasoningEffort: TypeAlias = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
@@ -13,6 +14,7 @@ FilesystemSandbox: TypeAlias = Literal["read-only", "workspace-write", "danger-f
 SessionSettingsScopeName: TypeAlias = Literal["session", "default"]
 ApprovalDecision: TypeAlias = Literal["accept", "decline", "cancel"]
 ToolInputDecision: TypeAlias = Literal["accept", "decline", "cancel"]
+DynamicToolDefinition: TypeAlias = dict[str, Any]
 
 
 def _ensure_dict(value: Any) -> dict[str, Any]:
@@ -36,6 +38,14 @@ def _namespace_parts(namespace: str) -> list[str]:
 
 def _omit_none_fields(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if value is not None}
+
+
+def _coerce_dynamic_tools(
+    dynamic_tools: Sequence[DynamicToolDefinition] | None,
+) -> list[DynamicToolDefinition] | None:
+    if dynamic_tools is None:
+        return None
+    return list(dynamic_tools)
 
 
 class RawApi:
@@ -75,7 +85,9 @@ class SystemApi:
         return self._request("system.info", "GET", "")
 
     def capabilities(self, *, refresh: bool = False) -> Any:
-        return self._request("system.capabilities", "GET", "/capabilities", query={"refresh": refresh})
+        return self._request(
+            "system.capabilities", "GET", "/capabilities", query={"refresh": refresh}
+        )
 
     def experimental_features(self, *, cursor: str | None = None, limit: int | None = None) -> Any:
         return self._request(
@@ -159,7 +171,9 @@ class SkillsApi:
         )
 
     def remote_get(self) -> Any:
-        return self._request("skills.remote.get", "GET", "/skills/remote", allow_statuses=(200, 500, 501))
+        return self._request(
+            "skills.remote.get", "GET", "/skills/remote", allow_statuses=(200, 500, 501)
+        )
 
     def remote_set(self, *, hazelnut_id: str, is_preload: bool) -> Any:
         return self._request(
@@ -251,10 +265,14 @@ class AccountApi:
         )
 
     def logout(self) -> Any:
-        return self._request("account.logout", "POST", "/account/logout", json_body={}, allow_statuses=(200, 501))
+        return self._request(
+            "account.logout", "POST", "/account/logout", json_body={}, allow_statuses=(200, 501)
+        )
 
     def rate_limits(self) -> Any:
-        return self._request("account.rate_limits", "GET", "/account/rate-limits", allow_statuses=(200, 401, 501))
+        return self._request(
+            "account.rate_limits", "GET", "/account/rate-limits", allow_statuses=(200, 401, 501)
+        )
 
 
 class ConfigApi:
@@ -271,7 +289,9 @@ class ConfigApi:
         )
 
     def requirements(self) -> Any:
-        return self._request("config.requirements", "GET", "/config/requirements", allow_statuses=(200, 501))
+        return self._request(
+            "config.requirements", "GET", "/config/requirements", allow_statuses=(200, 501)
+        )
 
     def set(
         self,
@@ -307,7 +327,9 @@ class ConfigApi:
             "config.batch_set",
             "POST",
             "/config/batch",
-            json_body=_omit_none_fields({"edits": edits, "expectedVersion": expected_version, "filePath": file_path}),
+            json_body=_omit_none_fields(
+                {"edits": edits, "expectedVersion": expected_version, "filePath": file_path}
+            ),
             allow_statuses=(200, 501),
         )
 
@@ -316,7 +338,9 @@ class RuntimeApi:
     def __init__(self, request: RequestFn) -> None:
         self._request = request
 
-    def exec(self, *, command: list[str], cwd: str | None = None, timeout_ms: int | None = None) -> Any:
+    def exec(
+        self, *, command: list[str], cwd: str | None = None, timeout_ms: int | None = None
+    ) -> Any:
         return self._request(
             "runtime.exec",
             "POST",
@@ -408,7 +432,9 @@ class ProjectsApi:
         )
 
     def delete(self, *, project_id: str) -> Any:
-        return self._request("projects.delete", "DELETE", f"/projects/{project_id}", allow_statuses=(200, 404))
+        return self._request(
+            "projects.delete", "DELETE", f"/projects/{project_id}", allow_statuses=(200, 404)
+        )
 
     def list_agent_sessions(self, *, project_id: str) -> Any:
         return self._request(
@@ -479,7 +505,9 @@ class ToolInputApi:
             "tool_input.decide",
             "POST",
             f"/tool-input/{request_id}/decision",
-            json_body=_omit_none_fields({"decision": decision, "answers": answers, "response": response}),
+            json_body=_omit_none_fields(
+                {"decision": decision, "answers": answers, "response": response}
+            ),
             allow_statuses=(200, 404, 500),
         )
 
@@ -509,7 +537,7 @@ class ToolCallsApi:
                     "response": response,
                 }
             ),
-            allow_statuses=(200, 404, 409),
+            allow_statuses=(200, 404, 409, 500),
         )
 
 
@@ -545,7 +573,9 @@ class SessionsApi:
         approval_policy: ApprovalPolicy | None = None,
         network_access: NetworkAccess | None = None,
         filesystem_sandbox: FilesystemSandbox | None = None,
+        dynamic_tools: Sequence[DynamicToolDefinition] | None = None,
     ) -> Any:
+        dynamic_tools_payload = _coerce_dynamic_tools(dynamic_tools)
         return self._request(
             "sessions.create",
             "POST",
@@ -557,18 +587,25 @@ class SessionsApi:
                     "approvalPolicy": approval_policy,
                     "networkAccess": network_access,
                     "filesystemSandbox": filesystem_sandbox,
+                    "dynamicTools": dynamic_tools_payload,
                 }
             ),
         )
 
     def get(self, *, session_id: str) -> Any:
-        return self._request("sessions.get", "GET", f"/sessions/{session_id}", allow_statuses=(200, 410))
+        return self._request(
+            "sessions.get", "GET", f"/sessions/{session_id}", allow_statuses=(200, 410)
+        )
 
     def delete(self, *, session_id: str) -> Any:
-        return self._request("sessions.delete", "DELETE", f"/sessions/{session_id}", allow_statuses=(200, 404, 410))
+        return self._request(
+            "sessions.delete", "DELETE", f"/sessions/{session_id}", allow_statuses=(200, 404, 410)
+        )
 
     def fork(self, *, session_id: str) -> Any:
-        return self._request("sessions.fork", "POST", f"/sessions/{session_id}/fork", allow_statuses=(200, 410, 501))
+        return self._request(
+            "sessions.fork", "POST", f"/sessions/{session_id}/fork", allow_statuses=(200, 410, 501)
+        )
 
     def compact(self, *, session_id: str) -> Any:
         return self._request(
@@ -699,7 +736,9 @@ class SessionsApi:
             "sessions.controls.apply",
             "POST",
             f"/sessions/{session_id}/session-controls",
-            json_body=_omit_none_fields({"scope": scope, "actor": actor, "source": source, "controls": controls}),
+            json_body=_omit_none_fields(
+                {"scope": scope, "actor": actor, "source": source, "controls": controls}
+            ),
             allow_statuses=(200, 400, 404, 410, 423),
         )
 
@@ -771,8 +810,20 @@ class SessionsApi:
             allow_statuses=(200, 404, 410, 423),
         )
 
-    def resume(self, *, session_id: str) -> Any:
-        return self._request("sessions.resume", "POST", f"/sessions/{session_id}/resume", allow_statuses=(200, 410))
+    def resume(
+        self,
+        *,
+        session_id: str,
+        dynamic_tools: Sequence[DynamicToolDefinition] | None = None,
+    ) -> Any:
+        dynamic_tools_payload = _coerce_dynamic_tools(dynamic_tools)
+        return self._request(
+            "sessions.resume",
+            "POST",
+            f"/sessions/{session_id}/resume",
+            json_body=_omit_none_fields({"dynamicTools": dynamic_tools_payload}),
+            allow_statuses=(200, 410),
+        )
 
     def suggest_request(
         self,
@@ -873,7 +924,9 @@ class SessionsApi:
         approval_policy: ApprovalPolicy | None = None,
         network_access: NetworkAccess | None = None,
         filesystem_sandbox: FilesystemSandbox | None = None,
+        dynamic_tools: Sequence[DynamicToolDefinition] | None = None,
     ) -> Any:
+        dynamic_tools_payload = _coerce_dynamic_tools(dynamic_tools)
         return self._request(
             "sessions.send_message",
             "POST",
@@ -886,6 +939,7 @@ class SessionsApi:
                     "approvalPolicy": approval_policy,
                     "networkAccess": network_access,
                     "filesystemSandbox": filesystem_sandbox,
+                    "dynamicTools": dynamic_tools_payload,
                 }
             ),
             allow_statuses=(202, 404, 410),
@@ -927,7 +981,14 @@ class SessionControlsScope:
     def get(self) -> Any:
         return self.sessions.controls_get(session_id=self.session_id)
 
-    def apply(self, *, controls: dict[str, Any], scope: str = "session", actor: str | None = None, source: str | None = None) -> Any:
+    def apply(
+        self,
+        *,
+        controls: dict[str, Any],
+        scope: str = "session",
+        actor: str | None = None,
+        source: str | None = None,
+    ) -> Any:
         return self.sessions.controls_apply(
             session_id=self.session_id,
             controls=controls,
@@ -939,10 +1000,10 @@ class SessionControlsScope:
 
 @dataclass(slots=True)
 class SessionSettingsNamespace:
-    settings_scope: "SessionSettingsScope"
+    settings_scope: SessionSettingsScope
     namespace: str
 
-    def get(self, *, scope: str = "session") -> Any:
+    def get(self, *, scope: SessionSettingsScopeName = "session") -> Any:
         parts = _namespace_parts(self.namespace)
         if not parts:
             return self.settings_scope.get(scope=scope)
@@ -958,7 +1019,13 @@ class SessionSettingsNamespace:
             current = current.get(part)
         return current
 
-    def set(self, value: Any, *, scope: str = "session", mode: str = "merge") -> Any:
+    def set(
+        self,
+        value: Any,
+        *,
+        scope: SessionSettingsScopeName = "session",
+        mode: str = "merge",
+    ) -> Any:
         parts = _namespace_parts(self.namespace)
         if not parts:
             if not isinstance(value, dict):
@@ -992,7 +1059,12 @@ class SessionSettingsNamespace:
         merged_root = _deep_merge(root_dict, patch)
         return self.settings_scope.set(key=root_key, value=merged_root, scope=scope)
 
-    def merge(self, patch: dict[str, Any], *, scope: str = "session") -> Any:
+    def merge(
+        self,
+        patch: dict[str, Any],
+        *,
+        scope: SessionSettingsScopeName = "session",
+    ) -> Any:
         if not isinstance(patch, dict):
             raise ValueError("merge patch must be a dict")
 
@@ -1102,8 +1174,8 @@ class SessionScope:
     def unarchive(self) -> Any:
         return self._sessions.unarchive(session_id=self.session_id)
 
-    def resume(self) -> Any:
-        return self._sessions.resume(session_id=self.session_id)
+    def resume(self, **kwargs: Any) -> Any:
+        return self._sessions.resume(session_id=self.session_id, **kwargs)
 
     def send(self, text: str, **kwargs: Any) -> Any:
         return self._sessions.send_message(session_id=self.session_id, text=text, **kwargs)
@@ -1111,5 +1183,13 @@ class SessionScope:
     def interrupt(self) -> Any:
         return self._sessions.interrupt(session_id=self.session_id)
 
-    def suggest_request(self, *, model: str | None = None, effort: ReasoningEffort | None = None, draft: str | None = None) -> Any:
-        return self._sessions.suggest_request(session_id=self.session_id, model=model, effort=effort, draft=draft)
+    def suggest_request(
+        self,
+        *,
+        model: str | None = None,
+        effort: ReasoningEffort | None = None,
+        draft: str | None = None,
+    ) -> Any:
+        return self._sessions.suggest_request(
+            session_id=self.session_id, model=model, effort=effort, draft=draft
+        )

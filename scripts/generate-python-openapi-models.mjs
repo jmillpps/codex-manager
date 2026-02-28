@@ -228,9 +228,11 @@ function buildClass(name, schema) {
     usedFieldNames.add(pythonName);
     const needsAlias = pythonName !== originalName;
 
-    let defaultValue = requiredField ? "..." : "None";
+    let defaultValue = requiredField ? "Field(...)" : "None";
     if (needsAlias) {
-      defaultValue = requiredField ? `Field(..., alias="${originalName}")` : `Field(None, alias="${originalName}")`;
+      defaultValue = requiredField
+        ? `Field(..., alias="${originalName}")`
+        : `Field(None, alias="${originalName}")`;
     }
 
     lines.push(`    ${pythonName}: ${fieldType} = ${defaultValue}`);

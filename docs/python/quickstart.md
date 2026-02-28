@@ -18,14 +18,14 @@ pip install -e packages/python-client
 from codex_manager import CodexManager
 
 with CodexManager.from_profile("local") as cm:
-    session = cm.sessions.create(cwd="/path/to/workspace")
+    session = cm.sessions.create(cwd=".")
     session_id = session["session"]["sessionId"]
 
-    cm.sessions.send_message(session_id=session_id, text="Summarize this repository architecture.")
-    detail = cm.sessions.get(session_id=session_id)
-
-    print(session_id)
-    print(len(detail.get("transcript", [])))
+    reply = cm.wait.send_message_and_wait_reply(
+        session_id=session_id,
+        text="Explain this repository.",
+    )
+    print(reply.assistant_reply)
 ```
 
 ## Basic async example
@@ -36,8 +36,16 @@ from codex_manager import AsyncCodexManager
 
 async def main() -> None:
     async with AsyncCodexManager.from_profile("local") as cm:
-        response = await cm.system.health()
-        print(response["status"])
+        session = await cm.sessions.create(cwd="/path/to/workspace")
+        session_id = session["session"]["sessionId"]
+        reply = await cm.wait.send_message_and_wait_reply(
+            session_id=session_id,
+            text="List the top 3 architecture components in this repository.",
+            timeout_seconds=90,
+            interval_seconds=1.0,
+        )
+        print("turn:", reply.turn_id)
+        print("assistant:", reply.assistant_reply)
 
 asyncio.run(main())
 ```
@@ -84,6 +92,7 @@ with CodexManager(validation_mode="off") as cm_off:
 
 - Bind session scope once: `chat = cm.session(session_id)`
 - Send messages: `chat.messages.send("...")`
+- Wait for completion: `cm.wait.send_message_and_wait_reply(...)`, `await acm.wait.send_message_and_wait_reply(...)`
 - Manage controls: `chat.controls.get()`, `chat.controls.apply(...)`
 - Manage settings: `chat.settings.get()`, `chat.settings.set(...)`, `chat.settings.namespace("supervisor.fileChange")`
 - Register middleware objects: `cm.use_middleware(...)`
@@ -92,6 +101,7 @@ with CodexManager(validation_mode="off") as cm_off:
 ## Next
 
 - For copy-paste recipes, open `docs/python/practical-recipes.md`
+- For a multi-agent team workflow without orchestrator jobs, open `docs/python/team-mesh.md`
 - For endpoint/domain coverage, open `docs/python/api-surface.md`
 - For event handlers and decorators, open `docs/python/streaming-and-handlers.md`
 - For dynamic tool-call bridging with Python handlers, open `docs/python/remote-skills.md`

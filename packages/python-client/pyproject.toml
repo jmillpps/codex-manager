@@ -61,3 +61,7 @@ strict = false
 warn_unused_ignores = true
 warn_redundant_casts = true
 warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["codex_manager.generated.openapi_models"]
+ignore_errors = true

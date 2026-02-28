@@ -165,25 +165,15 @@ Install locally from this repo:
 pip install -e packages/python-client
 ```
 
-Simple, generally useful example:
+Practical advanced example: interconnected team development mesh (no orchestrator jobs).
 
-```python
-from codex_manager import CodexManager
+Run it directly from repository root:
 
-with CodexManager.from_profile("local") as cm:
-    session = cm.sessions.create(cwd="/path/to/workspace")
-    session_id = session["session"]["sessionId"]
-
-    accepted = cm.sessions.send_message(
-        session_id=session_id,
-        text="Summarize the most important changes in this repository.",
-    )
-    detail = cm.sessions.get(session_id=session_id)
-
-    print("Title:", detail["session"]["title"])
-    print("Session ID:", session_id)
-    print("Turn ID:", accepted["turnId"])
+```bash
+PYTHONPATH=packages/python-client/src python packages/python-client/examples/team_mesh.py
 ```
+
+The script creates three sessions (`developer`, `docs`, `reviewer`) through `remote_skills.create_session(...)` so remote tools are attached at create-time, then coordinates through remote skills (`team_pull_work`, `team_queue_work`, `team_publish_artifact`, `team_read_board`, `team_mark_done`) and shared Python state.
 
 The Python client supports:
 
@@ -197,24 +187,11 @@ The Python client supports:
 - hook-registry injection (`hook_registry`) for custom hook orchestration
 - middleware object registration with `use_middleware(...)`
 - session-scoped wrappers and namespaced settings helpers
+- wait helpers for sync + async automation (`wait.until(...)`, `wait.send_message_and_wait_reply(...)`)
 - dynamic tool-call APIs (`sessions.tool_calls`, `tool_calls.respond`) and session-scoped remote-skill bridge helpers (`remote_skills.session(...)`)
-
-Typed example:
-
-```python
-from codex_manager import CodexManager
-from codex_manager.typed import CreateSessionRequest, SendSessionMessageRequest
-
-with CodexManager.from_profile("local") as cm:
-    created = cm.typed.sessions.create(
-        CreateSessionRequest(cwd="/path/to/workspace", model="gpt-5")
-    )
-    accepted = cm.typed.sessions.send_message(
-        session_id=created.session.session_id,
-        payload=SendSessionMessageRequest(text="Summarize the latest API changes."),
-    )
-    print(created.session.title, accepted.turn_id)
-```
+  - remote-skill `send(...)` auto-forwards registered handlers as `dynamic_tools`
+  - `remote_skills.create_session(register=...)` creates sessions with the tool catalog pre-attached for first-turn tool-call reliability
+  - `remote_skills.send_prepared(...)` provides catalog-prepare + send for existing sessions
 
 Common practical uses:
 
@@ -233,6 +210,7 @@ Then continue to focused docs:
 
 - [`docs/python/quickstart.md`](docs/python/quickstart.md)
 - [`docs/python/practical-recipes.md`](docs/python/practical-recipes.md)
+- [`docs/python/team-mesh.md`](docs/python/team-mesh.md)
 - [`docs/python/api-surface.md`](docs/python/api-surface.md)
 - [`docs/python/streaming-and-handlers.md`](docs/python/streaming-and-handlers.md)
 - [`docs/python/remote-skills.md`](docs/python/remote-skills.md)
@@ -245,6 +223,7 @@ For practical patterns, use:
 
 - `docs/python/quickstart.md` for first workflows
 - `docs/python/practical-recipes.md` for common production automation recipes
+- `docs/python/team-mesh.md` for multi-agent team coordination without server orchestrator jobs
 - `docs/python/settings-and-automation.md` for settings-driven automation recipes
 - `docs/python/streaming-and-handlers.md` for event-driven orchestration patterns
 - `docs/python/remote-skills.md` for dynamic tool-call bridge patterns

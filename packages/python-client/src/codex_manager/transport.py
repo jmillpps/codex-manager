@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from json import JSONDecodeError
-from typing import Any, Iterable
+from typing import Any
 from urllib.parse import urlencode
 
 import httpx

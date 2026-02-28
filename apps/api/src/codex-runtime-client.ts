@@ -31,6 +31,19 @@ type PendingRequest = {
   timeout: NodeJS.Timeout;
 };
 
+function shouldRetryInitializeWithoutExperimentalApi(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const lower = error.message.toLowerCase();
+  return (
+    lower.includes("experimentalapi") ||
+    lower.includes("unknown field") ||
+    lower.includes("invalid params") ||
+    lower.includes("rpc error -32602")
+  );
+}
+
 export type CodexRuntimeClientOptions = {
   bin: string;
   codeHome?: string;
@@ -97,6 +110,7 @@ export class CodexRuntimeClient extends EventEmitter {
       this.initialized = false;
       this.child = undefined;
       this.rejectAllPending(new Error("codex app-server exited before responding"));
+      this.emit("exit", this.lastExit);
       this.options.logger.warn({ code, signal }, "codex app-server exited");
     });
 
@@ -115,16 +129,36 @@ export class CodexRuntimeClient extends EventEmitter {
     this.options.logger.info({ pid: child.pid }, "codex app-server started");
 
     try {
-      await this.call("initialize", {
+      const initializeBase = {
         clientInfo: {
           name: "codex_manager_api",
           title: "Codex Manager API",
           version: "0.1.0"
-        },
-        capabilities: {
-          experimentalApi: false
         }
-      });
+      };
+
+      try {
+        await this.call("initialize", {
+          ...initializeBase,
+          capabilities: {
+            experimentalApi: true
+          }
+        });
+      } catch (error) {
+        if (!shouldRetryInitializeWithoutExperimentalApi(error)) {
+          throw error;
+        }
+        this.options.logger.warn(
+          { error },
+          "codex initialize rejected experimentalApi=true; retrying with experimental API disabled"
+        );
+        await this.call("initialize", {
+          ...initializeBase,
+          capabilities: {
+            experimentalApi: false
+          }
+        });
+      }
       await this.notify("initialized");
       this.initialized = true;
     } catch (error) {

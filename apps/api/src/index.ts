@@ -219,6 +219,12 @@ type DynamicToolCallOutputContentItem =
       imageUrl: string;
     };
 
+type DynamicToolDefinition = {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+};
+
 type PendingDynamicToolCall = {
   requestId: string;
   method: DynamicToolCallRequestMethod;
@@ -344,13 +350,21 @@ type HardDeleteSessionOutcome =
       sessionId: string;
     };
 
+const dynamicToolDefinitionSchema = z.object({
+  name: z.string().trim().min(1),
+  description: z.string().trim().min(1),
+  inputSchema: z.record(z.string(), z.unknown())
+});
+const dynamicToolArraySchema = z.array(dynamicToolDefinitionSchema).max(128).optional();
+
 const createSessionBodySchema = z
   .object({
     cwd: z.string().min(1).optional(),
     model: z.string().min(1).optional(),
     approvalPolicy: z.enum(["untrusted", "on-failure", "on-request", "never"]).optional(),
     networkAccess: z.enum(["restricted", "enabled"]).optional(),
-    filesystemSandbox: z.enum(["read-only", "workspace-write", "danger-full-access"]).optional()
+    filesystemSandbox: z.enum(["read-only", "workspace-write", "danger-full-access"]).optional(),
+    dynamicTools: dynamicToolArraySchema
   })
   .optional();
 
@@ -425,8 +439,15 @@ const sendMessageBodySchema = z.object({
   effort: reasoningEffortSchema.optional(),
   approvalPolicy: approvalPolicySchema.optional(),
   networkAccess: networkAccessSchema.optional(),
-  filesystemSandbox: filesystemSandboxSchema.optional()
+  filesystemSandbox: filesystemSandboxSchema.optional(),
+  dynamicTools: dynamicToolArraySchema
 });
+
+const resumeSessionBodySchema = z
+  .object({
+    dynamicTools: dynamicToolArraySchema
+  })
+  .optional();
 
 const suggestedRequestBodySchema = z
   .object({
@@ -763,7 +784,7 @@ const activeTurnByThread = new Map<string, string>();
 const pendingApprovals = new Map<string, PendingApprovalRecord>();
 const pendingToolUserInputs = new Map<string, PendingToolUserInputRecord>();
 const pendingDynamicToolCalls = new Map<string, PendingDynamicToolCallRecord>();
-const respondingDynamicToolCalls = new Set<string>();
+const respondingDynamicToolCalls = new Map<string, PendingDynamicToolCallRecord>();
 const purgedSessionIds = new Set<string>();
 const supplementalTranscriptByThread = new Map<string, Map<string, SupplementalTranscriptEntry>>();
 const fileChangeEventAnchorsByTurn = new Map<string, Set<string>>();
@@ -5974,6 +5995,30 @@ function clearPendingDynamicToolCallsForThread(threadId: string): void {
       threadId
     );
   }
+
+  for (const [requestId, pending] of respondingDynamicToolCalls.entries()) {
+    if (pending.threadId !== threadId) {
+      continue;
+    }
+
+    upsertSupplementalTranscriptEntry(
+      threadId,
+      dynamicToolCallResolutionToTranscriptEntry(pending, {
+        status: "expired",
+        success: false
+      })
+    );
+    respondingDynamicToolCalls.delete(requestId);
+    publishToSockets(
+      "tool_call_resolved",
+      {
+        requestId,
+        status: "expired",
+        success: false
+      },
+      threadId
+    );
+  }
 }
 
 function clearPendingDynamicToolCallsForTurn(threadId: string, turnId: string): void {
@@ -5999,6 +6044,52 @@ function clearPendingDynamicToolCallsForTurn(threadId: string, turnId: string): 
       },
       threadId
     );
+  }
+
+  for (const [requestId, pending] of respondingDynamicToolCalls.entries()) {
+    if (pending.threadId !== threadId || pending.turnId !== turnId) {
+      continue;
+    }
+
+    upsertSupplementalTranscriptEntry(
+      threadId,
+      dynamicToolCallResolutionToTranscriptEntry(pending, {
+        status: "expired",
+        success: false
+      })
+    );
+    respondingDynamicToolCalls.delete(requestId);
+    publishToSockets(
+      "tool_call_resolved",
+      {
+        requestId,
+        status: "expired",
+        success: false
+      },
+      threadId
+    );
+  }
+}
+
+function clearPendingRuntimeRequests(): void {
+  const threadIds = new Set<string>();
+  for (const approval of pendingApprovals.values()) {
+    threadIds.add(approval.threadId);
+  }
+  for (const input of pendingToolUserInputs.values()) {
+    threadIds.add(input.threadId);
+  }
+  for (const pendingCall of pendingDynamicToolCalls.values()) {
+    threadIds.add(pendingCall.threadId);
+  }
+  for (const pendingResponse of respondingDynamicToolCalls.values()) {
+    threadIds.add(pendingResponse.threadId);
+  }
+
+  for (const threadId of threadIds) {
+    clearPendingApprovalsForThread(threadId);
+    clearPendingToolInputsForThread(threadId);
+    clearPendingDynamicToolCallsForThread(threadId);
   }
 }
 
@@ -6274,10 +6365,10 @@ function methodCapabilityStatus(method: string): CapabilityStatus {
 
 function capabilityFeatures(): Record<string, boolean> {
   return {
-    toolUserInput:
-      methodCapabilityStatus("item/tool/requestUserInput") === "available" ||
-      methodCapabilityStatus("tool/requestUserInput") === "available",
-    dynamicToolCall: methodCapabilityStatus("item/tool/call") === "available",
+    // These are server-initiated request families surfaced by codex-manager
+    // (not callable RPC methods), so method probes are not authoritative.
+    toolUserInput: true,
+    dynamicToolCall: true,
     threadFork: methodCapabilityStatus("thread/fork") === "available",
     threadCompact: methodCapabilityStatus("thread/compact/start") === "available",
     threadRollback: methodCapabilityStatus("thread/rollback") === "available",
@@ -7249,6 +7340,7 @@ function emitAppServerNotificationSignal(notification: JsonRpcNotification, thre
     turnId,
     session
   });
+  publishToSockets(signal.eventType, signal.payload, signal.payload.context.threadId ?? undefined);
 
   void emitAgentEvent(signal.eventType, signal.payload).catch((error) => {
     app.log.warn(
@@ -7287,6 +7379,7 @@ function emitAppServerRequestSignal(serverRequest: JsonRpcServerRequest, threadI
     turnId,
     session
   });
+  publishToSockets(signal.eventType, signal.payload, signal.payload.context.threadId ?? undefined);
 
   void emitAgentEvent(signal.eventType, signal.payload).catch((error) => {
     app.log.warn(
@@ -8142,6 +8235,26 @@ function clearPendingApprovalsForTurn(threadId: string, turnId: string): void {
   }
 }
 
+codexRuntime.on("exit", (exit) => {
+  const pendingCounts = {
+    approvals: pendingApprovals.size,
+    toolInput: pendingToolUserInputs.size,
+    toolCalls: pendingDynamicToolCalls.size,
+    toolCallsResponding: respondingDynamicToolCalls.size
+  };
+  if (pendingCounts.approvals || pendingCounts.toolInput || pendingCounts.toolCalls || pendingCounts.toolCallsResponding) {
+    app.log.warn(
+      {
+        exit,
+        ...pendingCounts
+      },
+      "codex runtime exited; expiring pending interactive requests"
+    );
+  }
+  clearPendingRuntimeRequests();
+  activeTurnByThread.clear();
+});
+
 codexRuntime.on("notification", (notification: JsonRpcNotification) => {
   const threadId = extractThreadId(notification.params);
   observeRuntimeTurnNotification(notification, threadId);
@@ -8165,11 +8278,7 @@ codexRuntime.on("notification", (notification: JsonRpcNotification) => {
   if (notification.method === "turn/started") {
     const params = notification.params as { threadId?: unknown; turn?: { id?: unknown } } | undefined;
     if (typeof params?.threadId === "string" && typeof params.turn?.id === "string") {
-      const activeTurnId = activeTurnByThread.get(params.threadId);
       const incomingTurnId = params.turn.id;
-      if (!activeTurnId || activeTurnId === incomingTurnId || incomingTurnId.localeCompare(activeTurnId) >= 0) {
-        activeTurnByThread.set(params.threadId, incomingTurnId);
-      }
       const turnRecord = params.turn as Record<string, unknown>;
       const startedAt =
         coerceEpochMs(turnRecord.startedAt) ??
@@ -8177,6 +8286,17 @@ codexRuntime.on("notification", (notification: JsonRpcNotification) => {
         coerceEpochMs(turnRecord.startTime) ??
         coerceEpochMs(turnRecord.start_time) ??
         Date.now();
+      const activeTurnId = activeTurnByThread.get(params.threadId);
+      const activeTurnStartedAt =
+        activeTurnId !== undefined ? lookupTurnTiming(params.threadId, activeTurnId)?.startedAt ?? null : null;
+      if (
+        !activeTurnId ||
+        activeTurnId === incomingTurnId ||
+        activeTurnStartedAt === null ||
+        startedAt >= activeTurnStartedAt
+      ) {
+        activeTurnByThread.set(params.threadId, incomingTurnId);
+      }
       if (setTurnStartedAt(params.threadId, params.turn.id, startedAt)) {
         void persistSessionMetadata().catch((error) => {
           app.log.warn({ error, threadId: params.threadId, turnId: params.turn?.id }, "failed to persist turn started timing");
@@ -9626,7 +9746,8 @@ app.post("/api/sessions", async (request) => {
     cwd: body?.cwd ?? env.WORKSPACE_ROOT,
     model: requestedControls.model ?? undefined,
     sandbox: requestedControls.filesystemSandbox,
-    approvalPolicy: protocolApprovalPolicyFromSessionControl(requestedControls.approvalPolicy)
+    approvalPolicy: protocolApprovalPolicyFromSessionControl(requestedControls.approvalPolicy),
+    ...(body?.dynamicTools !== undefined ? { dynamicTools: body.dynamicTools } : {})
   });
 
   await setSessionTitle(response.thread.id, defaultSessionTitle());
@@ -10182,6 +10303,7 @@ app.get("/api/sessions/:sessionId/tool-calls", async (request, reply) => {
 
 app.post("/api/sessions/:sessionId/resume", async (request, reply) => {
   const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
+  const body = resumeSessionBodySchema.parse(request.body);
   if (isSessionPurged(params.sessionId)) {
     reply.code(410);
     return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
@@ -10196,7 +10318,8 @@ app.post("/api/sessions/:sessionId/resume", async (request, reply) => {
   const response = await callThreadMethodWithRawEventsFallback<{ thread: CodexThread }>("thread/resume", {
     threadId: params.sessionId,
     sandbox: sessionControls.filesystemSandbox,
-    approvalPolicy: protocolApprovalPolicyFromSessionControl(sessionControls.approvalPolicy)
+    approvalPolicy: protocolApprovalPolicyFromSessionControl(sessionControls.approvalPolicy),
+    ...(body?.dynamicTools !== undefined ? { dynamicTools: body.dynamicTools } : {})
   });
 
   return {
@@ -10826,6 +10949,14 @@ app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
   };
 
   const approvalPolicy = protocolApprovalPolicyFromSessionControl(requestedControls.approvalPolicy);
+  const dynamicTools: Array<DynamicToolDefinition> | undefined = body.dynamicTools;
+  const resumeThreadWithCurrentControls = async (): Promise<void> =>
+    callThreadMethodWithRawEventsFallback("thread/resume", {
+      threadId: params.sessionId,
+      sandbox: requestedControls.filesystemSandbox,
+      approvalPolicy,
+      ...(dynamicTools !== undefined ? { dynamicTools } : {})
+    });
 
   const startTurn = async (): Promise<{ turn: { id: string } }> =>
     codexRuntime.call<{ turn: { id: string } }>("turn/start", {
@@ -10834,6 +10965,7 @@ app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
       effort: body.effort as ReasoningEffort | undefined,
       sandboxPolicy: toTurnSandboxPolicy(requestedControls.filesystemSandbox, requestedControls.networkAccess),
       approvalPolicy,
+      ...(dynamicTools !== undefined ? { dynamicTools } : {}),
       input: [
         {
           type: "text",
@@ -10843,17 +10975,29 @@ app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
       ]
     });
 
+  if (dynamicTools !== undefined) {
+    try {
+      await resumeThreadWithCurrentControls();
+    } catch (error) {
+      if (isNoRolloutFoundError(error)) {
+        // Fresh sessions may not have a materialized rollout yet; let turn/start
+        // drive first materialization and apply dynamic tools in retry resume.
+      } else {
+        return sendMappedCodexError(reply, error, "failed to update dynamic tool catalog", {
+          method: "thread/resume",
+          sessionId: params.sessionId
+        });
+      }
+    }
+  }
+
   let turn: { turn: { id: string } };
   try {
     turn = await startTurn();
   } catch (error) {
     if (isNoRolloutFoundError(error)) {
       try {
-        await callThreadMethodWithRawEventsFallback("thread/resume", {
-          threadId: params.sessionId,
-          sandbox: requestedControls.filesystemSandbox,
-          approvalPolicy
-        });
+        await resumeThreadWithCurrentControls();
         turn = await startTurn();
       } catch (retryError) {
         return sendMappedCodexError(reply, retryError, "failed to send message", {
@@ -10947,17 +11091,18 @@ app.post("/api/tool-calls/:requestId/response", async (request, reply) => {
     };
   }
 
-  respondingDynamicToolCalls.add(params.requestId);
+  respondingDynamicToolCalls.set(params.requestId, pending);
   pendingDynamicToolCalls.delete(params.requestId);
   try {
     const payload = dynamicToolCallResponsePayload(body);
     const normalizedPayload = isObjectRecord(payload) ? payload : {};
     const success = typeof normalizedPayload.success === "boolean" ? normalizedPayload.success : true;
     await codexRuntime.respond(pending.rpcId, payload);
-    if (!isSessionPurged(pending.threadId)) {
+    const responseClaim = respondingDynamicToolCalls.get(params.requestId);
+    if (responseClaim && !isSessionPurged(responseClaim.threadId)) {
       upsertSupplementalTranscriptEntry(
-        pending.threadId,
-        dynamicToolCallResolutionToTranscriptEntry(pending, {
+        responseClaim.threadId,
+        dynamicToolCallResolutionToTranscriptEntry(responseClaim, {
           status: "resolved",
           success
         })
@@ -10969,7 +11114,7 @@ app.post("/api/tool-calls/:requestId/response", async (request, reply) => {
           status: "resolved",
           success
         },
-        pending.threadId
+        responseClaim.threadId
       );
     }
 
@@ -10979,8 +11124,9 @@ app.post("/api/tool-calls/:requestId/response", async (request, reply) => {
       threadId: pending.threadId
     };
   } catch (error) {
-    if (!isSessionPurged(pending.threadId)) {
-      pendingDynamicToolCalls.set(params.requestId, pending);
+    const responseClaim = respondingDynamicToolCalls.get(params.requestId);
+    if (responseClaim && !isSessionPurged(responseClaim.threadId)) {
+      pendingDynamicToolCalls.set(params.requestId, responseClaim);
     }
     app.log.error({ error, requestId: params.requestId }, "failed to submit dynamic tool call response");
     reply.code(500);

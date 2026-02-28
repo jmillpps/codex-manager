@@ -954,7 +954,7 @@ export async function respondToolCall(
       body: JSON.stringify(body)
     },
     "respond tool call failed",
-    [200, 404, 409]
+    [200, 404, 409, 500]
   );
 }
 
@@ -975,7 +975,7 @@ export async function decideToolInput(
       body: JSON.stringify(body)
     },
     "decide tool input failed",
-    [200, 404]
+    [200, 404, 500]
   );
 }
 
@@ -993,7 +993,7 @@ export async function decideApproval(
       body: JSON.stringify({ decision, scope })
     },
     "decide approval failed",
-    [200, 404]
+    [200, 404, 409, 500]
   );
 }
 `;

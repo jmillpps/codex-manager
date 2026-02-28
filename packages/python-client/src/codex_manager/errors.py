@@ -86,6 +86,10 @@ class TypedModelValidationError(CodexManagerError):
         self.raw_sample = raw_sample
 
 
+class WaitTimeoutError(CodexManagerError):
+    """Raised when a wait helper times out before predicate match."""
+
+
 def classify_api_error(details: RequestDetails) -> ApiError:
     status = details.status_code or 0
     message = f"{details.operation} failed with status {status}"

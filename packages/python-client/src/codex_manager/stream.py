@@ -17,7 +17,7 @@ import websockets
 from .models import AppServerSignal, StreamEvent
 from .protocols import StreamHandler, StreamMatcher, StreamRouter
 
-EventHandler = Callable[[StreamEvent, "StreamContext"], Awaitable[None] | None]
+EventHandler = StreamHandler
 AppServerHandler = Callable[[AppServerSignal, "StreamContext"], Awaitable[None] | None]
 
 
@@ -47,9 +47,9 @@ class EventRouter(StreamRouter):
 
     async def dispatch(self, event: StreamEvent, context: StreamContext) -> None:
         for route in self._routes:
-            if not route.matcher(event):
-                continue
             try:
+                if not route.matcher(event):
+                    continue
                 result = route.handler(event, context)
                 if inspect.isawaitable(result):
                     await result
@@ -103,7 +103,9 @@ class AsyncEventStream:
 
         return decorator
 
-    def on_app_server(self, normalized_method: str) -> Callable[[AppServerHandler], AppServerHandler]:
+    def on_app_server(
+        self, normalized_method: str
+    ) -> Callable[[AppServerHandler], AppServerHandler]:
         event_type = f"app_server.{normalized_method.strip('.')}"
 
         def decorator(handler: AppServerHandler) -> AppServerHandler:
@@ -118,7 +120,9 @@ class AsyncEventStream:
 
         return decorator
 
-    def on_app_server_request(self, normalized_method: str) -> Callable[[AppServerHandler], AppServerHandler]:
+    def on_app_server_request(
+        self, normalized_method: str
+    ) -> Callable[[AppServerHandler], AppServerHandler]:
         event_type = f"app_server.request.{normalized_method.strip('.')}"
 
         def decorator(handler: AppServerHandler) -> AppServerHandler:
@@ -149,7 +153,9 @@ class AsyncEventStream:
                 return
 
             try:
-                async with websockets.connect(self._stream_url(thread_id), additional_headers=self._headers) as ws:
+                async with websockets.connect(
+                    self._stream_url(thread_id), additional_headers=self._headers
+                ) as ws:
                     await self._run_connection(
                         ws,
                         thread_id=thread_id,
@@ -162,7 +168,9 @@ class AsyncEventStream:
             except Exception as error:
                 self._logger.debug("stream connection failed: %s", error)
                 reconnect_count += 1
-                delay = min(self._reconnect_base * (2 ** max(0, reconnect_count - 1)), self._reconnect_max)
+                delay = min(
+                    self._reconnect_base * (2 ** max(0, reconnect_count - 1)), self._reconnect_max
+                )
                 await asyncio.sleep(delay)
 
     async def _run_connection(
@@ -187,7 +195,9 @@ class AsyncEventStream:
                 last_ping_at = now
 
             try:
-                raw = await asyncio.wait_for(websocket.recv(), timeout=self._receive_timeout_seconds)
+                raw = await asyncio.wait_for(
+                    websocket.recv(), timeout=self._receive_timeout_seconds
+                )
             except TimeoutError:
                 continue
 
@@ -204,7 +214,9 @@ class AsyncEventStream:
                 continue
 
             event = StreamEvent.from_json(parsed)
-            await self._router.dispatch(event, StreamContext(thread_id=thread_id, reconnect_count=reconnect_count))
+            await self._router.dispatch(
+                event, StreamContext(thread_id=thread_id, reconnect_count=reconnect_count)
+            )
 
     async def _handle_handler_error(self, error: Exception, event: StreamEvent) -> None:
         self._logger.exception("stream handler failed for event %s: %s", event.type, error)
@@ -231,10 +243,14 @@ class SyncEventStream:
     def on_event_prefix(self, prefix: str) -> Callable[[EventHandler], EventHandler]:
         return self._async_stream.on_event_prefix(prefix)
 
-    def on_app_server(self, normalized_method: str) -> Callable[[AppServerHandler], AppServerHandler]:
+    def on_app_server(
+        self, normalized_method: str
+    ) -> Callable[[AppServerHandler], AppServerHandler]:
         return self._async_stream.on_app_server(normalized_method)
 
-    def on_app_server_request(self, normalized_method: str) -> Callable[[AppServerHandler], AppServerHandler]:
+    def on_app_server_request(
+        self, normalized_method: str
+    ) -> Callable[[AppServerHandler], AppServerHandler]:
         return self._async_stream.on_app_server_request(normalized_method)
 
     def on_turn_started(self) -> Callable[[EventHandler], EventHandler]:

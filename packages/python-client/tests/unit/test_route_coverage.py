@@ -20,7 +20,11 @@ def _client_routes() -> set[tuple[str, str]]:
 
     class Visitor(ast.NodeVisitor):
         def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
-            if isinstance(node.func, ast.Attribute) and node.func.attr == "_request" and len(node.args) >= 3:
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_request"
+                and len(node.args) >= 3
+            ):
                 method_node = node.args[1]
                 path_node = node.args[2]
                 if isinstance(method_node, ast.Constant) and isinstance(method_node.value, str):
@@ -65,7 +69,9 @@ def _server_routes() -> set[tuple[str, str]]:
             routes.add((method.upper(), normalized))
 
     source = server_index.read_text(encoding="utf-8")
-    for method, path in re.findall(r'app\.(get|post|put|patch|delete)\("(/api(?:/[^"\n]*)?)"', source):
+    for method, path in re.findall(
+        r'app\.(get|post|put|patch|delete)\("(/api(?:/[^"\n]*)?)"', source
+    ):
         normalized = path[4:] or ""
         normalized = re.sub(r":[^/]+", "{id}", normalized)
         routes.add((method.upper(), normalized))
@@ -77,7 +83,11 @@ def test_python_client_covers_server_routes_except_websocket_transport() -> None
     client_routes = _client_routes()
     server_routes = _server_routes()
 
-    ignored = {("GET", "/stream")}  # websocket route is implemented by stream.py, not REST request wrappers.
-    missing = sorted(route for route in server_routes if route not in client_routes and route not in ignored)
+    ignored = {
+        ("GET", "/stream")
+    }  # websocket route is implemented by stream.py, not REST request wrappers.
+    missing = sorted(
+        route for route in server_routes if route not in client_routes and route not in ignored
+    )
 
     assert not missing, f"missing wrappers for routes: {missing}"
