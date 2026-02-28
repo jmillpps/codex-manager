@@ -43,6 +43,28 @@ If you did not set `CODEX_HOME`, do **not** delete anything under your home dire
 - `fix/<short-name>`
 - `chore/<short-name>`
 
+### Creating and switching feature branches
+
+Use this flow before starting work:
+
+```bash
+git fetch origin
+git switch main
+git pull --ff-only
+```
+
+Create and switch to a new branch:
+
+```bash
+git switch -c feat/<short-name>
+```
+
+Switch to an existing branch:
+
+```bash
+git switch feat/<short-name>
+```
+
 ### Commit messages
 
 Use Conventional Commits:

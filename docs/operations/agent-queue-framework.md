@@ -80,9 +80,9 @@ Module loading contract:
   - `AGENT_EXTENSION_CONFIGURED_ROOTS`
 - For repo-local scanning, directories named `runtime`, `lib`, or dot-prefixed are ignored.
 - A module is loadable when one of these files exists:
-  - `events.ts`
   - `events.js`
   - `events.mjs`
+  - `events.ts`
 - Optional `extension.manifest.json` compatibility/capability declarations are enforced at load/reload.
 - Module must export `registerAgentEvents(registry)` (directly or via default export).
 - Dispatch is fanout and deterministic (`priority`, module name, registration order) with per-handler timeout isolation.
@@ -120,13 +120,14 @@ Worker session lifecycle:
 
 Primary file:
 
-- `agents/supervisor/events.ts`
+- `agents/supervisor/events.js`
 
 Subscribed events:
 
 - `file_change.approval_requested`
 - `turn.completed`
 - `suggest_request.requested`
+- `app_server.item.started`
 
 ### Event: `file_change.approval_requested`
 
@@ -205,6 +206,28 @@ Handler behavior:
 - instruction contract tells worker to run suggestion synthesis immediately using provided payload context (no additional transcript lookup required)
 - enqueues one `agent_instruction` queue job with `jobKind: suggest_request`
 
+### Event: `app_server.item.started`
+
+Signal contract (from app-server pass-through):
+
+- `source: "app_server"`
+- `signalType: "notification"`
+- `method: "item/started"`
+- `context.threadId`, `context.turnId`
+- `params.item` (must be `type: "userMessage"` for this workflow)
+
+Handler behavior:
+
+- extracts user request text from `params.item.content[]`
+- assumes `params.item` is a `userMessage` payload with text content blocks (runtime contract shape)
+- when signal metadata includes a known non-default session title, skips enqueue
+- enqueues one `agent_instruction` queue job with `jobKind: session_initial_rename`
+- dedupe key:
+  - `session_initial_rename:<sourceSessionId>`
+- queue owner id:
+  - uses signal project hint when present
+  - otherwise falls back to `session:<sourceSessionId>`
+
 ## Queue Job Types
 
 ### Job Kind: `suggest_request` (via `agent_instruction`)
@@ -232,6 +255,25 @@ Execution:
 - API emits websocket `suggested_request_updated` for each upsert
 - request routes and client flow reconcile by `requestKey`
 - execution is deadline-bounded (`ORCHESTRATOR_SUGGEST_REQUEST_WAIT_MS`); when no completion signal is observed in time, core writes a deterministic fallback suggestion, interrupts the worker turn best-effort, and completes the queue job
+
+### Job Kind: `session_initial_rename` (via `agent_instruction`)
+
+Payload fields are carried inside `agent_instruction.instructionText` plus routing ids:
+
+- `projectId` (queue owner id; may be session-scoped fallback)
+- `sourceSessionId`
+- `threadId`
+- `turnId`
+- `jobKind: session_initial_rename`
+- `dedupeKey: session_initial_rename:<sourceSessionId>`
+
+Execution:
+
+- runs one instruction turn with `expectResponse: none`
+- worker inspects `sessions get` output for current session title + project assignment
+- worker renames only if title is still exactly `New chat`
+- worker uses `sessions rename` with a concise initial-request-derived title
+- when title was already changed, worker exits without side effects
 
 ### Job: `agent_instruction`
 
@@ -361,26 +403,20 @@ Terminal reconciliation:
 - queue terminal handlers fill missing/placeholder supervisor rows with deterministic fallback content
 - supplemental transcript upsert protects terminal rows from stale `streaming` regression on same `messageId`
 
-## Auto-Action Policy Defaults
+## File-Change Policy Resolution
 
-Supervisor default policy is read in extension code (`agents/supervisor/events.ts`):
+Supervisor file-change policy is loaded by the extension at event-handling time from per-session settings (`sessionControls.settings.supervisor.fileChange`), using runtime settings tools (`getSessionSettings` / optional `getSessionSetting`). Settings producers (UI/CLI/API) read/write through `GET|POST /api/sessions/:sessionId/settings` and `DELETE /api/sessions/:sessionId/settings/:key`.
 
-- auto-approve: enabled, threshold `high`
+Default policy when no setting exists:
+
+- diff explainability: enabled
+- auto-approve: disabled, threshold `low`
 - auto-reject: disabled, threshold `high`
-- auto-steer: enabled, threshold `med`
-
-Environment overrides:
-
-- `SUPERVISOR_AUTO_APPROVE_ENABLED`
-- `SUPERVISOR_AUTO_APPROVE_THRESHOLD`
-- `SUPERVISOR_AUTO_REJECT_ENABLED`
-- `SUPERVISOR_AUTO_REJECT_THRESHOLD`
-- `SUPERVISOR_AUTO_STEER_ENABLED`
-- `SUPERVISOR_AUTO_STEER_THRESHOLD`
+- auto-steer: disabled, threshold `high`
 
 Threshold domain:
 
-- `none | low | med | high`
+- `low | med | high` (`medium` is accepted as alias and normalized to `med`)
 
 ## Timeouts, Retry, and Recovery
 
@@ -437,7 +473,7 @@ Approval bubble grouping behavior:
 
 To add a new workflow:
 
-1. create/update an agent extension event handler under `agents/<agent>/events.ts`
+1. create/update an agent extension event handler under `agents/<agent>/events.js|events.mjs|events.ts`
 2. subscribe to one or more runtime event names
 3. construct deterministic markdown instruction text with full routing/context payload
 4. enqueue `agent_instruction` or another registered queue job type

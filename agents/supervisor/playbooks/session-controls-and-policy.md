@@ -10,6 +10,9 @@ Primary API reference surface: `apps/api/src/index.ts`, `apps/api/src/env.ts`
 
 - `GET /api/sessions/:sessionId/session-controls`
 - `POST /api/sessions/:sessionId/session-controls`
+- `GET /api/sessions/:sessionId/settings`
+- `POST /api/sessions/:sessionId/settings`
+- `DELETE /api/sessions/:sessionId/settings/:key`
 - `POST /api/sessions/:sessionId/approval-policy`
 
 Related call sites:
@@ -24,7 +27,8 @@ Related call sites:
   "model": "string|null",
   "approvalPolicy": "untrusted|on-failure|on-request|never",
   "networkAccess": "restricted|enabled",
-  "filesystemSandbox": "read-only|workspace-write|danger-full-access"
+  "filesystemSandbox": "read-only|workspace-write|danger-full-access",
+  "settings": "object"
 }
 ```
 
@@ -62,6 +66,22 @@ Related call sites:
   - compatibility route
   - updates session approval policy storage and returns resolved policy
 - Response: `{ status: "ok", sessionId, approvalPolicy }`
+
+### Generic settings read/write
+
+- Read route: `GET /api/sessions/:sessionId/settings`
+  - query options:
+    - `scope=session|default` (default `session`)
+    - `key=<top-level-setting-key>` for single-key lookup
+- Write route: `POST /api/sessions/:sessionId/settings`
+  - body variants:
+    - object update: `{ scope, settings, mode: "merge" | "replace" }`
+    - single key update: `{ scope, key, value }`
+- Delete route: `DELETE /api/sessions/:sessionId/settings/:key`
+  - query options: `scope`, optional `actor`, optional `source`
+- Behavior:
+  - scope `default` respects `SESSION_DEFAULTS_LOCKED` (`423 locked`)
+  - writes are audited/persisted through the same controls metadata path
 
 ## Execution Semantics
 
@@ -102,6 +122,24 @@ curl -sS -X POST http://127.0.0.1:3001/api/sessions/<sessionId>/session-controls
 curl -sS -X POST http://127.0.0.1:3001/api/sessions/<sessionId>/approval-policy \
   -H 'content-type: application/json' \
   -d '{"approvalPolicy":"never"}'
+
+# Read supervisor settings
+curl -sS "http://127.0.0.1:3001/api/sessions/<sessionId>/settings?scope=session&key=supervisor"
+
+# Merge supervisor settings
+curl -sS -X POST http://127.0.0.1:3001/api/sessions/<sessionId>/settings \
+  -H 'content-type: application/json' \
+  -d '{
+    "scope":"session",
+    "settings":{
+      "supervisor":{
+        "fileChange":{
+          "diffExplainability":true
+        }
+      }
+    },
+    "mode":"merge"
+  }'
 ```
 
 ## Supervisor Notes

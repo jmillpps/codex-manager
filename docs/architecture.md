@@ -227,7 +227,7 @@ Agent runtime permissions are agent-owned: if `agents/<agent>/agent.config.json`
 File-change supervision is executed as agent-driven queue work:
 
 1. Pending file-change approval requests emit `file_change.approval_requested` with normalized diff details plus turn/user context, and file-change turn activity is tracked by stable per-turn anchor ids.
-2. Supervisor event handlers enqueue one `agent_instruction` job per file-change event. The instruction requires ordered execution: diff explainability, supervisor insight, then optional auto actions.
+2. Supervisor event handlers resolve per-session settings through runtime tools (`getSessionSettings` / `getSessionSetting`) and enqueue `agent_instruction` jobs only when file-change functions are enabled for that session. When enabled, the instruction preserves ordered execution: diff explainability, supervisor insight, then optional auto actions.
 3. Supervisor worker turns execute side effects live through CLI (`@repo/cli`) as they run (transcript upserts, approval decisions, optional steer).
 4. `assistant_text` jobs stream assistant snapshots into supplemental transcript rows (`type: agent.jobOutput`, `messageId: agent-job-output::<jobId>`); `none` response-mode jobs may still emit assistant output for observability but do not require structured result parsing.
 5. Worker turn completion for hidden agent chats is resolved from runtime notification streams (`turn/*`, `item/*`, agent-message deltas); `thread/read(includeTurns)` is kept as bounded fallback.

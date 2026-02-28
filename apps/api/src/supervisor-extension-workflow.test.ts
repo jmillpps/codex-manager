@@ -6,20 +6,18 @@ import { pathToFileURL } from "node:url";
 type RegisteredHandler = (event: { type: string; payload: unknown }, tools: unknown) => Promise<unknown> | unknown;
 
 type SupervisorModule = {
-  buildSupervisorJobText: (job: Record<string, unknown>) => string;
   registerAgentEvents: (registry: {
     on: (eventType: string, handler: RegisteredHandler) => void;
   }) => void;
 };
 
 async function loadSupervisorModule(): Promise<SupervisorModule> {
-  const modulePath = path.resolve(process.cwd(), "..", "..", "agents", "supervisor", "events.ts");
+  const modulePath = path.resolve(process.cwd(), "..", "..", "agents", "supervisor", "events.js");
   const imported = (await import(pathToFileURL(modulePath).href)) as Partial<SupervisorModule>;
-  if (typeof imported.buildSupervisorJobText !== "function" || typeof imported.registerAgentEvents !== "function") {
+  if (typeof imported.registerAgentEvents !== "function") {
     throw new Error("failed to load supervisor extension module exports");
   }
   return {
-    buildSupervisorJobText: imported.buildSupervisorJobText,
     registerAgentEvents: imported.registerAgentEvents
   };
 }
@@ -39,8 +37,9 @@ async function createRegistryHarness() {
   return handlersByEvent;
 }
 
-function createToolsHarness() {
+function createToolsHarness(options?: { settingsBySessionId?: Record<string, Record<string, unknown>> }) {
   const enqueueCalls: Array<Record<string, unknown>> = [];
+  const settingsBySessionId = options?.settingsBySessionId ?? {};
   return {
     enqueueCalls,
     tools: {
@@ -56,6 +55,7 @@ function createToolsHarness() {
           }
         };
       },
+      getSessionSettings: async (sessionId: string) => settingsBySessionId[sessionId] ?? {},
       logger: {
         debug: () => undefined,
         info: () => undefined,
@@ -71,7 +71,22 @@ test("file-change workflow enqueues explainability before supervisor insight tar
   const fileChangeHandler = handlersByEvent.get("file_change.approval_requested")?.[0];
   assert.ok(fileChangeHandler, "expected file_change.approval_requested handler");
 
-  const { enqueueCalls, tools } = createToolsHarness();
+  const { enqueueCalls, tools } = createToolsHarness({
+    settingsBySessionId: {
+      "session-1": {
+        supervisor: {
+          fileChange: {
+            diffExplainability: true,
+            autoActions: {
+              approve: { enabled: true, threshold: "high" },
+              reject: { enabled: false, threshold: "high" },
+              steer: { enabled: true, threshold: "med" }
+            }
+          }
+        }
+      }
+    }
+  });
 
   await fileChangeHandler(
     {
@@ -91,12 +106,7 @@ test("file-change workflow enqueues explainability before supervisor insight tar
         summary: "File change awaiting approval: 1 change",
         details: "changed file",
         sourceEvent: "approval_request",
-        fileChangeStatus: "pending_approval",
-        autoActions: {
-          approve: { enabled: true, threshold: "high" },
-          reject: { enabled: false, threshold: "high" },
-          steer: { enabled: true, threshold: "med" }
-        }
+        fileChangeStatus: "pending_approval"
       }
     },
     tools
@@ -132,55 +142,170 @@ test("file-change workflow enqueues explainability before supervisor insight tar
   assert.doesNotMatch(instructionText, /\/api\/agents\/actions\/execute/i);
 });
 
-test("auto-action reconciliation rules are encoded in supervisor file-change instruction text", async () => {
-  const { buildSupervisorJobText } = await loadSupervisorModule();
+test("auto-action reconciliation rules are encoded in file-change handler instruction text", async () => {
+  const handlersByEvent = await createRegistryHarness();
+  const fileChangeHandler = handlersByEvent.get("file_change.approval_requested")?.[0];
+  assert.ok(fileChangeHandler, "expected file_change.approval_requested handler");
 
-  const eligibleText = buildSupervisorJobText({
-    jobType: "file_change_supervisor_review",
-    context: {
-      projectId: "project-1",
-      sourceSessionId: "session-1",
-      threadId: "session-1",
-      turnId: "turn-1",
-      approvalId: "approval-1"
-    },
-    summary: "summary",
-    details: "details",
-    fileChangeStatus: "pending_approval",
-    sourceEvent: "approval_request",
-    autoActions: {
-      approve: { enabled: true, threshold: "high" },
-      reject: { enabled: true, threshold: "med" },
-      steer: { enabled: true, threshold: "med" }
+  const eligibleHarness = createToolsHarness({
+    settingsBySessionId: {
+      "session-1": {
+        supervisor: {
+          fileChange: {
+            diffExplainability: true,
+            autoActions: {
+              approve: { enabled: true, threshold: "high" },
+              reject: { enabled: true, threshold: "med" },
+              steer: { enabled: true, threshold: "med" }
+            }
+          }
+        }
+      }
     }
   });
+  await fileChangeHandler(
+    {
+      type: "file_change.approval_requested",
+      payload: {
+        context: {
+          projectId: "project-1",
+          sourceSessionId: "session-1",
+          threadId: "session-1",
+          turnId: "turn-1",
+          approvalId: "approval-1"
+        },
+        summary: "summary",
+        details: "details",
+        fileChangeStatus: "pending_approval"
+      }
+    },
+    eligibleHarness.tools
+  );
+  const eligibleText = String(
+    (eligibleHarness.enqueueCalls[0]?.payload as { instructionText?: string } | undefined)?.instructionText ?? ""
+  );
   assert.match(eligibleText, /Approval actions are eligible/i);
   assert.match(eligibleText, /If API indicates the request was already resolved, treat it as reconciled and continue/i);
   assert.match(eligibleText, /If both approve and reject conditions match, reject wins\./i);
 
-  const ineligibleText = buildSupervisorJobText({
-    jobType: "file_change_supervisor_review",
-    context: {
-      projectId: "project-1",
-      sourceSessionId: "session-1",
-      threadId: "session-1",
-      turnId: "turn-1"
+  const ineligibleHarness = createToolsHarness();
+  await fileChangeHandler(
+    {
+      type: "file_change.approval_requested",
+      payload: {
+        context: {
+          projectId: "project-1",
+          sourceSessionId: "session-1",
+          threadId: "session-1",
+          turnId: "turn-1"
+        },
+        summary: "summary",
+        details: "details",
+        fileChangeStatus: "pending_approval"
+      }
     },
-    summary: "summary",
-    details: "details",
-    fileChangeStatus: "pending_approval",
-    sourceEvent: "approvals_reconcile",
-    autoActions: {
-      approve: { enabled: false, threshold: "high" },
-      reject: { enabled: false, threshold: "high" },
-      steer: { enabled: false, threshold: "high" }
+    ineligibleHarness.tools
+  );
+  const ineligibleText = String(
+    (ineligibleHarness.enqueueCalls[0]?.payload as { instructionText?: string } | undefined)?.instructionText ?? ""
+  );
+  assert.match(ineligibleText, /All auto actions are disabled for this session/i);
+});
+
+test("file-change workflow skips enqueue when explainability and auto-actions are all disabled", async () => {
+  const handlersByEvent = await createRegistryHarness();
+  const fileChangeHandler = handlersByEvent.get("file_change.approval_requested")?.[0];
+  assert.ok(fileChangeHandler, "expected file_change.approval_requested handler");
+
+  const { enqueueCalls, tools } = createToolsHarness({
+    settingsBySessionId: {
+      "session-1": {
+        supervisor: {
+          fileChange: {
+            diffExplainability: false,
+            autoActions: {
+              approve: { enabled: false, threshold: "low" },
+              reject: { enabled: false, threshold: "high" },
+              steer: { enabled: false, threshold: "high" }
+            }
+          }
+        }
+      }
     }
   });
 
-  assert.match(ineligibleText, /Approval actions are not eligible/i);
-  assert.match(ineligibleText, /Approve policy is disabled/i);
-  assert.match(ineligibleText, /Reject policy is disabled/i);
-  assert.match(ineligibleText, /Steer policy is disabled/i);
+  await fileChangeHandler(
+    {
+      type: "file_change.approval_requested",
+      payload: {
+        context: {
+          projectId: "project-1",
+          sourceSessionId: "session-1",
+          threadId: "session-1",
+          turnId: "turn-1",
+          itemId: "item-1",
+          approvalId: "approval-1"
+        },
+        summary: "summary",
+        details: "details",
+        fileChangeStatus: "pending_approval"
+      }
+    },
+    tools
+  );
+
+  assert.equal(enqueueCalls.length, 0);
+});
+
+test("file-change workflow builds auto-action-only instruction when explainability is disabled", async () => {
+  const handlersByEvent = await createRegistryHarness();
+  const fileChangeHandler = handlersByEvent.get("file_change.approval_requested")?.[0];
+  assert.ok(fileChangeHandler, "expected file_change.approval_requested handler");
+
+  const { enqueueCalls, tools } = createToolsHarness({
+    settingsBySessionId: {
+      "session-1": {
+        supervisor: {
+          fileChange: {
+            diffExplainability: false,
+            autoActions: {
+              approve: { enabled: false, threshold: "low" },
+              reject: { enabled: false, threshold: "high" },
+              steer: { enabled: true, threshold: "high" }
+            }
+          }
+        }
+      }
+    }
+  });
+
+  await fileChangeHandler(
+    {
+      type: "file_change.approval_requested",
+      payload: {
+        context: {
+          projectId: "project-1",
+          sourceSessionId: "session-1",
+          threadId: "session-1",
+          turnId: "turn-1",
+          itemId: "item-1",
+          approvalId: "approval-1"
+        },
+        summary: "summary",
+        details: "details",
+        fileChangeStatus: "pending_approval"
+      }
+    },
+    tools
+  );
+
+  assert.equal(enqueueCalls.length, 1);
+  const payload = enqueueCalls[0]?.payload as { instructionText?: string; supplementalTargets?: Array<unknown> } | undefined;
+  const instructionText = String(payload?.instructionText ?? "");
+  assert.match(instructionText, /Auto-steer is enabled at threshold "high"\./i);
+  assert.match(instructionText, /sessions steer/i);
+  assert.doesNotMatch(instructionText, /fileChange\.explainability/i);
+  assert.equal(Array.isArray(payload?.supplementalTargets), false);
 });
 
 test("auto-action policy accepts medium threshold alias from event payloads", async () => {
@@ -188,7 +313,22 @@ test("auto-action policy accepts medium threshold alias from event payloads", as
   const fileChangeHandler = handlersByEvent.get("file_change.approval_requested")?.[0];
   assert.ok(fileChangeHandler, "expected file_change.approval_requested handler");
 
-  const { enqueueCalls, tools } = createToolsHarness();
+  const { enqueueCalls, tools } = createToolsHarness({
+    settingsBySessionId: {
+      "session-1": {
+        supervisor: {
+          fileChange: {
+            diffExplainability: true,
+            autoActions: {
+              approve: { enabled: true, threshold: "medium" },
+              reject: { enabled: true, threshold: "medium" },
+              steer: { enabled: true, threshold: "medium" }
+            }
+          }
+        }
+      }
+    }
+  });
 
   await fileChangeHandler(
     {
@@ -205,12 +345,7 @@ test("auto-action policy accepts medium threshold alias from event payloads", as
         summary: "File change awaiting approval: 1 change",
         details: "changed file",
         sourceEvent: "approval_request",
-        fileChangeStatus: "pending_approval",
-        autoActions: {
-          approve: { enabled: true, threshold: "medium" },
-          reject: { enabled: true, threshold: "medium" },
-          steer: { enabled: true, threshold: "medium" }
-        }
+        fileChangeStatus: "pending_approval"
       }
     },
     tools
@@ -270,6 +405,143 @@ test("turn.completed review enqueue is gated by hadFileChangeRequests", async ()
   assert.equal(enqueue.type, "agent_instruction");
   assert.equal((enqueue.payload as { jobKind?: string }).jobKind, "turn_supervisor_review");
   assert.equal((enqueue.payload as { expectResponse?: string }).expectResponse, "none");
+});
+
+test("app_server.item.started enqueues session_initial_rename when user message starts a turn", async () => {
+  const handlersByEvent = await createRegistryHarness();
+  const renameHandler = handlersByEvent.get("app_server.item.started")?.[0];
+  assert.ok(renameHandler, "expected app_server.item.started handler");
+
+  const { enqueueCalls, tools } = createToolsHarness();
+  await renameHandler(
+    {
+      type: "app_server.item.started",
+      payload: {
+        source: "app_server",
+        signalType: "notification",
+        eventType: "app_server.item.started",
+        method: "item/started",
+        receivedAt: "2026-02-25T00:00:00.000Z",
+        context: {
+          threadId: "session-1",
+          turnId: "turn-1"
+        },
+        params: {
+          threadId: "session-1",
+          turnId: "turn-1",
+          item: {
+            type: "userMessage",
+            id: "item-1",
+            content: [
+              {
+                type: "text",
+                text: "Design an API endpoint for listing active tasks."
+              }
+            ]
+          }
+        }
+      }
+    },
+    tools
+  );
+
+  assert.equal(enqueueCalls.length, 1);
+  const enqueue = enqueueCalls[0];
+  assert.equal(enqueue.type, "agent_instruction");
+  const payload = enqueue.payload as {
+    jobKind?: string;
+    dedupeKey?: string;
+    expectResponse?: string;
+    projectId?: string;
+    sourceSessionId?: string;
+    turnId?: string;
+    instructionText?: string;
+  };
+  assert.equal(payload.jobKind, "session_initial_rename");
+  assert.equal(payload.dedupeKey, "session_initial_rename:session-1");
+  assert.equal(payload.expectResponse, "none");
+  assert.equal(payload.projectId, "session:session-1");
+  assert.equal(payload.sourceSessionId, "session-1");
+  assert.equal(payload.turnId, "turn-1");
+  const instructionText = String(payload.instructionText ?? "");
+  assert.match(instructionText, /session_initial_rename/i);
+  assert.match(instructionText, /sessions get/i);
+  assert.match(instructionText, /sessions rename/i);
+  assert.match(instructionText, /current chat title is still exactly `New chat`/i);
+});
+
+test("app_server.item.started rename flow skips non-default titles", async () => {
+  const handlersByEvent = await createRegistryHarness();
+  const renameHandler = handlersByEvent.get("app_server.item.started")?.[0];
+  assert.ok(renameHandler, "expected app_server.item.started handler");
+
+  const titledSession = createToolsHarness();
+  await renameHandler(
+    {
+      type: "app_server.item.started",
+      payload: {
+        source: "app_server",
+        signalType: "notification",
+        eventType: "app_server.item.started",
+        method: "item/started",
+        context: {
+          threadId: "session-1",
+          turnId: "turn-1"
+        },
+        session: {
+          id: "session-1",
+          title: "Parser bug triage",
+          projectId: "project-1"
+        },
+        params: {
+          threadId: "session-1",
+          turnId: "turn-1",
+          item: {
+            type: "userMessage",
+            id: "item-1",
+            content: [{ type: "text", text: "Refine parser recovery strategy." }]
+          }
+        }
+      }
+    },
+    titledSession.tools
+  );
+  assert.equal(titledSession.enqueueCalls.length, 0);
+});
+
+test("app_server.item.started rename flow skips non-user items and does not throw on missing content", async () => {
+  const handlersByEvent = await createRegistryHarness();
+  const renameHandler = handlersByEvent.get("app_server.item.started")?.[0];
+  assert.ok(renameHandler, "expected app_server.item.started handler");
+
+  const nonUserItem = createToolsHarness();
+  await assert.doesNotReject(async () => {
+    await renameHandler(
+      {
+        type: "app_server.item.started",
+        payload: {
+          source: "app_server",
+          signalType: "notification",
+          eventType: "app_server.item.started",
+          method: "item/started",
+          context: {
+            threadId: "session-1",
+            turnId: "turn-1"
+          },
+          params: {
+            threadId: "session-1",
+            turnId: "turn-1",
+            item: {
+              type: "reasoning",
+              id: "item-1"
+            }
+          }
+        }
+      },
+      nonUserItem.tools
+    );
+  });
+  assert.equal(nonUserItem.enqueueCalls.length, 0);
 });
 
 test("suggest_request workflow uses CLI upsert side effects instead of assistant output contract", async () => {

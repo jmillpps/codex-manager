@@ -34,15 +34,8 @@ export type SessionSummary = {
 export type ProjectSummary = {
   projectId: string;
   name: string;
-  workingDirectory: string | null;
   createdAt: string;
   updatedAt: string;
-};
-
-export type ProjectAgentSessionSummary = {
-  agent: string;
-  sessionId: string;
-  systemOwned: boolean;
 };
 
 export type TranscriptEntry = {
@@ -427,7 +420,6 @@ export async function listProjects(baseUrl = "/api"): Promise<{ data: Array<Proj
 
 export async function createProject(
   name: string,
-  workingDirectory: string | null = null,
   baseUrl = "/api"
 ): Promise<{ status: string; project: ProjectSummary; orchestrationSession?: SessionSummary | null }> {
   return requestJson<{ status: string; project: ProjectSummary; orchestrationSession?: SessionSummary | null }>(
@@ -435,7 +427,7 @@ export async function createProject(
     {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name, workingDirectory })
+      body: JSON.stringify({ name })
     },
     "create project failed"
   );
@@ -444,29 +436,16 @@ export async function createProject(
 export async function renameProject(
   projectId: string,
   name: string,
-  workingDirectory?: string | null,
   baseUrl = "/api"
 ): Promise<{ status: string; project: ProjectSummary }> {
-  const body = workingDirectory === undefined ? { name } : { name, workingDirectory };
   return requestJson<{ status: string; project: ProjectSummary }>(
     baseUrl + "/projects/" + encodeURIComponent(projectId) + "/rename",
     {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(body)
+      body: JSON.stringify({ name })
     },
     "rename project failed"
-  );
-}
-
-export async function listProjectAgentSessions(
-  projectId: string,
-  baseUrl = "/api"
-): Promise<{ status: string; projectId: string; data: Array<ProjectAgentSessionSummary> }> {
-  return requestJson<{ status: string; projectId: string; data: Array<ProjectAgentSessionSummary> }>(
-    baseUrl + "/projects/" + encodeURIComponent(projectId) + "/agent-sessions",
-    {},
-    "list project agent sessions failed"
   );
 }
 
@@ -480,6 +459,18 @@ export async function deleteProject(
       method: "DELETE"
     },
     "delete project failed"
+  );
+}
+
+export async function listProjectAgentSessions(
+  projectId: string,
+  baseUrl = "/api"
+): Promise<{ status: string; projectId: string; data: Array<{ agent: string; sessionId: string; systemOwned: boolean }> }> {
+  return requestJson<{ status: string; projectId: string; data: Array<{ agent: string; sessionId: string; systemOwned: boolean }> }>(
+    baseUrl + "/projects/" + encodeURIComponent(projectId) + "/agent-sessions",
+    {},
+    "list project agent sessions failed",
+    [200, 404]
   );
 }
 
@@ -530,7 +521,7 @@ export async function deleteProjectChats(
 
 export async function listSessions(
   baseUrl = "/api",
-  options: { archived?: boolean; cursor?: string; limit?: number; includeSystemOwned?: boolean } = {}
+  options: { archived?: boolean; cursor?: string; limit?: number } = {}
 ): Promise<{ data: Array<SessionSummary>; nextCursor: string | null; archived: boolean }> {
   const path = withQuery(baseUrl + "/sessions", options);
   return requestJson<{ data: Array<SessionSummary>; nextCursor: string | null; archived: boolean }>(
@@ -745,6 +736,103 @@ export async function listSessionToolInput(sessionId: string, baseUrl = "/api"):
     {},
     "list tool input failed",
     [200, 410]
+  );
+}
+
+export async function getSessionControls(sessionId: string, baseUrl = "/api"): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/session-controls",
+    {},
+    "get session controls failed",
+    [200, 404, 410]
+  );
+}
+
+export async function applySessionControls(
+  sessionId: string,
+  body: {
+    scope: "session" | "default";
+    controls: {
+      model: string | null;
+      approvalPolicy: "untrusted" | "on-failure" | "on-request" | "never";
+      networkAccess: "restricted" | "enabled";
+      filesystemSandbox: "read-only" | "workspace-write" | "danger-full-access";
+      settings?: Record<string, unknown>;
+    };
+    actor?: string;
+    source?: string;
+  },
+  baseUrl = "/api"
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/session-controls",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    },
+    "apply session controls failed",
+    [200, 400, 404, 410, 423]
+  );
+}
+
+export async function getSessionSettings(
+  sessionId: string,
+  baseUrl = "/api",
+  options: { scope?: "session" | "default"; key?: string } = {}
+): Promise<Record<string, unknown>> {
+  const path = withQuery(baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/settings", options);
+  return requestJson<Record<string, unknown>>(path, {}, "get session settings failed", [200, 404, 410]);
+}
+
+export async function setSessionSettings(
+  sessionId: string,
+  body:
+    | {
+        scope: "session" | "default";
+        settings: Record<string, unknown>;
+        mode?: "merge" | "replace";
+        actor?: string;
+        source?: string;
+      }
+    | {
+        scope: "session" | "default";
+        key: string;
+        value: unknown;
+        actor?: string;
+        source?: string;
+      },
+  baseUrl = "/api"
+): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/settings",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    },
+    "set session settings failed",
+    [200, 400, 404, 410, 423]
+  );
+}
+
+export async function deleteSessionSetting(
+  sessionId: string,
+  key: string,
+  baseUrl = "/api",
+  options: { scope?: "session" | "default"; actor?: string; source?: string } = {}
+): Promise<Record<string, unknown>> {
+  const path = withQuery(
+    baseUrl + "/sessions/" + encodeURIComponent(sessionId) + "/settings/" + encodeURIComponent(key),
+    options
+  );
+  return requestJson<Record<string, unknown>>(
+    path,
+    {
+      method: "DELETE"
+    },
+    "delete session setting failed",
+    [200, 404, 410, 423]
   );
 }
 

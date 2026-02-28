@@ -30,6 +30,7 @@
 - [Why This Project Exists](#why-this-project-exists)
 - [Feature Highlights](#feature-highlights)
 - [Agent Extension Runtime](#agent-extension-runtime)
+- [Supervisor Session Controls and Settings](#supervisor-session-controls-and-settings)
 - [Build a Practical Extension](#build-a-practical-extension)
 - [Package and Load Extensions](#package-and-load-extensions)
 - [Extension Lifecycle Security (RBAC + Trust)](#extension-lifecycle-security-rbac--trust)
@@ -128,14 +129,25 @@ Codex Manager focuses on that layer while keeping Codex as the execution authori
 - Turn-group transcript UX: one user request card plus one consolidated response bubble per turn, with a top thought area (`Working...` / `Worked for …`) and bottom final assistant response text
 - Approval and tool input actions surfaced inline in response thought details
 - Session transcript reload path merges streamed runtime tool/approval events so thought auditing remains visible even when `thread/read` omits raw tool items
+- Session Controls panel in chat view:
+  - applies per-chat/default control tuples (`model`, `approval policy`, `network access`, `filesystem sandbox`) with explicit Apply/Revert
+  - includes supervisor file-change controls (`Diff Explainability`, `Auto Approve`, `Auto Reject`, `Auto Steer`) persisted in generic session settings
+  - default auto-action posture is safe/off (`Auto Approve`: off/`low`, `Auto Reject`: off/`high`, `Auto Steer`: off/`high`)
 - Thread control surface:
   - `fork`, `steer`, `interrupt`, `compact`, `rollback`, `review/start`, `backgroundTerminals/clean`
 - Extension runtime:
   - event-driven pipelines as loadable extensions (`agents/*`, package roots, configured roots)
   - deterministic fanout dispatch + timeout isolation + atomic reload
   - lifecycle inventory/reload APIs with RBAC and trust/capability enforcement
+  - app-server signal passthrough for extension subscribers via normalized families:
+    - `app_server.<normalized_method>`
+    - `app_server.request.<normalized_method>`
+  - initial chat-title automation through `app_server.item.started` -> `session_initial_rename` queue jobs (rename only when title is still `New chat`)
 - Capability/integration settings:
   - combined `Model -> Reasoning` selection (model-aware effort options), account state, MCP status/oauth, skills, config, collaboration modes, experimental features
+- Generic session settings storage shared by UI/CLI/extensions:
+  - API: `GET|POST /api/sessions/:sessionId/settings`, `DELETE /api/sessions/:sessionId/settings/:key`
+  - CLI: `sessions settings get|set|unset`
 - Cross-client sidebar synchronization via websocket events
 - Right-pane blocking modal when an active session is deleted
 
@@ -150,20 +162,25 @@ What you get out of the box:
 - deterministic fanout dispatch by `priority`, then module name, then registration order
 - per-handler timeout isolation (a slow/failing handler does not block the rest)
 - typed handler envelopes (`enqueue_result`, `action_result`, `handler_result`, `handler_error`)
-- worker-side structured action intents (`kind: "action_intents"`) executed inside API core with scope + capability + idempotency enforcement
+- runtime action execution for `kind: "action_request"` envelopes (scope + capability + idempotency enforced in API core)
+- optional queue job response mode (`expectResponse: "action_intents"`) for structured worker intent batches
 - atomic extension reload with snapshot preservation on failure
 - extension inventory endpoint with compatibility, trust, and origin metadata
 - system-owned worker sessions that are hidden from default chat lists but fully observable through API/CLI
+- app-server protocol passthrough emits normalized extension-safe event names plus a common envelope (`source`, `signalType`, `eventType`, `method`, `context`, `params`, `session`)
+- optional extension tools for session-scoped settings lookup (`getSessionSettings`, `getSessionSetting`)
 
 Core event names emitted by API today:
 
 - `file_change.approval_requested`
 - `turn.completed`
 - `suggest_request.requested`
+- `app_server.<normalized_method>` (notifications)
+- `app_server.request.<normalized_method>` (server-initiated requests)
 
 Recommended execution pattern for production extensions:
 
-- subscribe to runtime events in `events.(ts|js|mjs)`
+- subscribe to runtime events in `events.(js|mjs|ts)`
 - enqueue deterministic `agent_instruction` jobs with stable dedupe keys
 - perform side effects during worker turns via CLI/API mutations (for example transcript upserts, approvals, steering, suggested-request updates)
 - treat assistant text as optional operator trace, not as the source of truth for side effects
@@ -180,6 +197,40 @@ Reference docs:
 - [`docs/operations/agent-extension-lifecycle-and-conformance.md`](docs/operations/agent-extension-lifecycle-and-conformance.md)
 - [`docs/protocol/agent-runtime-sdk.md`](docs/protocol/agent-runtime-sdk.md)
 - [`docs/protocol/agent-extension-packaging.md`](docs/protocol/agent-extension-packaging.md)
+
+---
+
+## Supervisor Session Controls and Settings
+
+Supervisor automation is extension-owned logic, while configuration is surfaced as generic session state.
+
+- UI exposes supervisor controls inside the chat `Session Controls` panel so they sit alongside existing session controls:
+  - `Diff Explainability`
+  - `Auto Approve` (`enabled`, `threshold`)
+  - `Auto Reject` (`enabled`, `threshold`)
+  - `Auto Steer` (`enabled`, `threshold`)
+- These values are stored under generic session settings (for example `settings.supervisor.fileChange`), not in app-server event payloads.
+- The supervisor extension reads those values at event-handling time through runtime tools and builds job instructions dynamically.
+- If all file-change functions are disabled for a session (`diffExplainability=false` and all auto-actions disabled), file-change supervisor jobs are skipped.
+- Initial title rename automation is driven by app-server turn-start signals:
+  - event: `app_server.item.started`
+  - behavior: enqueue `session_initial_rename`; worker renames only if current title is still exactly `New chat`
+
+Common control and settings commands:
+
+```bash
+# read session controls tuple
+pnpm --filter @repo/cli dev --json sessions controls get --session-id <sessionId>
+
+# update generic supervisor settings for a session
+pnpm --filter @repo/cli dev --json sessions settings set \
+  --session-id <sessionId> \
+  --scope session \
+  --settings '{"supervisor":{"fileChange":{"diffExplainability":true,"autoActions":{"approve":{"enabled":false,"threshold":"low"},"reject":{"enabled":false,"threshold":"high"},"steer":{"enabled":false,"threshold":"high"}}}}}'
+
+# read one settings key
+pnpm --filter @repo/cli dev --json sessions settings get --session-id <sessionId> --scope session --key supervisor
+```
 
 ---
 

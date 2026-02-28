@@ -931,6 +931,10 @@ body {
   grid-column: 1 / -1;
 }
 
+.session-control-field-supervisor {
+  grid-column: 1 / -1;
+}
+
 .session-control-label {
   font-size: 0.74rem;
   font-weight: 700;
@@ -961,6 +965,12 @@ body {
   outline: 2px solid #9ab0d9;
   outline-offset: 0;
   border-color: #94a8cc;
+}
+
+.session-control-inline {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 0.42rem;
 }
 
 .session-control-field small {
@@ -2450,6 +2460,10 @@ button.danger:hover:not(:disabled) {
   }
 
   .session-controls-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .session-control-inline {
     grid-template-columns: minmax(0, 1fr);
   }
 

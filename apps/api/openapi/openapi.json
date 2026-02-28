@@ -1056,6 +1056,31 @@
         }
       }
     },
+    "/api/projects/{projectId}/agent-sessions": {
+      "get": {
+        "summary": "List project-owned agent sessions",
+        "operationId": "listProjectAgentSessions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Project id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Project agent sessions"
+          },
+          "404": {
+            "description": "Project not found"
+          }
+        }
+      }
+    },
     "/api/projects/{projectId}/chats/move-all": {
       "post": {
         "summary": "Move all project chats",
@@ -1717,6 +1742,336 @@
           },
           "410": {
             "description": "Session deleted"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/session-controls": {
+      "get": {
+        "summary": "Read session/default controls tuple",
+        "operationId": "getSessionControls",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Session id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session controls"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "410": {
+            "description": "Session deleted"
+          }
+        }
+      },
+      "post": {
+        "summary": "Apply session/default controls tuple",
+        "operationId": "applySessionControls",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Session id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "scope",
+                  "controls"
+                ],
+                "properties": {
+                  "scope": {
+                    "type": "string",
+                    "enum": [
+                      "session",
+                      "default"
+                    ]
+                  },
+                  "controls": {
+                    "type": "object",
+                    "required": [
+                      "model",
+                      "approvalPolicy",
+                      "networkAccess",
+                      "filesystemSandbox"
+                    ],
+                    "properties": {
+                      "model": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "approvalPolicy": {
+                        "type": "string",
+                        "enum": [
+                          "untrusted",
+                          "on-failure",
+                          "on-request",
+                          "never"
+                        ]
+                      },
+                      "networkAccess": {
+                        "type": "string",
+                        "enum": [
+                          "restricted",
+                          "enabled"
+                        ]
+                      },
+                      "filesystemSandbox": {
+                        "type": "string",
+                        "enum": [
+                          "read-only",
+                          "workspace-write",
+                          "danger-full-access"
+                        ]
+                      },
+                      "settings": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  },
+                  "actor": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session controls applied"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "410": {
+            "description": "Session deleted"
+          },
+          "423": {
+            "description": "Default controls locked"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/settings": {
+      "get": {
+        "summary": "Read session settings",
+        "operationId": "getSessionSettings",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Session id"
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "session",
+                "default"
+              ]
+            },
+            "description": "Settings scope"
+          },
+          {
+            "in": "query",
+            "name": "key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional top-level settings key"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session settings"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "410": {
+            "description": "Session deleted"
+          }
+        }
+      },
+      "post": {
+        "summary": "Upsert session settings",
+        "operationId": "setSessionSettings",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Session id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "scope"
+                ],
+                "properties": {
+                  "scope": {
+                    "type": "string",
+                    "enum": [
+                      "session",
+                      "default"
+                    ]
+                  },
+                  "key": {
+                    "type": "string"
+                  },
+                  "value": {},
+                  "settings": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "merge",
+                      "replace"
+                    ]
+                  },
+                  "actor": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session settings updated"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "410": {
+            "description": "Session deleted"
+          },
+          "423": {
+            "description": "Default settings locked"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/settings/{key}": {
+      "delete": {
+        "summary": "Delete one top-level session setting",
+        "operationId": "deleteSessionSetting",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Session id"
+          },
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Top-level settings key"
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "session",
+                "default"
+              ]
+            },
+            "description": "Settings scope"
+          },
+          {
+            "in": "query",
+            "name": "actor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional audit actor"
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional audit source"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session setting deleted or unchanged"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "410": {
+            "description": "Session deleted"
+          },
+          "423": {
+            "description": "Default settings locked"
           }
         }
       }

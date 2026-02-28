@@ -130,6 +130,8 @@ export type AgentRuntimeActionExecutor = (
 export type AgentRuntimeTools = {
   enqueueJob: (input: AgentJobEnqueueInput) => Promise<AgentJobEnqueueResult>;
   logger: AgentRuntimeLogger;
+  getSessionSettings?: (sessionId: string) => Promise<Record<string, unknown>>;
+  getSessionSetting?: (sessionId: string, key: string) => Promise<unknown>;
 };
 
 export type AgentEventEnqueueResult = {

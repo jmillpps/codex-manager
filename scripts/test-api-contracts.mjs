@@ -569,6 +569,28 @@ async function main() {
     });
     assert.equal(invalidControlsPost.status, 404);
 
+    const invalidSettingsGet = await request(`/sessions/${encodeURIComponent(invalidSessionId)}/settings`);
+    assert.equal(invalidSettingsGet.status, 404);
+
+    const invalidSettingsPost = await request(`/sessions/${encodeURIComponent(invalidSessionId)}/settings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        scope: "session",
+        key: "supervisor",
+        value: { fileChange: { diffExplainability: true } }
+      })
+    });
+    assert.equal(invalidSettingsPost.status, 404);
+
+    const invalidSettingsDelete = await request(
+      `/sessions/${encodeURIComponent(invalidSessionId)}/settings/${encodeURIComponent("supervisor")}`,
+      {
+        method: "DELETE"
+      }
+    );
+    assert.equal(invalidSettingsDelete.status, 404);
+
     const invalidApprovalPolicy = await request(`/sessions/${encodeURIComponent(invalidSessionId)}/approval-policy`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -610,6 +632,55 @@ async function main() {
     assert.equal(applySessionControlsOnFailure.status, 200);
     assert.equal(applySessionControlsOnFailure.body?.controls?.approvalPolicy, "on-failure");
     assert.equal(applySessionControlsOnFailure.body?.applied?.approvalPolicy, "on-failure");
+
+    const sessionSettingsGetInitial = await request(`/sessions/${encodeURIComponent(sessionId)}/settings`);
+    assert.equal(sessionSettingsGetInitial.status, 200);
+    assert.equal(sessionSettingsGetInitial.body?.status, "ok");
+    assert.equal(typeof sessionSettingsGetInitial.body?.settings, "object");
+
+    const sessionSettingsSet = await request(`/sessions/${encodeURIComponent(sessionId)}/settings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        scope: "session",
+        key: "supervisor",
+        value: {
+          fileChange: {
+            diffExplainability: true,
+            autoActions: {
+              approve: { enabled: false, threshold: "low" },
+              reject: { enabled: false, threshold: "high" },
+              steer: { enabled: false, threshold: "high" }
+            }
+          }
+        },
+        actor: "api-contract",
+        source: "api-contract"
+      })
+    });
+    assert.equal(sessionSettingsSet.status, 200);
+    assert.ok(
+      sessionSettingsSet.body?.status === "ok" || sessionSettingsSet.body?.status === "unchanged",
+      `unexpected settings set status ${sessionSettingsSet.body?.status}`
+    );
+
+    const sessionSettingsGetKey = await request(
+      `/sessions/${encodeURIComponent(sessionId)}/settings?scope=session&key=${encodeURIComponent("supervisor")}`
+    );
+    assert.equal(sessionSettingsGetKey.status, 200);
+    assert.equal(sessionSettingsGetKey.body?.status, "ok");
+    assert.equal(sessionSettingsGetKey.body?.found, true);
+    assert.equal(typeof sessionSettingsGetKey.body?.value, "object");
+
+    const sessionSettingsDelete = await request(
+      `/sessions/${encodeURIComponent(sessionId)}/settings/${encodeURIComponent("supervisor")}?scope=session&actor=api-contract&source=api-contract`,
+      {
+        method: "DELETE"
+      }
+    );
+    assert.equal(sessionSettingsDelete.status, 200);
+    assert.equal(sessionSettingsDelete.body?.status, "ok");
+    assert.equal(sessionSettingsDelete.body?.removed, true);
 
     const sessionsAfterCreate = await request("/sessions?archived=false&limit=200");
     assert.equal(sessionsAfterCreate.status, 200);

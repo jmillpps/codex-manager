@@ -195,12 +195,13 @@ Worker turn observation:
 
 Supervisor policy:
 
-- `SUPERVISOR_AUTO_APPROVE_ENABLED`
-- `SUPERVISOR_AUTO_APPROVE_THRESHOLD`
-- `SUPERVISOR_AUTO_REJECT_ENABLED`
-- `SUPERVISOR_AUTO_REJECT_THRESHOLD`
-- `SUPERVISOR_AUTO_STEER_ENABLED`
-- `SUPERVISOR_AUTO_STEER_THRESHOLD`
+- `GET /api/sessions/:sessionId/settings?scope=session&key=supervisor`
+- `POST /api/sessions/:sessionId/settings` (`{ scope, key, value }` or `{ scope, settings, mode }`)
+- `DELETE /api/sessions/:sessionId/settings/:key?scope=session|default`
+- CLI:
+  - `sessions settings get --session-id <id> --scope <session|default> --key supervisor`
+  - `sessions settings set --session-id <id> --scope <session|default> --key supervisor --value <json>`
+  - `sessions settings unset --session-id <id> --scope <session|default> --key supervisor`
 
 ## Recovery sequence
 

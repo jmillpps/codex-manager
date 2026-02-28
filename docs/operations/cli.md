@@ -96,7 +96,7 @@ The CLI is organized by endpoint domains:
 - `feedback` (`submit`)
 - `agents extensions` (`list`, `reload`)
 - `orchestrator jobs` (`get`, `list`, `wait`, `cancel`)
-- `projects` (`list`, `create`, `rename`, `delete`, `chats move-all|delete-all`)
+- `projects` (`list`, `create`, `rename`, `delete`, `agent-sessions list`, `chats move-all|delete-all`)
 - `sessions` (`list`, `create`, `get`, `send`, lifecycle/thread-actions, approvals/tool-input/transcript/suggest-request`)
 - `approvals` (`decide`)
 - `tool-input` (`decide`)
@@ -108,6 +108,11 @@ Supervisor-oriented helper flags:
 - `sessions transcript upsert` uses `--entry-role <user|assistant|system>` for transcript row role, and supports `--content` or `--content-file`, plus `--details` or `--details-file`.
 - `sessions steer` supports `--input` or `--input-file`.
 - `sessions suggest-request upsert` supports `--suggestion` or `--suggestion-file` (suggestion required when `--status complete`).
+- `sessions settings get` reads generic per-session settings (or default-scope settings) and supports `--key` to fetch one top-level setting entry.
+- `sessions settings set` updates generic settings through the dedicated settings API:
+  - object mode: `--settings` or `--settings-file` with `--mode merge|replace`
+  - key/value mode: `--key` with `--value` or `--value-file` (JSON value or plain-string fallback)
+- `sessions settings unset` removes one top-level settings key for the selected scope.
 
 ## High-value workflows
 
@@ -145,10 +150,8 @@ pnpm --filter @repo/cli dev stream events --session-id <sessionId>
 pnpm --filter @repo/cli dev sessions approvals list --session-id <sessionId>
 pnpm --filter @repo/cli dev sessions tool-input list --session-id <sessionId>
 
-# 7) Query project->agent worker mappings (currently via raw fallback).
-pnpm --filter @repo/cli dev api request \
-  --method GET \
-  --path /api/projects/<projectId>/agent-sessions
+# 7) Query project->agent worker mappings.
+pnpm --filter @repo/cli dev projects agent-sessions list --project-id <projectId>
 ```
 
 Operational guidance:
@@ -156,7 +159,7 @@ Operational guidance:
 - Prefer `sessions list --include-system-owned true` + `sessions get` before assuming a worker is idle; many issues are visibility/routing rather than execution failure.
 - Use `orchestrator jobs wait` for bounded checks, then `jobs get` for terminal diagnostics (`error`, `attempt`, `runningContext`).
 - Keep `stream events` open during reproduction to distinguish backend lag from UI reconcile lag.
-- Use `api request` only when no first-class CLI command exists for the route; if repeatedly needed, promote it to a dedicated CLI subcommand.
+- Use `api request` only when no first-class CLI command exists for the route.
 
 ### Decide pending approvals
 

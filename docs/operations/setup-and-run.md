@@ -89,7 +89,7 @@ Only `turnPolicy` is typically needed; the other policy blocks are optional over
 
 Agent extension layout contract:
 
-- `agents/<agent>/events.ts|events.js|events.mjs` registers event subscriptions and enqueues queue jobs.
+- `agents/<agent>/events.js|events.mjs|events.ts` registers event subscriptions and enqueues queue jobs.
 - `agents/<agent>/agent.config.json` is optional; when present, it controls model/thread/turn policy for that agent's worker turns.
 - core runs one system queue-runner orientation turn per agent session during startup preflight before the first `agent_instruction` job turn executes.
 - queue payloads can include optional `bootstrapInstruction` (key + text), executed once per agent session/bootstrap-key during startup preflight after system orientation.
@@ -98,12 +98,13 @@ Agent extension layout contract:
 
 Supervisor extension behavior in this repository:
 
-- `agents/supervisor/events.ts` subscribes to:
+- `agents/supervisor/events.js` subscribes to:
   - `file_change.approval_requested`
   - `turn.completed`
   - `suggest_request.requested`
+  - `app_server.item.started` (user-message turn start signal)
 - Those handlers enqueue:
-  - `agent_instruction` for file-change supervision, turn-end review, and suggest-request generation (`jobKind: suggest_request`)
+  - `agent_instruction` for file-change supervision, turn-end review, suggest-request generation (`jobKind: suggest_request`), and initial default-title rename checks (`jobKind: session_initial_rename`)
 - All workflow instructions are human-readable markdown job text; API core only executes queued turns and runtime plumbing.
 
 ---
@@ -257,13 +258,8 @@ ORCHESTRATOR_AGENT_INCLUDE_TURNS_GRACE_MS=3000
 ORCHESTRATOR_AGENT_UNTRUSTED_TERMINAL_GRACE_MS=3000
 ORCHESTRATOR_AGENT_EMPTY_TURN_GRACE_MS=8000
 
-# Supervisor auto-actions defaults (can be overridden per deployment)
-SUPERVISOR_AUTO_APPROVE_ENABLED=true
-SUPERVISOR_AUTO_APPROVE_THRESHOLD=high
-SUPERVISOR_AUTO_REJECT_ENABLED=false
-SUPERVISOR_AUTO_REJECT_THRESHOLD=high
-SUPERVISOR_AUTO_STEER_ENABLED=true
-SUPERVISOR_AUTO_STEER_THRESHOLD=med
+# Supervisor file-change behavior is configured per-session/default scope via
+# session settings (sessionControls.settings.supervisor.fileChange), not env vars.
 
 # Extension lifecycle, trust, and external roots
 AGENT_EXTENSION_RBAC_MODE=disabled

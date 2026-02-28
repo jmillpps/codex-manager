@@ -40,6 +40,7 @@ import {
   type RuntimeProfileActionResult,
   type RuntimeProfileAdapter
 } from "./runtime-profile-adapter.js";
+import { buildAppServerNotificationSignal, buildAppServerRequestSignal } from "./app-server-signals.js";
 import {
   agentInstructionActionIntentBatchSchema,
   agentInstructionJobPayloadSchema,
@@ -229,6 +230,7 @@ type SessionControlsTuple = {
   approvalPolicy: SessionControlApprovalPolicy;
   networkAccess: NetworkAccess;
   filesystemSandbox: DefaultSandboxMode;
+  settings: Record<string, unknown>;
 };
 type AgentTurnPolicy = {
   sandbox: DefaultSandboxMode;
@@ -329,11 +331,35 @@ const sessionControlsTupleSchema = z.object({
   model: z.string().trim().min(1).nullable(),
   approvalPolicy: sessionControlApprovalPolicySchema,
   networkAccess: networkAccessSchema,
-  filesystemSandbox: filesystemSandboxSchema
+  filesystemSandbox: filesystemSandboxSchema,
+  settings: z.record(z.string(), z.unknown()).optional()
 });
 const applySessionControlsBodySchema = z.object({
   scope: z.enum(["session", "default"]),
   controls: sessionControlsTupleSchema,
+  actor: z.string().trim().min(1).max(120).optional(),
+  source: z.string().trim().min(1).max(64).optional()
+});
+const sessionSettingsScopeSchema = z.enum(["session", "default"]);
+const sessionSettingsQuerySchema = z.object({
+  scope: sessionSettingsScopeSchema.optional(),
+  key: z.string().trim().min(1).max(240).optional()
+});
+const upsertSessionSettingsBodySchema = z.object({
+  scope: sessionSettingsScopeSchema,
+  key: z.string().trim().min(1).max(240).optional(),
+  value: z.unknown().optional(),
+  settings: z.record(z.string(), z.unknown()).optional(),
+  mode: z.enum(["merge", "replace"]).optional(),
+  actor: z.string().trim().min(1).max(120).optional(),
+  source: z.string().trim().min(1).max(64).optional()
+});
+const deleteSessionSettingsParamsSchema = z.object({
+  sessionId: z.string().min(1),
+  key: z.string().trim().min(1).max(240)
+});
+const deleteSessionSettingsQuerySchema = z.object({
+  scope: sessionSettingsScopeSchema.optional(),
   actor: z.string().trim().min(1).max(120).optional(),
   source: z.string().trim().min(1).max(64).optional()
 });
@@ -1804,12 +1830,47 @@ function protocolApprovalPolicyFromSessionControl(policy: SessionControlApproval
   return policy;
 }
 
+function cloneSessionSettings(value: unknown): Record<string, unknown> {
+  if (!isObjectRecord(value)) {
+    return {};
+  }
+
+  try {
+    const cloned = structuredClone(value);
+    return isObjectRecord(cloned) ? cloned : {};
+  } catch {
+    try {
+      const serialized = JSON.stringify(value);
+      if (typeof serialized !== "string") {
+        return {};
+      }
+      const parsed = JSON.parse(serialized);
+      return isObjectRecord(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+}
+
+function cloneSessionSettingValue<T = unknown>(value: T): T {
+  try {
+    return structuredClone(value);
+  } catch {
+    try {
+      return JSON.parse(JSON.stringify(value)) as T;
+    } catch {
+      return value;
+    }
+  }
+}
+
 function defaultSessionControlsFromEnv(): SessionControlsTuple {
   return {
     model: null,
     approvalPolicy: env.DEFAULT_APPROVAL_POLICY,
     networkAccess: env.DEFAULT_NETWORK_ACCESS,
-    filesystemSandbox: env.DEFAULT_SANDBOX_MODE
+    filesystemSandbox: env.DEFAULT_SANDBOX_MODE,
+    settings: {}
   };
 }
 
@@ -1853,11 +1914,20 @@ function parseSessionControlsTuple(value: unknown): SessionControlsTuple | null 
   }
 
   const model = typeof value.model === "string" ? value.model.trim() : value.model === null ? null : null;
+  let settings = cloneSessionSettings(value.settings);
+  if (Object.keys(settings).length === 0 && isObjectRecord(value.supervisor)) {
+    settings = {
+      supervisor: {
+        fileChange: cloneSessionSettings(value.supervisor)
+      }
+    };
+  }
   return {
     model: model && model.length > 0 ? model : null,
     approvalPolicy,
     networkAccess,
-    filesystemSandbox
+    filesystemSandbox,
+    settings
   };
 }
 
@@ -1938,6 +2008,7 @@ async function loadSessionMetadata(): Promise<SessionMetadataStore> {
         defaultSessionControls.approvalPolicy = maybeDefaultControls.approvalPolicy;
         defaultSessionControls.networkAccess = maybeDefaultControls.networkAccess;
         defaultSessionControls.filesystemSandbox = maybeDefaultControls.filesystemSandbox;
+        defaultSessionControls.settings = maybeDefaultControls.settings;
       }
     }
 
@@ -2157,12 +2228,36 @@ function resolveSessionProjectId(sessionId: string): string | null {
   return storedProjectId;
 }
 
+function canonicalizeJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => canonicalizeJsonValue(entry));
+  }
+  if (!isObjectRecord(value)) {
+    return value;
+  }
+
+  const normalized: Record<string, unknown> = {};
+  for (const key of Object.keys(value).sort()) {
+    normalized[key] = canonicalizeJsonValue(value[key]);
+  }
+  return normalized;
+}
+
+function serializeSessionSettings(settings: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(canonicalizeJsonValue(settings));
+  } catch {
+    return "{}";
+  }
+}
+
 function sessionControlsEqual(left: SessionControlsTuple, right: SessionControlsTuple): boolean {
   return (
     left.model === right.model &&
     left.approvalPolicy === right.approvalPolicy &&
     left.networkAccess === right.networkAccess &&
-    left.filesystemSandbox === right.filesystemSandbox
+    left.filesystemSandbox === right.filesystemSandbox &&
+    serializeSessionSettings(left.settings) === serializeSessionSettings(right.settings)
   );
 }
 
@@ -2259,7 +2354,7 @@ function setSessionApprovalPolicy(sessionId: string, approvalPolicy: ApprovalPol
 }
 
 function formatSessionControlsTuple(tuple: SessionControlsTuple): string {
-  return `${tuple.model ?? "default"} | ${tuple.approvalPolicy} | ${tuple.networkAccess} | ${tuple.filesystemSandbox}`;
+  return `${tuple.model ?? "default"} | ${tuple.approvalPolicy} | ${tuple.networkAccess} | ${tuple.filesystemSandbox} | settings:${Object.keys(tuple.settings).length}`;
 }
 
 function appendSessionControlsAuditEntry(input: {
@@ -2309,6 +2404,22 @@ function sessionControlsResponse(sessionId: string): {
     defaultsEditable: !env.SESSION_DEFAULTS_LOCKED,
     defaultLockReason: env.SESSION_DEFAULTS_LOCKED ? "Managed by harness configuration" : null
   };
+}
+
+function resolveSessionControlsForScope(sessionId: string, scope: SessionControlScope): SessionControlsTuple {
+  return scope === "default" ? resolveDefaultSessionControls() : resolveSessionControls(sessionId);
+}
+
+function setSessionControlsForScope(
+  sessionId: string,
+  scope: SessionControlScope,
+  controls: SessionControlsTuple
+): boolean {
+  return scope === "default" ? setDefaultSessionControls(controls) : setSessionControls(sessionId, controls);
+}
+
+function resolveSessionSettings(sessionId: string, scope: SessionControlScope = "session"): Record<string, unknown> {
+  return cloneSessionSettings(resolveSessionControlsForScope(sessionId, scope).settings);
 }
 
 function setSessionProjectAssignment(sessionId: string, nextProjectId: string | null): boolean {
@@ -6817,7 +6928,15 @@ async function emitAgentEvent(type: string, payload: Record<string, unknown>): P
     },
     {
       enqueueJob: enqueueJobForAgentEvent,
-      logger: app.log
+      logger: app.log,
+      getSessionSettings: async (sessionId: string) => resolveSessionSettings(sessionId, "session"),
+      getSessionSetting: async (sessionId: string, key: string) => {
+        const settings = resolveSessionSettings(sessionId, "session");
+        if (!Object.prototype.hasOwnProperty.call(settings, key)) {
+          return undefined;
+        }
+        return cloneSessionSettingValue(settings[key]);
+      }
     },
     {
       executeAction: async (actionRequest) =>
@@ -6846,6 +6965,83 @@ async function emitAgentEvent(type: string, payload: Record<string, unknown>): P
   );
 
   return results;
+}
+
+function emitAppServerNotificationSignal(notification: JsonRpcNotification, threadId: string | undefined): void {
+  if (threadId && (isSessionPurged(threadId) || isSystemOwnedSession(threadId))) {
+    return;
+  }
+
+  const session =
+    typeof threadId === "string" && threadId.trim().length > 0
+      ? {
+          id: threadId,
+          title:
+            typeof sessionMetadata.titles[threadId] === "string" && sessionMetadata.titles[threadId]!.trim().length > 0
+              ? sessionMetadata.titles[threadId]!.trim()
+              : null,
+          projectId: resolveSessionProjectId(threadId)
+        }
+      : null;
+  const turnId = extractTurnId(notification.params) ?? (threadId ? activeTurnByThread.get(threadId) ?? null : null);
+  const signal = buildAppServerNotificationSignal({
+    notification,
+    threadId: threadId ?? null,
+    turnId,
+    session
+  });
+
+  void emitAgentEvent(signal.eventType, signal.payload).catch((error) => {
+    app.log.warn(
+      {
+        error,
+        eventType: signal.eventType,
+        method: notification.method,
+        threadId: signal.payload.context.threadId,
+        turnId: signal.payload.context.turnId
+      },
+      "failed to emit app-server notification event"
+    );
+  });
+}
+
+function emitAppServerRequestSignal(serverRequest: JsonRpcServerRequest, threadId: string | undefined): void {
+  if (threadId && (isSessionPurged(threadId) || isSystemOwnedSession(threadId))) {
+    return;
+  }
+
+  const session =
+    typeof threadId === "string" && threadId.trim().length > 0
+      ? {
+          id: threadId,
+          title:
+            typeof sessionMetadata.titles[threadId] === "string" && sessionMetadata.titles[threadId]!.trim().length > 0
+              ? sessionMetadata.titles[threadId]!.trim()
+              : null,
+          projectId: resolveSessionProjectId(threadId)
+        }
+      : null;
+  const turnId = extractTurnId(serverRequest.params) ?? (threadId ? activeTurnByThread.get(threadId) ?? null : null);
+  const signal = buildAppServerRequestSignal({
+    request: serverRequest,
+    threadId: threadId ?? null,
+    turnId,
+    session
+  });
+
+  void emitAgentEvent(signal.eventType, signal.payload).catch((error) => {
+    app.log.warn(
+      {
+        error,
+        eventType: signal.eventType,
+        method: serverRequest.method,
+        requestId: serverRequest.id,
+        threadId: signal.payload.context.threadId,
+        turnId: signal.payload.context.turnId
+      },
+      "failed to emit app-server server-request event"
+    );
+  });
 }
 
 function publishTranscriptUpdated(
@@ -7693,6 +7889,7 @@ codexRuntime.on("notification", (notification: JsonRpcNotification) => {
   if (threadId && isSessionPurged(threadId)) {
     return;
   }
+  emitAppServerNotificationSignal(notification, threadId);
 
   if (notification.method === "thread/name/updated") {
     const params = notification.params as { threadId?: unknown; threadName?: unknown } | undefined;
@@ -7924,6 +8121,8 @@ codexRuntime.on("serverRequest", (serverRequest: JsonRpcServerRequest) => {
       });
     return;
   }
+
+  emitAppServerRequestSignal(serverRequest, requestThreadId);
 
   const approval = createPendingApproval(serverRequest);
 
@@ -9113,6 +9312,7 @@ app.post("/api/sessions", async (request) => {
   const body = createSessionBodySchema.parse(request.body);
   const defaultControls = resolveDefaultSessionControls();
   const requestedControls: SessionControlsTuple = {
+    ...defaultControls,
     model: body?.model?.trim() ? body.model.trim() : defaultControls.model,
     approvalPolicy: body?.approvalPolicy
       ? sessionControlApprovalPolicyFromProtocol(body.approvalPolicy)
@@ -9741,6 +9941,7 @@ app.post("/api/sessions/:sessionId/session-controls", async (request, reply) => 
   const actor = body.actor ?? "user";
   const source = body.source ?? "ui";
   const requestedControls = parseSessionControlsTuple(body.controls);
+  const hasExplicitSettings = Object.prototype.hasOwnProperty.call(body.controls, "settings");
 
   if (!requestedControls) {
     reply.code(400);
@@ -9749,6 +9950,11 @@ app.post("/api/sessions/:sessionId/session-controls", async (request, reply) => 
       code: "invalid_request",
       message: "session controls payload is invalid"
     };
+  }
+
+  if (!hasExplicitSettings) {
+    const baseControls = body.scope === "default" ? resolveDefaultSessionControls() : resolveSessionControls(params.sessionId);
+    requestedControls.settings = cloneSessionSettings(baseControls.settings);
   }
 
   if (body.scope === "default" && env.SESSION_DEFAULTS_LOCKED) {
@@ -9792,6 +9998,243 @@ app.post("/api/sessions/:sessionId/session-controls", async (request, reply) => 
     applied: next,
     summary: formatSessionControlsTuple(next),
     ...sessionControlsResponse(params.sessionId)
+  };
+});
+
+app.get("/api/sessions/:sessionId/settings", async (request, reply) => {
+  const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
+  const query = sessionSettingsQuerySchema.parse(request.query);
+  if (isSessionPurged(params.sessionId)) {
+    reply.code(410);
+    return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
+  }
+
+  const exists = await sessionExistsForProjectAssignment(params.sessionId);
+  if (!exists) {
+    reply.code(404);
+    return {
+      status: "not_found",
+      sessionId: params.sessionId
+    };
+  }
+
+  const scope = query.scope === "default" ? "default" : "session";
+  const settings = resolveSessionSettings(params.sessionId, scope);
+  if (query.key) {
+    const found = Object.prototype.hasOwnProperty.call(settings, query.key);
+    return {
+      status: "ok",
+      sessionId: params.sessionId,
+      scope,
+      key: query.key,
+      found,
+      value: found ? cloneSessionSettingValue(settings[query.key]) : null
+    };
+  }
+
+  return {
+    status: "ok",
+    sessionId: params.sessionId,
+    scope,
+    settings
+  };
+});
+
+app.post("/api/sessions/:sessionId/settings", async (request, reply) => {
+  const params = z.object({ sessionId: z.string().min(1) }).parse(request.params);
+  if (isSessionPurged(params.sessionId)) {
+    reply.code(410);
+    return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
+  }
+
+  const exists = await sessionExistsForProjectAssignment(params.sessionId);
+  if (!exists) {
+    reply.code(404);
+    return {
+      status: "not_found",
+      sessionId: params.sessionId
+    };
+  }
+
+  const body = upsertSessionSettingsBodySchema.parse(request.body);
+  const actor = body.actor ?? "user";
+  const source = body.source ?? "api";
+  const hasSettings = Object.prototype.hasOwnProperty.call(body, "settings");
+  const hasKey = Object.prototype.hasOwnProperty.call(body, "key");
+  const hasValue = Object.prototype.hasOwnProperty.call(body, "value");
+
+  if (hasSettings && (hasKey || hasValue)) {
+    reply.code(400);
+    return {
+      status: "error",
+      code: "invalid_request",
+      message: "settings payload must use either {settings} or {key,value}, not both"
+    };
+  }
+
+  if (!hasSettings && !hasKey && !hasValue) {
+    reply.code(400);
+    return {
+      status: "error",
+      code: "invalid_request",
+      message: "settings payload must include {settings} or {key,value}"
+    };
+  }
+
+  if (!hasSettings && (!hasKey || !hasValue)) {
+    reply.code(400);
+    return {
+      status: "error",
+      code: "invalid_request",
+      message: "key and value are required when updating a single settings entry"
+    };
+  }
+
+  if (body.scope === "default" && env.SESSION_DEFAULTS_LOCKED) {
+    reply.code(423);
+    return {
+      status: "locked",
+      scope: body.scope,
+      message: "Managed by harness configuration",
+      sessionId: params.sessionId,
+      settings: resolveSessionSettings(params.sessionId, body.scope)
+    };
+  }
+
+  const previousSessionControls = resolveSessionControls(params.sessionId);
+  const previousDefaultControls = resolveDefaultSessionControls();
+  const previous = body.scope === "default" ? previousDefaultControls : previousSessionControls;
+  const baseControls = resolveSessionControlsForScope(params.sessionId, body.scope);
+  const currentSettings = cloneSessionSettings(baseControls.settings);
+  const targetKey = hasSettings ? null : body.key!.trim();
+
+  const nextSettings = hasSettings
+    ? body.mode === "replace"
+      ? cloneSessionSettings(body.settings)
+      : {
+          ...currentSettings,
+          ...cloneSessionSettings(body.settings)
+        }
+    : {
+        ...currentSettings,
+        [targetKey!]: cloneSessionSettingValue(body.value)
+      };
+
+  const changed = setSessionControlsForScope(params.sessionId, body.scope, {
+    ...baseControls,
+    settings: nextSettings
+  });
+
+  const nextSessionControls = resolveSessionControls(params.sessionId);
+  const nextDefaultControls = resolveDefaultSessionControls();
+  const next = body.scope === "default" ? nextDefaultControls : nextSessionControls;
+
+  if (changed) {
+    appendSessionControlsAuditEntry({
+      sessionId: params.sessionId,
+      scope: body.scope,
+      actor,
+      source,
+      previous,
+      next
+    });
+    await persistSessionMetadata();
+  }
+
+  return {
+    status: changed ? "ok" : "unchanged",
+    sessionId: params.sessionId,
+    scope: body.scope,
+    ...(targetKey ? { key: targetKey } : {}),
+    settings: cloneSessionSettings(next.settings)
+  };
+});
+
+app.delete("/api/sessions/:sessionId/settings/:key", async (request, reply) => {
+  const params = deleteSessionSettingsParamsSchema.parse(request.params);
+  const query = deleteSessionSettingsQuerySchema.parse(request.query);
+  if (isSessionPurged(params.sessionId)) {
+    reply.code(410);
+    return deletedSessionPayload(params.sessionId, sessionMetadata.titles[params.sessionId]);
+  }
+
+  if (isSystemOwnedSession(params.sessionId)) {
+    reply.code(403);
+    return systemSessionPayload(params.sessionId);
+  }
+
+  const exists = await sessionExistsForProjectAssignment(params.sessionId);
+  if (!exists) {
+    reply.code(404);
+    return {
+      status: "not_found",
+      sessionId: params.sessionId
+    };
+  }
+
+  const scope = query.scope === "default" ? "default" : "session";
+  if (scope === "default" && env.SESSION_DEFAULTS_LOCKED) {
+    reply.code(423);
+    return {
+      status: "locked",
+      scope,
+      message: "Managed by harness configuration",
+      sessionId: params.sessionId,
+      settings: resolveSessionSettings(params.sessionId, scope)
+    };
+  }
+
+  const previousSessionControls = resolveSessionControls(params.sessionId);
+  const previousDefaultControls = resolveDefaultSessionControls();
+  const previous = scope === "default" ? previousDefaultControls : previousSessionControls;
+  const baseControls = resolveSessionControlsForScope(params.sessionId, scope);
+  const nextSettings = cloneSessionSettings(baseControls.settings);
+  const removed = Object.prototype.hasOwnProperty.call(nextSettings, params.key);
+  if (removed) {
+    delete nextSettings[params.key];
+  }
+
+  const changed = removed
+    ? setSessionControlsForScope(params.sessionId, scope, {
+        ...baseControls,
+        settings: nextSettings
+      })
+    : false;
+  const actor = query.actor ?? "user";
+  const source = query.source ?? "api";
+  const nextSessionControls = resolveSessionControls(params.sessionId);
+  const nextDefaultControls = resolveDefaultSessionControls();
+  const next = scope === "default" ? nextDefaultControls : nextSessionControls;
+
+  if (changed) {
+    appendSessionControlsAuditEntry({
+      sessionId: params.sessionId,
+      scope,
+      actor,
+      source,
+      previous,
+      next
+    });
+    await persistSessionMetadata();
+  }
+
+  return {
+    status: changed ? "ok" : "unchanged",
+    sessionId: params.sessionId,
+    scope,
+    key: params.key,
+    removed,
+    settings: cloneSessionSettings(next.settings)
   };
 });
 
@@ -10057,6 +10500,7 @@ app.post("/api/sessions/:sessionId/messages", async (request, reply) => {
 
   const currentControls = resolveSessionControls(params.sessionId);
   const requestedControls: SessionControlsTuple = {
+    ...currentControls,
     model: body.model?.trim() ? body.model.trim() : currentControls.model,
     approvalPolicy: body.approvalPolicy
       ? sessionControlApprovalPolicyFromProtocol(body.approvalPolicy)
