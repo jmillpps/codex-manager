@@ -5,14 +5,15 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from typing import Any, Callable, Iterable, Literal
+from collections.abc import Callable, Iterable
+from typing import Any, Literal
 
 import httpx
 
 from .api import (
     AccountApi,
-    AppsApi,
     ApprovalsApi,
+    AppsApi,
     ConfigApi,
     ExtensionsApi,
     FeedbackApi,
@@ -21,8 +22,8 @@ from .api import (
     OrchestratorApi,
     ProjectsApi,
     RawApi,
-    SessionScope,
     SessionsApi,
+    SessionScope,
     SkillsApi,
     SystemApi,
     ToolCallsApi,
@@ -32,7 +33,6 @@ from .config import ClientConfig
 from .errors import ApiError, TypedModelValidationError
 from .hooks import HookRegistry, RequestCall
 from .plugins import PluginRegistry
-from .remote_skills import AsyncRemoteSkillsFacade, RemoteSkillsFacade
 from .protocols import (
     AsyncClientPlugin,
     AsyncHeaderProvider,
@@ -45,10 +45,16 @@ from .protocols import (
     SyncHookMiddleware,
     SyncRequestExecutor,
 )
+from .remote_skills import AsyncRemoteSkillsFacade, RemoteSkillsFacade
 from .stream import AsyncEventStream, SyncEventStream
 from .transport import AsyncTransport, SyncTransport
-from .typed.client import AsyncTypedCodexManagerFacade, TypedCodexManagerFacade, parse_response_for_operation
+from .typed.client import (
+    AsyncTypedCodexManagerFacade,
+    TypedCodexManagerFacade,
+    parse_response_for_operation,
+)
 from .typed.contracts import STRICT_VALIDATION_OPERATION_KEYS
+from .wait import AsyncWaitApi, WaitApi
 
 _RETRY_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 _VALIDATION_MODE_ENV = "CODEX_MANAGER_PY_VALIDATION_MODE"
@@ -117,7 +123,9 @@ class CodexManager:
         self._header_provider = header_provider
         self._retry_policy = retry_policy
         self._retryable_operations = set(retryable_operations or ())
-        configured_mode = validation_mode if validation_mode is not None else os.getenv(_VALIDATION_MODE_ENV)
+        configured_mode = (
+            validation_mode if validation_mode is not None else os.getenv(_VALIDATION_MODE_ENV)
+        )
         self._validation_mode = _normalize_validation_mode(configured_mode)
 
         self._client = http_client or httpx.Client(
@@ -147,6 +155,7 @@ class CodexManager:
         self.raw = RawApi(self._request)
         self.typed = TypedCodexManagerFacade(self)
         self.remote_skills = RemoteSkillsFacade(self)
+        self.wait = WaitApi(self.sessions)
 
         async_stream = AsyncEventStream(
             base_url=self.client_config.base_url,
@@ -164,7 +173,7 @@ class CodexManager:
             raise
 
     @classmethod
-    def from_env(cls) -> "CodexManager":
+    def from_env(cls) -> CodexManager:
         cfg = ClientConfig.from_env()
         return cls(
             base_url=cfg.base_url,
@@ -174,7 +183,7 @@ class CodexManager:
         )
 
     @classmethod
-    def from_profile(cls, profile: str | None = None) -> "CodexManager":
+    def from_profile(cls, profile: str | None = None) -> CodexManager:
         cfg = ClientConfig.from_profile(profile)
         return cls(
             base_url=cfg.base_url,
@@ -186,28 +195,40 @@ class CodexManager:
     def session(self, session_id: str) -> SessionScope:
         return SessionScope(self.sessions, session_id)
 
-    def before(self, operation: str = "*") -> Callable[[Callable[[RequestCall], Any]], Callable[[RequestCall], Any]]:
+    def before(
+        self, operation: str = "*"
+    ) -> Callable[[Callable[[RequestCall], Any]], Callable[[RequestCall], Any]]:
         def decorator(func: Callable[[RequestCall], Any]) -> Callable[[RequestCall], Any]:
             self._hooks.add_before(operation, func)
             return func
 
         return decorator
 
-    def after(self, operation: str = "*") -> Callable[[Callable[[RequestCall, Any], Any]], Callable[[RequestCall, Any], Any]]:
+    def after(
+        self, operation: str = "*"
+    ) -> Callable[[Callable[[RequestCall, Any], Any]], Callable[[RequestCall, Any], Any]]:
         def decorator(func: Callable[[RequestCall, Any], Any]) -> Callable[[RequestCall, Any], Any]:
             self._hooks.add_after(operation, func)
             return func
 
         return decorator
 
-    def on_error(self, operation: str = "*") -> Callable[[Callable[[RequestCall, Exception], Any]], Callable[[RequestCall, Exception], Any]]:
-        def decorator(func: Callable[[RequestCall, Exception], Any]) -> Callable[[RequestCall, Exception], Any]:
+    def on_error(
+        self, operation: str = "*"
+    ) -> Callable[
+        [Callable[[RequestCall, Exception], Any]], Callable[[RequestCall, Exception], Any]
+    ]:
+        def decorator(
+            func: Callable[[RequestCall, Exception], Any],
+        ) -> Callable[[RequestCall, Exception], Any]:
             self._hooks.add_error(operation, func)
             return func
 
         return decorator
 
-    def use_middleware(self, middleware: SyncHookMiddleware | AsyncHookMiddleware, *, operation: str = "*") -> None:
+    def use_middleware(
+        self, middleware: SyncHookMiddleware | AsyncHookMiddleware, *, operation: str = "*"
+    ) -> None:
         self._hooks.add_middleware(operation, middleware)
 
     def on_event(self, event_type: str):
@@ -229,13 +250,15 @@ class CodexManager:
         self._plugins.stop()
         self._client.close()
 
-    def __enter__(self) -> "CodexManager":
+    def __enter__(self) -> CodexManager:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
-    def _merge_provider_headers(self, request_headers: dict[str, str] | None) -> dict[str, str] | None:
+    def _merge_provider_headers(
+        self, request_headers: dict[str, str] | None
+    ) -> dict[str, str] | None:
         merged = dict(request_headers or {})
         if self._header_provider is None:
             return merged or None
@@ -298,7 +321,9 @@ class CodexManager:
                 self._hooks.run_error(call, error)
                 raise
             except Exception as error:
-                if self._retry_policy is None or not self._is_retry_allowed(operation=call.operation, method=call.method):
+                if self._retry_policy is None or not self._is_retry_allowed(
+                    operation=call.operation, method=call.method
+                ):
                     self._hooks.run_error(call, error)
                     raise
 
@@ -355,7 +380,9 @@ class AsyncCodexManager:
         self._header_provider = header_provider
         self._retry_policy = retry_policy
         self._retryable_operations = set(retryable_operations or ())
-        configured_mode = validation_mode if validation_mode is not None else os.getenv(_VALIDATION_MODE_ENV)
+        configured_mode = (
+            validation_mode if validation_mode is not None else os.getenv(_VALIDATION_MODE_ENV)
+        )
         self._validation_mode = _normalize_validation_mode(configured_mode)
 
         self._client = http_client or httpx.AsyncClient(
@@ -385,6 +412,7 @@ class AsyncCodexManager:
         self.raw = RawApi(self._request)
         self.typed = AsyncTypedCodexManagerFacade(self)
         self.remote_skills = AsyncRemoteSkillsFacade(self)
+        self.wait = AsyncWaitApi(self.sessions)
 
         self.stream = AsyncEventStream(
             base_url=self.client_config.base_url,
@@ -406,7 +434,7 @@ class AsyncCodexManager:
             raise
 
     @classmethod
-    def from_env(cls) -> "AsyncCodexManager":
+    def from_env(cls) -> AsyncCodexManager:
         cfg = ClientConfig.from_env()
         return cls(
             base_url=cfg.base_url,
@@ -416,7 +444,7 @@ class AsyncCodexManager:
         )
 
     @classmethod
-    def from_profile(cls, profile: str | None = None) -> "AsyncCodexManager":
+    def from_profile(cls, profile: str | None = None) -> AsyncCodexManager:
         cfg = ClientConfig.from_profile(profile)
         return cls(
             base_url=cfg.base_url,
@@ -428,28 +456,40 @@ class AsyncCodexManager:
     def session(self, session_id: str) -> SessionScope:
         return SessionScope(self.sessions, session_id)
 
-    def before(self, operation: str = "*") -> Callable[[Callable[[RequestCall], Any]], Callable[[RequestCall], Any]]:
+    def before(
+        self, operation: str = "*"
+    ) -> Callable[[Callable[[RequestCall], Any]], Callable[[RequestCall], Any]]:
         def decorator(func: Callable[[RequestCall], Any]) -> Callable[[RequestCall], Any]:
             self._hooks.add_before(operation, func)
             return func
 
         return decorator
 
-    def after(self, operation: str = "*") -> Callable[[Callable[[RequestCall, Any], Any]], Callable[[RequestCall, Any], Any]]:
+    def after(
+        self, operation: str = "*"
+    ) -> Callable[[Callable[[RequestCall, Any], Any]], Callable[[RequestCall, Any], Any]]:
         def decorator(func: Callable[[RequestCall, Any], Any]) -> Callable[[RequestCall, Any], Any]:
             self._hooks.add_after(operation, func)
             return func
 
         return decorator
 
-    def on_error(self, operation: str = "*") -> Callable[[Callable[[RequestCall, Exception], Any]], Callable[[RequestCall, Exception], Any]]:
-        def decorator(func: Callable[[RequestCall, Exception], Any]) -> Callable[[RequestCall, Exception], Any]:
+    def on_error(
+        self, operation: str = "*"
+    ) -> Callable[
+        [Callable[[RequestCall, Exception], Any]], Callable[[RequestCall, Exception], Any]
+    ]:
+        def decorator(
+            func: Callable[[RequestCall, Exception], Any],
+        ) -> Callable[[RequestCall, Exception], Any]:
             self._hooks.add_error(operation, func)
             return func
 
         return decorator
 
-    def use_middleware(self, middleware: SyncHookMiddleware | AsyncHookMiddleware, *, operation: str = "*") -> None:
+    def use_middleware(
+        self, middleware: SyncHookMiddleware | AsyncHookMiddleware, *, operation: str = "*"
+    ) -> None:
         self._hooks.add_middleware(operation, middleware)
 
     def on_event(self, event_type: str):
@@ -471,13 +511,15 @@ class AsyncCodexManager:
         self._plugins.stop()
         await self._client.aclose()
 
-    async def __aenter__(self) -> "AsyncCodexManager":
+    async def __aenter__(self) -> AsyncCodexManager:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
 
-    async def _merge_provider_headers(self, request_headers: dict[str, str] | None) -> dict[str, str] | None:
+    async def _merge_provider_headers(
+        self, request_headers: dict[str, str] | None
+    ) -> dict[str, str] | None:
         merged = dict(request_headers or {})
         if self._header_provider is None:
             return merged or None
@@ -540,7 +582,9 @@ class AsyncCodexManager:
                 await self._hooks.run_error_async(call, error)
                 raise
             except Exception as error:
-                if self._retry_policy is None or not self._is_retry_allowed(operation=call.operation, method=call.method):
+                if self._retry_policy is None or not self._is_retry_allowed(
+                    operation=call.operation, method=call.method
+                ):
                     await self._hooks.run_error_async(call, error)
                     raise
 
@@ -575,5 +619,7 @@ class RuntimeApiAdapter:
 
         self._runtime = RuntimeApi(request)
 
-    def exec(self, *, command: list[str], cwd: str | None = None, timeout_ms: int | None = None) -> Any:
+    def exec(
+        self, *, command: list[str], cwd: str | None = None, timeout_ms: int | None = None
+    ) -> Any:
         return self._runtime.exec(command=command, cwd=cwd, timeout_ms=timeout_ms)

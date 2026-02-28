@@ -24,7 +24,36 @@ async def test_event_router_isolates_handler_failures() -> None:
     router.add(lambda _event: True, broken)
     router.add(lambda _event: True, healthy)
 
-    await router.dispatch(StreamEvent(type="x", thread_id=None, payload={}), StreamContext(thread_id=None, reconnect_count=0))
+    await router.dispatch(
+        StreamEvent(type="x", thread_id=None, payload={}),
+        StreamContext(thread_id=None, reconnect_count=0),
+    )
+
+    assert seen == ["error:RuntimeError", "healthy"]
+
+
+@pytest.mark.asyncio
+async def test_event_router_isolates_matcher_failures() -> None:
+    seen: list[str] = []
+
+    async def on_error(error: Exception, _event: StreamEvent) -> None:
+        seen.append(f"error:{type(error).__name__}")
+
+    router = EventRouter(on_handler_error=on_error)
+
+    async def healthy(_event: StreamEvent, _context: StreamContext) -> None:
+        seen.append("healthy")
+
+    def broken_matcher(_event: StreamEvent) -> bool:
+        raise RuntimeError("matcher boom")
+
+    router.add(broken_matcher, healthy)
+    router.add(lambda _event: True, healthy)
+
+    await router.dispatch(
+        StreamEvent(type="x", thread_id=None, payload={}),
+        StreamContext(thread_id=None, reconnect_count=0),
+    )
 
     assert seen == ["error:RuntimeError", "healthy"]
 

@@ -15,66 +15,76 @@ FilesystemSandbox: TypeAlias = Literal["read-only", "workspace-write", "danger-f
 NetworkAccess: TypeAlias = Literal["restricted", "enabled"]
 SessionSettingsScope: TypeAlias = Literal["session", "default"]
 
+
 class ApiValidationError(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["error"] = ...
-    code: str = ...
-    message: str = ...
+    status: Literal["error"] = Field(...)
+    code: str = Field(...)
+    message: str = Field(...)
     issues: list[Any] | None = None
+
 
 class ApprovalDecisionErrorResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["error"] = ...
+    status: Literal["error"] = Field(...)
     approval_id: str = Field(..., alias="approvalId")
+
 
 class ApprovalDecisionNotFoundResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["not_found"] = ...
+    status: Literal["not_found"] = Field(...)
     approval_id: str = Field(..., alias="approvalId")
+
 
 class ApprovalDecisionReconciledResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["reconciled"] = ...
+    status: Literal["reconciled"] = Field(...)
     approval_id: str = Field(..., alias="approvalId")
     thread_id: str = Field(..., alias="threadId")
-    code: Literal["already_resolved", "not_eligible", "conflict"] = ...
+    code: Literal["already_resolved", "not_eligible", "conflict"] = Field(...)
+
 
 class ApprovalDecisionRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    decision: Literal["accept", "decline", "cancel"] = ...
+    decision: Literal["accept", "decline", "cancel"] = Field(...)
     scope: Literal["turn", "session"] | None = None
+
 
 class ApprovalDecisionSuccessResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["ok"] = ...
+    status: Literal["ok"] = Field(...)
     approval_id: str = Field(..., alias="approvalId")
     thread_id: str = Field(..., alias="threadId")
 
+
 class CodexThread(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    id: str = ...
-    preview: str = ...
+    id: str = Field(...)
+    preview: str = Field(...)
     model_provider: str = Field(..., alias="modelProvider")
     created_at: float = Field(..., alias="createdAt")
     updated_at: float = Field(..., alias="updatedAt")
-    cwd: str = ...
-    source: Any = ...
+    cwd: str = Field(...)
+    source: Any = Field(...)
     turns: list[CodexTurn] | None = None
+
 
 class CodexThreadItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    type: str = ...
-    id: str = ...
+    type: str = Field(...)
+    id: str = Field(...)
+
 
 class CodexTurn(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    id: str = ...
-    status: str = ...
-    items: list[CodexThreadItem] = ...
+    id: str = Field(...)
+    status: str = Field(...)
+    items: list[CodexThreadItem] = Field(...)
     started_at: Any | None = Field(None, alias="startedAt")
     start_time: Any | None = Field(None, alias="startTime")
     completed_at: Any | None = Field(None, alias="completedAt")
     end_time: Any | None = Field(None, alias="endTime")
+
 
 class CreateSessionRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
@@ -83,154 +93,188 @@ class CreateSessionRequest(BaseModel):
     approval_policy: ApprovalPolicy | None = Field(None, alias="approvalPolicy")
     network_access: NetworkAccess | None = Field(None, alias="networkAccess")
     filesystem_sandbox: FilesystemSandbox | None = Field(None, alias="filesystemSandbox")
+    dynamic_tools: list[DynamicToolDefinition] | None = Field(None, alias="dynamicTools")
+
 
 class CreateSessionResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    session: SessionSummary = ...
-    thread: CodexThread = ...
+    session: SessionSummary = Field(...)
+    thread: CodexThread = Field(...)
+
 
 class DeletedSessionPayload(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["deleted"] = ...
+    status: Literal["deleted"] = Field(...)
     session_id: str = Field(..., alias="sessionId")
     title: str | None = None
-    message: str = ...
+    message: str = Field(...)
     deleted_at: str = Field(..., alias="deletedAt")
+
 
 class DynamicToolCallImageContentItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    type: Literal["inputImage"] = ...
+    type: Literal["inputImage"] = Field(...)
     image_url: str = Field(..., alias="imageUrl")
+
 
 class DynamicToolCallTextContentItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    type: Literal["inputText"] = ...
-    text: str = ...
+    type: Literal["inputText"] = Field(...)
+    text: str = Field(...)
+
+
+class DynamicToolDefinition(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    name: str = Field(...)
+    description: str = Field(...)
+    input_schema: dict[str, Any] = Field(..., alias="inputSchema")
+
 
 class ListSessionToolCallsResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    data: list[PendingToolCall] = ...
+    data: list[PendingToolCall] = Field(...)
+
 
 class PendingToolCall(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
     request_id: str = Field(..., alias="requestId")
-    method: Literal["item/tool/call"] = ...
+    method: Literal["item/tool/call"] = Field(...)
     thread_id: str = Field(..., alias="threadId")
     turn_id: str | None = Field(..., alias="turnId")
     item_id: str | None = Field(..., alias="itemId")
     call_id: str | None = Field(..., alias="callId")
-    tool: str = ...
-    arguments: Any = ...
-    summary: str = ...
-    details: dict[str, Any] = ...
+    tool: str = Field(...)
+    arguments: Any = Field(...)
+    summary: str = Field(...)
+    details: dict[str, Any] = Field(...)
     created_at: str = Field(..., alias="createdAt")
-    status: Literal["pending"] = ...
+    status: Literal["pending"] = Field(...)
+
 
 class QueueErrorResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["error"] = ...
-    code: Literal["queue_full", "job_conflict", "invalid_payload"] = ...
+    status: Literal["error"] = Field(...)
+    code: Literal["queue_full", "job_conflict", "invalid_payload"] = Field(...)
     session_id: str = Field(..., alias="sessionId")
-    message: str = ...
+    message: str = Field(...)
+
 
 class ReadSessionResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    session: SessionSummary = ...
-    thread: CodexThread = ...
-    transcript: list[TranscriptEntry] = ...
+    session: SessionSummary = Field(...)
+    thread: CodexThread = Field(...)
+    transcript: list[TranscriptEntry] = Field(...)
+
+
+class ResumeSessionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+    dynamic_tools: list[DynamicToolDefinition] | None = Field(None, alias="dynamicTools")
+
 
 class SendSessionMessageAcceptedResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["accepted"] = ...
+    status: Literal["accepted"] = Field(...)
     session_id: str = Field(..., alias="sessionId")
     turn_id: str = Field(..., alias="turnId")
 
+
 class SendSessionMessageRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    text: str = ...
+    text: str = Field(...)
     model: str | None = None
     effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] | None = None
     approval_policy: ApprovalPolicy | None = Field(None, alias="approvalPolicy")
     network_access: NetworkAccess | None = Field(None, alias="networkAccess")
     filesystem_sandbox: FilesystemSandbox | None = Field(None, alias="filesystemSandbox")
+    dynamic_tools: list[DynamicToolDefinition] | None = Field(None, alias="dynamicTools")
+
 
 class SessionApprovalPolicyResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["ok"] = ...
+    status: Literal["ok"] = Field(...)
     session_id: str = Field(..., alias="sessionId")
     approval_policy: ApprovalPolicy = Field(..., alias="approvalPolicy")
 
+
 class SessionControlsTuple(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    model: str | None = ...
+    model: str | None = Field(...)
     approval_policy: ApprovalPolicy = Field(..., alias="approvalPolicy")
     network_access: NetworkAccess = Field(..., alias="networkAccess")
     filesystem_sandbox: FilesystemSandbox = Field(..., alias="filesystemSandbox")
     settings: dict[str, Any] | None = None
 
+
 class SessionNotFoundPayload(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["not_found"] = ...
+    status: Literal["not_found"] = Field(...)
     session_id: str = Field(..., alias="sessionId")
+
 
 class SessionSettingsDeleteResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["ok", "unchanged"] = ...
+    status: Literal["ok", "unchanged"] = Field(...)
     session_id: str = Field(..., alias="sessionId")
-    scope: SessionSettingsScope = ...
-    key: str = ...
-    removed: bool = ...
-    settings: dict[str, Any] = ...
+    scope: SessionSettingsScope = Field(...)
+    key: str = Field(...)
+    removed: bool = Field(...)
+    settings: dict[str, Any] = Field(...)
+
 
 class SessionSettingsKeyResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["ok"] = ...
+    status: Literal["ok"] = Field(...)
     session_id: str = Field(..., alias="sessionId")
-    scope: SessionSettingsScope = ...
-    key: str = ...
-    found: bool = ...
-    value: Any = ...
+    scope: SessionSettingsScope = Field(...)
+    key: str = Field(...)
+    found: bool = Field(...)
+    value: Any = Field(...)
+
 
 class SessionSettingsListResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["ok"] = ...
+    status: Literal["ok"] = Field(...)
     session_id: str = Field(..., alias="sessionId")
-    scope: SessionSettingsScope = ...
-    settings: dict[str, Any] = ...
+    scope: SessionSettingsScope = Field(...)
+    settings: dict[str, Any] = Field(...)
+
 
 class SessionSettingsLockedResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["locked"] = ...
-    scope: SessionSettingsScope = ...
-    message: str = ...
+    status: Literal["locked"] = Field(...)
+    scope: SessionSettingsScope = Field(...)
+    message: str = Field(...)
     session_id: str = Field(..., alias="sessionId")
-    settings: dict[str, Any] = ...
+    settings: dict[str, Any] = Field(...)
+
 
 class SessionSettingsSetResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["ok", "unchanged"] = ...
+    status: Literal["ok", "unchanged"] = Field(...)
     session_id: str = Field(..., alias="sessionId")
-    scope: SessionSettingsScope = ...
+    scope: SessionSettingsScope = Field(...)
     key: str | None = None
-    settings: dict[str, Any] = ...
+    settings: dict[str, Any] = Field(...)
+
 
 class SessionSummary(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
     session_id: str = Field(..., alias="sessionId")
-    title: str = ...
-    materialized: bool = ...
+    title: str = Field(...)
+    materialized: bool = Field(...)
     model_provider: str = Field(..., alias="modelProvider")
     approval_policy: ApprovalPolicy = Field(..., alias="approvalPolicy")
     session_controls: SessionControlsTuple = Field(..., alias="sessionControls")
     created_at: float = Field(..., alias="createdAt")
     updated_at: float = Field(..., alias="updatedAt")
-    cwd: str = ...
-    source: str = ...
+    cwd: str = Field(...)
+    source: str = Field(...)
     project_id: str | None = Field(..., alias="projectId")
+
 
 class SetSessionSettingsRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    scope: SessionSettingsScope = ...
+    scope: SessionSettingsScope = Field(...)
     key: str | None = None
     value: Any | None = None
     settings: dict[str, Any] | None = None
@@ -238,26 +282,30 @@ class SetSessionSettingsRequest(BaseModel):
     actor: str | None = None
     source: str | None = None
 
+
 class SuggestSessionRequestFallbackResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["fallback"] = ...
+    status: Literal["fallback"] = Field(...)
     session_id: str = Field(..., alias="sessionId")
     request_key: str = Field(..., alias="requestKey")
-    suggestion: str = ...
+    suggestion: str = Field(...)
+
 
 class SuggestSessionRequestNoContextResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["no_context"] = ...
+    status: Literal["no_context"] = Field(...)
     session_id: str = Field(..., alias="sessionId")
     request_key: str = Field(..., alias="requestKey")
-    message: str = ...
+    message: str = Field(...)
+
 
 class SuggestSessionRequestOkResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["ok"] = ...
+    status: Literal["ok"] = Field(...)
     session_id: str = Field(..., alias="sessionId")
     request_key: str = Field(..., alias="requestKey")
-    suggestion: str = ...
+    suggestion: str = Field(...)
+
 
 class SuggestedRequestBody(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
@@ -265,64 +313,74 @@ class SuggestedRequestBody(BaseModel):
     effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] | None = None
     draft: str | None = None
 
+
 class SuggestedRequestQueuedResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["queued"] = ...
+    status: Literal["queued"] = Field(...)
     job_id: str = Field(..., alias="jobId")
     request_key: str = Field(..., alias="requestKey")
     session_id: str = Field(..., alias="sessionId")
     project_id: str = Field(..., alias="projectId")
-    dedupe: Literal["already_queued", "enqueued"] = ...
+    dedupe: Literal["already_queued", "enqueued"] = Field(...)
+
 
 class SuggestedRequestRuntimeEntry(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["streaming", "complete", "error", "canceled"] = ...
+    status: Literal["streaming", "complete", "error", "canceled"] = Field(...)
     suggestion: str | None = None
     error: str | None = None
     updated_at: str = Field(..., alias="updatedAt")
 
+
 class SuggestedRequestUpsertBody(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
     request_key: str = Field(..., alias="requestKey")
-    status: Literal["streaming", "complete", "error", "canceled"] = ...
+    status: Literal["streaming", "complete", "error", "canceled"] = Field(...)
     suggestion: str | None = None
     error: str | None = None
 
+
 class SuggestedRequestUpsertInvalidResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["invalid_request"] = ...
-    code: Literal["missing_suggestion"] = ...
-    message: str = ...
+    status: Literal["invalid_request"] = Field(...)
+    code: Literal["missing_suggestion"] = Field(...)
+    message: str = Field(...)
+
 
 class SuggestedRequestUpsertResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["ok"] = ...
+    status: Literal["ok"] = Field(...)
     session_id: str = Field(..., alias="sessionId")
     request_key: str = Field(..., alias="requestKey")
-    entry: SuggestedRequestRuntimeEntry = ...
+    entry: SuggestedRequestRuntimeEntry = Field(...)
+
 
 class SystemSessionError(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["error"] = ...
-    code: Literal["system_session"] = ...
+    status: Literal["error"] = Field(...)
+    code: Literal["system_session"] = Field(...)
     session_id: str = Field(..., alias="sessionId")
-    message: str = ...
+    message: str = Field(...)
+
 
 class ToolCallResponseConflictResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["conflict"] = ...
-    code: Literal["in_flight"] = ...
+    status: Literal["conflict"] = Field(...)
+    code: Literal["in_flight"] = Field(...)
     request_id: str = Field(..., alias="requestId")
+
 
 class ToolCallResponseErrorResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["error"] = ...
+    status: Literal["error"] = Field(...)
     request_id: str = Field(..., alias="requestId")
+
 
 class ToolCallResponseNotFoundResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["not_found"] = ...
+    status: Literal["not_found"] = Field(...)
     request_id: str = Field(..., alias="requestId")
+
 
 class ToolCallResponseRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
@@ -331,54 +389,68 @@ class ToolCallResponseRequest(BaseModel):
     content_items: list[DynamicToolCallOutputContentItem] | None = Field(None, alias="contentItems")
     response: Any | None = None
 
+
 class ToolCallResponseSuccessResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["ok"] = ...
+    status: Literal["ok"] = Field(...)
     request_id: str = Field(..., alias="requestId")
     thread_id: str = Field(..., alias="threadId")
+
 
 class ToolInputDecisionErrorResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["error"] = ...
+    status: Literal["error"] = Field(...)
     request_id: str = Field(..., alias="requestId")
+
 
 class ToolInputDecisionNotFoundResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["not_found"] = ...
+    status: Literal["not_found"] = Field(...)
     request_id: str = Field(..., alias="requestId")
+
 
 class ToolInputDecisionOptionAnswers(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    answers: list[str] = ...
+    answers: list[str] = Field(...)
+
 
 class ToolInputDecisionRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    decision: Literal["accept", "decline", "cancel"] = ...
+    decision: Literal["accept", "decline", "cancel"] = Field(...)
     answers: dict[str, ToolInputDecisionOptionAnswers] | None = None
     response: Any | None = None
 
+
 class ToolInputDecisionSuccessResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
-    status: Literal["ok"] = ...
+    status: Literal["ok"] = Field(...)
     request_id: str = Field(..., alias="requestId")
     thread_id: str = Field(..., alias="threadId")
+
 
 class TranscriptEntry(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
     message_id: str = Field(..., alias="messageId")
     turn_id: str = Field(..., alias="turnId")
-    role: Literal["user", "assistant", "system"] = ...
-    type: str = ...
-    content: str = ...
+    role: Literal["user", "assistant", "system"] = Field(...)
+    type: str = Field(...)
+    content: str = Field(...)
     details: str | None = None
     started_at: int | None = Field(None, alias="startedAt")
     completed_at: int | None = Field(None, alias="completedAt")
-    status: Literal["streaming", "complete", "canceled", "error"] = ...
+    status: Literal["streaming", "complete", "canceled", "error"] = Field(...)
 
-DynamicToolCallOutputContentItem: TypeAlias = DynamicToolCallTextContentItem | DynamicToolCallImageContentItem
+
+DynamicToolCallOutputContentItem: TypeAlias = (
+    DynamicToolCallTextContentItem | DynamicToolCallImageContentItem
+)
 SessionSettingsGetResponse: TypeAlias = SessionSettingsListResponse | SessionSettingsKeyResponse
-SuggestSessionRequestSuccessResponse: TypeAlias = SuggestSessionRequestOkResponse | SuggestSessionRequestFallbackResponse
-SuggestedRequestUpsertErrorResponse: TypeAlias = ApiValidationError | SuggestedRequestUpsertInvalidResponse
+SuggestSessionRequestSuccessResponse: TypeAlias = (
+    SuggestSessionRequestOkResponse | SuggestSessionRequestFallbackResponse
+)
+SuggestedRequestUpsertErrorResponse: TypeAlias = (
+    ApiValidationError | SuggestedRequestUpsertInvalidResponse
+)
 
 __all__ = [
     "ApiValidationError",
@@ -397,12 +469,14 @@ __all__ = [
     "DynamicToolCallImageContentItem",
     "DynamicToolCallOutputContentItem",
     "DynamicToolCallTextContentItem",
+    "DynamicToolDefinition",
     "FilesystemSandbox",
     "ListSessionToolCallsResponse",
     "NetworkAccess",
     "PendingToolCall",
     "QueueErrorResponse",
     "ReadSessionResponse",
+    "ResumeSessionRequest",
     "SendSessionMessageAcceptedResponse",
     "SendSessionMessageRequest",
     "SessionApprovalPolicyResponse",
@@ -441,4 +515,3 @@ __all__ = [
     "ToolInputDecisionSuccessResponse",
     "TranscriptEntry",
 ]
-

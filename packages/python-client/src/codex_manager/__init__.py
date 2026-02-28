@@ -55,6 +55,10 @@ __all__ = [
     "ToolInputDecision",
     "TransportError",
     "ValidationError",
+    "WaitApi",
+    "AsyncWaitApi",
+    "SessionTurnReply",
+    "WaitTimeoutError",
 ]
 
 _EXPORTS: dict[str, tuple[str, str]] = {
@@ -74,6 +78,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "TypedModelValidationError": (".errors", "TypedModelValidationError"),
     "TransportError": (".errors", "TransportError"),
     "ValidationError": (".errors", "ValidationError"),
+    "WaitTimeoutError": (".errors", "WaitTimeoutError"),
     "AppServerSignal": (".models", "AppServerSignal"),
     "StreamEvent": (".models", "StreamEvent"),
     "ApprovalDecision": (".api", "ApprovalDecision"),
@@ -103,6 +108,9 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "RemoteSkillsFacade": (".remote_skills", "RemoteSkillsFacade"),
     "AsyncRemoteSkillSession": (".remote_skills", "AsyncRemoteSkillSession"),
     "AsyncRemoteSkillsFacade": (".remote_skills", "AsyncRemoteSkillsFacade"),
+    "WaitApi": (".wait", "WaitApi"),
+    "AsyncWaitApi": (".wait", "AsyncWaitApi"),
+    "SessionTurnReply": (".wait", "SessionTurnReply"),
 }
 
 if TYPE_CHECKING:
@@ -127,20 +135,13 @@ if TYPE_CHECKING:
         LockedError,
         NotFoundError,
         ServerError,
-        TypedModelValidationError,
         TransportError,
+        TypedModelValidationError,
         ValidationError,
+        WaitTimeoutError,
     )
     from .models import AppServerSignal, StreamEvent
     from .plugins import PluginRegistry
-    from .remote_skills import (
-        AsyncRemoteSkillSession,
-        AsyncRemoteSkillsFacade,
-        RemoteSkill,
-        RemoteSkillDispatch,
-        RemoteSkillSession,
-        RemoteSkillsFacade,
-    )
     from .protocols import (
         AsyncClientPlugin,
         AsyncHeaderProvider,
@@ -156,6 +157,15 @@ if TYPE_CHECKING:
         SyncHookMiddleware,
         SyncRequestExecutor,
     )
+    from .remote_skills import (
+        AsyncRemoteSkillSession,
+        AsyncRemoteSkillsFacade,
+        RemoteSkill,
+        RemoteSkillDispatch,
+        RemoteSkillSession,
+        RemoteSkillsFacade,
+    )
+    from .wait import AsyncWaitApi, SessionTurnReply, WaitApi
 
 
 def __getattr__(name: str) -> Any:
