@@ -21,6 +21,7 @@ Both `CodexManager` and `AsyncCodexManager` expose the same domains:
 - `tool_input`
 - `tool_calls`
 - `remote_skills`
+- `wait`
 - `raw`
 
 ## Typed facade
@@ -91,6 +92,20 @@ These hooks are additive and do not change default behavior when omitted.
 - `tool_input.list()`
 - `tool_calls.list()`
 - `get()`, `rename()`, `archive()`, `unarchive()`, `resume()`, `interrupt()`, `suggest_request(...)`
+
+Session lifecycle/message methods support dynamic tool registration payloads:
+
+- `sessions.create(..., dynamic_tools=[...])`
+- `sessions.resume(..., dynamic_tools=[...])`
+- `sessions.send_message(..., dynamic_tools=[...])`
+
+## Wait helpers
+
+Both clients expose a wait facade:
+
+- `wait.until(...)` for generic poll + predicate synchronization (supports timeout, interval, optional attempt caps)
+- `wait.assistant_reply(session_id, turn_id, ...)` to wait for assistant completion on an existing turn
+- `wait.send_message_and_wait_reply(session_id, text, ...)` to send and block/await until the assistant response is complete
 
 ## Route coverage
 
@@ -165,5 +180,17 @@ Use the built-in wrapper for registration, instruction injection, and signal res
 
 - `cm.remote_skills.session(session_id)`
 - `acm.remote_skills.session(session_id)`
+- `cm.remote_skills.create_session(register=..., ...)`
+- `acm.remote_skills.create_session(register=..., ...)`
+
+Session remote-skill helpers include:
+
+- `prepare_catalog(...)`
+- `send_prepared(...)`
+- `send(...)`
+- `matches_signal(...)`
+- `respond_to_signal(..., max_submit_attempts=3, retry_delay_seconds=0.05)`
+- `respond_to_pending_call(..., max_submit_attempts=3, retry_delay_seconds=0.05)`
+- `drain_pending_calls(max_submit_attempts=3, retry_delay_seconds=0.05)`
 
 See `docs/python/remote-skills.md` for end-to-end examples with `app_server.request.item.tool.call`.

@@ -10,6 +10,7 @@ Use it when you need Python workflows to:
 - control turns, approvals, and tool-input decisions
 - read/write per-session settings used by UI and extensions
 - subscribe to realtime events and app-server signal pass-through
+- synchronize async/sync workflows with generic and session-aware wait helpers
 - orchestrate queue/supervisor automation
 - handle dynamic `item/tool/call` requests with Python remote-skill handlers through codex-manager routes
 
@@ -46,6 +47,12 @@ cm.close()
 
 Both clients expose the same domain structure.
 
+Both clients also expose polling-based wait helpers for synchronization:
+
+- `cm.wait.until(...)` / `await acm.wait.until(...)` for generic conditions
+- `cm.wait.send_message_and_wait_reply(...)` / `await acm.wait.send_message_and_wait_reply(...)` for request/reply flows
+- default polling cadence is latency-oriented (`interval_seconds=0.25`) and can be overridden per call when slower polling is preferred
+
 ## Typed OpenAPI facade
 
 Both clients also expose a typed facade:
@@ -72,6 +79,7 @@ Hook middleware objects can be registered directly with `use_middleware(...)` in
 
 - Quickstart: `docs/python/quickstart.md`
 - Practical recipes: `docs/python/practical-recipes.md`
+- Team mesh example (no orchestrator jobs): `docs/python/team-mesh.md`
 - API domain map: `docs/python/api-surface.md`
 - Streaming + decorators + handlers: `docs/python/streaming-and-handlers.md`
 - Remote-skill bridge: `docs/python/remote-skills.md`
@@ -90,6 +98,8 @@ Hook middleware objects can be registered directly with `use_middleware(...)` in
   - `docs/python/streaming-and-handlers.md`
 - "I need dynamic tool calls backed by Python handlers":
   - `docs/python/remote-skills.md`
+- "I want a multi-agent team workflow without server orchestrator jobs":
+  - `docs/python/team-mesh.md`
 - "I need settings-driven supervisor automation":
   - `docs/python/settings-and-automation.md`
 - "I want stronger typed request/response handling":

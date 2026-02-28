@@ -37,6 +37,8 @@ Use this with:
   - hard delete is harness-level (disk purge + session tombstone + websocket broadcast) because app-server has no native `thread/delete`.
 - Messaging and turn control:
   - send message (`turn/start`) and interrupt.
+  - session create/resume/send routes accept optional `dynamicTools` payloads (`name`, `description`, required `inputSchema`) and forward them to Codex thread lifecycle methods.
+  - dynamic tool-call reliability for first-turn workflows is strongest when tool catalogs are attached at session create time.
   - new user-created chats are initialized with a short sticky default title (`New chat`) and remain renameable via existing rename flow.
   - send message supports optional reasoning effort override (`effort`) and applies it to `turn/start`.
   - session controls API supports persisted per-chat and default tuples via `GET/POST /api/sessions/:sessionId/session-controls` with explicit scope (`session` / `default`), lock-aware default editing (`SESSION_DEFAULTS_LOCKED`), and audit-log transcript entries for control changes (`old -> new`, actor, source=`ui`).
@@ -65,6 +67,7 @@ Use this with:
       - `AGENT_EXTENSION_CONFIGURED_ROOTS`
     - validates manifest/entrypoint/runtime compatibility before activation (including full semver range checks for core/profile ranges).
     - emits named events (`file_change.approval_requested`, `turn.completed`, `suggest_request.requested`) plus app-server signal families (`app_server.<normalized_method>`, `app_server.request.<normalized_method>`) with fanout deterministic dispatch (`priority`, module name, registration index).
+    - mirrors those app-server signal envelopes onto `/api/stream` websocket traffic using the same `app_server.*` / `app_server.request.*` event types so stream handlers can drive remote automation.
     - supervisor extension subscribes to `app_server.item.started` (user-message turn-start signals) and enqueues `agent_instruction` job kind `session_initial_rename` to rename default-titled chats; worker execution verifies title is still exactly `New chat` before applying `sessions rename`.
     - dispatch enforces first-wins action reconciliation per emitted event: after first `action_result(performed)`, later action requests are normalized as `not_eligible` without executing additional side effects.
     - normalizes handler outputs to typed envelopes (`enqueue_result`, `action_result`, `handler_result`, `handler_error`) with per-handler timeout isolation.
@@ -120,6 +123,7 @@ Use this with:
     - `GET /api/sessions/:sessionId/tool-calls`
     - `POST /api/tool-calls/:requestId/response`
     - duplicate response submissions return `409` with `code: "in_flight"` while a response is already being forwarded upstream.
+    - in-flight tool-call response claims are reconciled on turn/session cleanup and runtime exit so stale pending tool calls are not reinserted after terminal lifecycle events.
 - Projects and session organization:
   - project create/list/rename/delete with optional per-project `workingDirectory` configuration.
   - project rename preserves existing `workingDirectory` when omitted from the request; explicit `null` clears it.
@@ -129,6 +133,7 @@ Use this with:
   - system-owned agent chats start in the project working directory when configured (fallback: workspace root).
 - Discovery/settings/account/integrations:
   - capabilities probe endpoint.
+    - `features.toolUserInput` and `features.dynamicToolCall` are surfaced as server-request family support (not callable RPC-method probe outcomes).
   - models, experimental features, collaboration modes, app list, skills list/config/remote.
   - MCP server status, MCP reload, MCP OAuth login start.
   - account read/login start/login cancel/logout/rate limits.
@@ -296,19 +301,24 @@ Use this with:
   - generated OpenAPI Pydantic models (`src/codex_manager/generated/openapi_models.py`),
   - stream/event decorators (`on_event`, `on_event_prefix`, `on_app_server`, `on_app_server_request`, `on_turn_started`),
   - request hook decorators (`before`, `after`, `on_error`),
-  - dynamic tool-call wrappers (`sessions.tool_calls`, `tool_calls.respond`) and session-scoped remote-skill bridge helpers (`remote_skills.session(...)`, `respond_to_signal(...)`),
+  - polling-based wait helpers for sync/async synchronization (`wait.until(...)`, `wait.assistant_reply(...)`, `wait.send_message_and_wait_reply(...)`),
+    - `wait.assistant_reply(...)` fails fast when a turn reports explicit terminal status without an assistant reply, while still preserving backward compatibility for payloads that omit `thread.turns`.
+    - default polling interval for wait helpers is `0.25s` (override per call via `interval_seconds`).
+  - dynamic tool-call wrappers (`sessions.tool_calls`, `tool_calls.respond`) and session-scoped remote-skill bridge helpers (`remote_skills.session(...)`, `remote_skills.create_session(...)`, `respond_to_signal(...)`, `respond_to_pending_call(...)`, `drain_pending_calls(...)`, `sync_runtime(...)`, `prepare_catalog(...)`, `send_prepared(...)`) where `remote_skills.send(...)` automatically forwards the current skill catalog as `dynamic_tools`,
+    - remote-skill response submission paths are session-aware, include bounded retry on transient response-submit failures, and treat duplicate terminal submission states (`not_found`, `in_flight`) as idempotent success.
   - protocol-based dependency injection for request executors, dynamic header providers, retry policy, custom hook registries, stream routers, and plugins,
   - protocol contracts defined in `protocols.py`,
   - deterministic plugin lifecycle orchestration (`plugins.py`),
   - hook middleware object registration (`use_middleware(...)`),
   - session-scoped wrappers and namespaced settings helpers (`session(...).settings.namespace(...)`).
 - API surface is modeled in OpenAPI (`apps/api/openapi/openapi.json`) and parity-checked against route registrations.
-- Python docs are split under `docs/python/` with focused files for intro, quickstart, API map, streaming handlers, remote-skills bridge flows, settings automation, protocol architecture, typed OpenAPI coverage, and development notes.
+- Python docs are split under `docs/python/` with focused files for intro, quickstart, practical recipes, team-mesh workflows, API map, streaming handlers, remote-skills bridge flows, settings automation, protocol architecture, typed OpenAPI coverage, and development notes.
 - Unit coverage includes:
   - route-parity verification against server route inventory (`test_route_coverage.py`),
   - typed OpenAPI facade/model coverage (`test_typed_openapi.py`),
   - protocol boundary tests (`test_client_protocols.py`, `test_stream_router.py`, `test_plugins.py`),
   - hook semantics tests (`test_hooks.py`),
+  - wait/synchronization helper tests (`test_wait_helpers.py`),
   with websocket `/api/stream` handled through stream transport instead of REST wrappers.
 
 ### API client and contracts
