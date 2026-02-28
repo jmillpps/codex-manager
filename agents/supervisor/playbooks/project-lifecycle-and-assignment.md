@@ -108,7 +108,7 @@ Primary API reference surface: `apps/api/src/index.ts`
 # Create a project
 curl -sS -X POST http://127.0.0.1:3001/api/projects \
   -H 'content-type: application/json' \
-  -d '{"name":"Test Project","workingDirectory":"/home/jmiller/projects/codex_manager"}'
+  -d '{"name":"Test Project","workingDirectory":"/path/to/workspace"}'
 
 # Assign a session
 curl -sS -X POST http://127.0.0.1:3001/api/sessions/<sessionId>/project \

@@ -27,6 +27,7 @@ This repository contains both planning documents and active implementation code:
 - `apps/cli`: workspace CLI (`@repo/cli`) that provides endpoint-complete operator access to API/websocket workflows with profile-based runtime/auth defaults, command-domain grouping, and API route parity tests.
 - `packages/agent-runtime-sdk`: canonical provider-neutral runtime SDK contracts for extension events/tools/typed emit envelopes and reconciliation helper utilities.
 - `packages/api-client`: generated TypeScript API client for health, session/project lifecycle, bulk project operations, project agent-session listings, session controls + generic session settings helpers, approvals/tool-input decisions, thread actions, and settings/account/integration surfaces
+- `packages/python-client`: Python SDK for codex-manager control-plane APIs + websocket stream automation, including sync/async clients, decorator-based event handlers, request hooks, protocol-based dependency injection (executor/header/retry/hook-registry/router/plugin), deterministic plugin lifecycle orchestration, middleware object registration, session-scoped settings helpers, and an additive OpenAPI-typed facade (`cm.typed`, `acm.typed`) backed by generated Pydantic request/response models
 - root dev tooling includes Playwright browser smoke/e2e commands (`pnpm test:e2e*`) routed through `scripts/run-playwright.mjs` (Linux shared-library bootstrap into `.data/playwright-libs` when needed, and test output under `.data/playwright-test-results`) plus a runtime integration smoke harness (`pnpm smoke:runtime`) for API + websocket lifecycle validation
 - host-level API supervision helper script `scripts/install-api-user-service.sh` installs a user-level `systemd` unit (`codex-manager-api.service`) with restart-on-failure semantics for always-on local API availability
 - `docs/*`: product, architecture, protocol, operations, and implementation-status documentation organized as focused knowledge-tree modules
@@ -36,6 +37,15 @@ This repository contains both planning documents and active implementation code:
 - `docs/prd.md`: Product requirements and scope. Defines goals, non-goals, functional and UX requirements, milestones, risks, and success metrics.
 - `docs/product/agent-platform-requirements.md`: Extension runtime framework functional/technical requirements and release-blocking portability criteria.
 - `docs/architecture.md`: System architecture and invariants. Describes component responsibilities, lifecycle flows, transport model, persistence boundaries, and security posture.
+- `docs/python/introduction.md`: Python client entrypoint and navigation guide.
+- `docs/python/quickstart.md`: Python install and first-use workflows.
+- `docs/python/practical-recipes.md`: Copy-paste production automation recipes for common Python client tasks.
+- `docs/python/api-surface.md`: Python client domain/endpoint coverage and runtime-only route support.
+- `docs/python/streaming-and-handlers.md`: Realtime stream usage and decorator-based event/hook registration.
+- `docs/python/settings-and-automation.md`: Session settings and automation patterns shared with extensions.
+- `docs/python/protocol-interfaces.md`: Protocol-oriented interface design for transport/hook/stream/plugin abstraction boundaries.
+- `docs/python/typed-models.md`: Implemented generated typed Python request/response model architecture, boundary-validation behavior (`typed-only` / `off` / `strict`), strict-operation coverage, diagnostics contract, and validation gates.
+- `docs/python/development-and-packaging.md`: Python package layout, development flow, and validation expectations.
 - `docs/architecture/agent-extension-runtime.md`: Extension runtime source discovery, compatibility, dispatch, lifecycle controls, trust model, and profile-adapter boundaries.
 - `docs/ops.md`: Operations index linking focused runbooks.
 - `docs/operations/setup-and-run.md`: Prerequisites, environment setup, local execution, Codex supervision behavior, and MCP runtime operations.
@@ -44,7 +54,9 @@ This repository contains both planning documents and active implementation code:
 - `docs/operations/generation-and-validation.md`: Contract generation, protocol schema generation, and validation commands.
 - `docs/operations/release-gate-checklist.md`: Release gate command set, doc/code parity checks, and lock-in closure evidence checklist.
 - `docs/operations/agent-platform-verification-matrix.md`: Requirement-to-test evidence matrix for agent runtime dispatch, lifecycle, trust, and conformance.
+- `docs/operations/agent-extension-authoring.md`: Extension authoring runbook for package layout, event registration, queue-enqueue patterns, and supervisor-style worker workflows.
 - `docs/operations/agent-extension-lifecycle-and-conformance.md`: Extension source roots, lifecycle RBAC/trust controls, audit semantics, and portability conformance gate usage.
+- `docs/operations/agent-queue-troubleshooting.md`: Queue-worker diagnosis and recovery procedures for stuck, timing out, or retrying agent jobs.
 - `docs/operations/troubleshooting.md`: Debugging steps and failure-mode runbooks.
 - `docs/operations/agent-queue-framework.md`: Queue framework contract for agent-driven orchestration (events, jobs, transcript contracts, retries/recovery).
 - `docs/operations/maintenance.md`: Reset procedures, git workflow rules, CI expectations, and operational invariants.
@@ -53,12 +65,14 @@ This repository contains both planning documents and active implementation code:
 - `docs/protocol/methods-core.md`: Core method surface (initialize/thread/turn/review lifecycle).
 - `docs/protocol/methods-integrations.md`: Integration/configuration method surface (commands, skills, apps, MCP, config, account, feedback).
 - `docs/protocol/events.md`: Stream/event and delta semantics.
+- `docs/protocol/harness-runtime-events.md`: Runtime event envelopes and semantics emitted by codex-manager harness integrations.
 - `docs/protocol/agent-runtime-sdk.md`: Canonical extension SDK type/envelope/helper contracts.
 - `docs/protocol/agent-dispatch-and-reconciliation.md`: Deterministic fanout dispatch and reconciliation semantics.
 - `docs/protocol/agent-extension-packaging.md`: Extension package layout, manifest compatibility fields, and source-origin model.
 - `docs/protocol/approvals-and-tool-input.md`: Approval and server-initiated user-input flows.
 - `docs/protocol/config-security-and-client-rules.md`: MCP config semantics, security model, and non-negotiable client rules.
 - `docs/implementation-status.md`: Current code-level implementation status and known gaps versus planned behavior.
+- `docs/queue-runner.md`: Queue-runner worker contract, execution lifecycle, and operational integration details for agent instruction jobs.
 
 ## How to use these docs
 
@@ -66,4 +80,5 @@ This repository contains both planning documents and active implementation code:
 2. Use `docs/architecture.md` to align implementation boundaries and invariants.
 3. Use `docs/codex-app-server.md` as the protocol index, then open the focused file under `docs/protocol/` for the concern you are implementing.
 4. Use `docs/ops.md` as the operations index, then open the focused file under `docs/operations/` for setup, validation, troubleshooting, or maintenance tasks.
-5. Use `docs/implementation-status.md` to understand current implementation coverage and residual gaps.
+5. For Python SDK work, start with `docs/python/introduction.md` and then follow the focused Python docs for your workflow (`quickstart`, `api-surface`, `streaming-and-handlers`, `typed-models`, etc.).
+6. Use `docs/implementation-status.md` to understand current implementation coverage and residual gaps.

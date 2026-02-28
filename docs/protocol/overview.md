@@ -92,7 +92,7 @@ A request MUST include:
 Example:
 
 ```json
-{ "method": "thread/start", "id": 10, "params": { "cwd": "/Users/me/project" } }
+{ "method": "thread/start", "id": 10, "params": { "cwd": "/path/to/project" } }
 ```
 
 ### Response (to a request)

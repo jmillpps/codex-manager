@@ -13,7 +13,7 @@ Use this with:
 
 ## Last verified
 
-- Date: February 23, 2026
+- Date: February 28, 2026
 - Validation run:
   - `pnpm --filter @repo/api typecheck` (pass)
   - `pnpm --filter @repo/api test` (pass)
@@ -21,6 +21,8 @@ Use this with:
   - `pnpm --filter @repo/web test` (pass)
   - `pnpm smoke:runtime` (pass, with API running)
   - `node scripts/run-agent-conformance.mjs` (pass)
+  - `python3 -m compileall packages/python-client/src/codex_manager` (pass)
+  - `python3 -m pytest packages/python-client/tests/unit` (blocked in this environment: `pip`/`pytest` unavailable)
 
 ## Current implemented scope
 
@@ -280,9 +282,36 @@ Use this with:
   - parity test compares CLI bindings to API route registrations in `apps/api/src/index.ts`.
   - parity mismatch is treated as a release blocker for CLI endpoint coverage.
 
+### Python client (`packages/python-client`)
+
+- Python SDK package is implemented at `packages/python-client` with:
+  - sync and async clients (`CodexManager`, `AsyncCodexManager`),
+  - domain APIs covering codex-manager control-plane routes,
+  - additive typed OpenAPI facade (`cm.typed`, `acm.typed`) for session/approval/tool-input high-value flows,
+  - generated OpenAPI Pydantic models (`src/codex_manager/generated/openapi_models.py`),
+  - stream/event decorators (`on_event`, `on_event_prefix`, `on_app_server`, `on_app_server_request`, `on_turn_started`),
+  - request hook decorators (`before`, `after`, `on_error`),
+  - protocol-based dependency injection for request executors, dynamic header providers, retry policy, custom hook registries, stream routers, and plugins,
+  - protocol contracts defined in `protocols.py`,
+  - deterministic plugin lifecycle orchestration (`plugins.py`),
+  - hook middleware object registration (`use_middleware(...)`),
+  - session-scoped wrappers and namespaced settings helpers (`session(...).settings.namespace(...)`).
+- API surface is modeled in OpenAPI (`apps/api/openapi/openapi.json`) and parity-checked against route registrations.
+- Python docs are split under `docs/python/` with focused files for intro, quickstart, API map, streaming handlers, settings automation, protocol architecture, typed OpenAPI coverage, and development notes.
+- Unit coverage includes:
+  - route-parity verification against server route inventory (`test_route_coverage.py`),
+  - typed OpenAPI facade/model coverage (`test_typed_openapi.py`),
+  - protocol boundary tests (`test_client_protocols.py`, `test_stream_router.py`, `test_plugins.py`),
+  - hook semantics tests (`test_hooks.py`),
+  with websocket `/api/stream` handled through stream transport instead of REST wrappers.
+
 ### API client and contracts
 
-- OpenAPI/client generation covers core session/settings/account/tool-input APIs, including `/sessions/:id/session-controls`, `/sessions/:id/settings`, and `/projects/:id/agent-sessions`; some newer queue orchestration routes are still not modeled in generated helper signatures (for example queue-backed suggested-request jobs endpoints and orchestrator job inspection/cancel endpoints).
+- OpenAPI route/method coverage is parity-checked against API route registrations (`openapi-route-coverage.test.ts`) and currently complete for registered REST routes.
+- OpenAPI schema quality for typed-target operations is enforced (`openapi-schema-quality.test.ts`) with gates for:
+  - unique/missing `operationId`,
+  - required request/response JSON schemas,
+  - non-loose schema detection for typed-target operations.
 - Generated API client includes helpers for:
   - project bulk operations,
   - project creation (returns `orchestrationSession: null` under lazy agent-session provisioning),

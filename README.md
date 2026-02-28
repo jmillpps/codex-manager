@@ -29,6 +29,7 @@
 - [Quickstart](#quickstart)
 - [Why This Project Exists](#why-this-project-exists)
 - [Feature Highlights](#feature-highlights)
+- [Python Client](#python-client)
 - [Agent Extension Runtime](#agent-extension-runtime)
 - [Supervisor Session Controls and Settings](#supervisor-session-controls-and-settings)
 - [Build a Practical Extension](#build-a-practical-extension)
@@ -150,6 +151,98 @@ Codex Manager focuses on that layer while keeping Codex as the execution authori
   - CLI: `sessions settings get|set|unset`
 - Cross-client sidebar synchronization via websocket events
 - Right-pane blocking modal when an active session is deleted
+
+---
+
+## Python Client
+
+Codex Manager includes a Python client under `packages/python-client` for control-plane automation against codex-manager APIs and realtime stream events.
+
+Install locally from this repo:
+
+```bash
+pip install -e packages/python-client
+```
+
+Simple, generally useful example:
+
+```python
+from codex_manager import CodexManager
+
+with CodexManager.from_profile("local") as cm:
+    session = cm.sessions.create(cwd="/path/to/workspace")
+    session_id = session["session"]["sessionId"]
+
+    accepted = cm.sessions.send_message(
+        session_id=session_id,
+        text="Summarize the most important changes in this repository.",
+    )
+    detail = cm.sessions.get(session_id=session_id)
+
+    print("Title:", detail["session"]["title"])
+    print("Session ID:", session_id)
+    print("Turn ID:", accepted["turnId"])
+```
+
+The Python client supports:
+
+- sync + async clients (`CodexManager`, `AsyncCodexManager`)
+- full domain wrappers for codex-manager API surface
+- additive typed OpenAPI facade (`cm.typed`, `acm.typed`) backed by generated Pydantic models
+- boundary validation modes for typed workflows (`typed-only`, `off`, `strict`) with strict-mode dict-domain guards for selected high-value operations
+- runtime route support for stream/extensions/orchestrator/session utility routes
+- decorator-based event handlers and request hooks (`on_event*`, `on_app_server*`, `before/after/on_error`)
+- protocol-based injection for request executors, header providers, retry policy, stream routers, and plugins
+- hook-registry injection (`hook_registry`) for custom hook orchestration
+- middleware object registration with `use_middleware(...)`
+- session-scoped wrappers and namespaced settings helpers
+
+Typed example:
+
+```python
+from codex_manager import CodexManager
+from codex_manager.typed import CreateSessionRequest, SendSessionMessageRequest
+
+with CodexManager.from_profile("local") as cm:
+    created = cm.typed.sessions.create(
+        CreateSessionRequest(cwd="/path/to/workspace", model="gpt-5")
+    )
+    accepted = cm.typed.sessions.send_message(
+        session_id=created.session.session_id,
+        payload=SendSessionMessageRequest(text="Summarize the latest API changes."),
+    )
+    print(created.session.title, accepted.turn_id)
+```
+
+Common practical uses:
+
+- create scripted chat workflows (create session, send request, read transcript/results)
+- process approvals/tool-input requests in automation scripts
+- persist per-session settings shared by UI, CLI, and extensions
+- subscribe to stream events for realtime orchestration
+- build typed automations with safer request/response parsing via `cm.typed` / `acm.typed`
+
+Start with:
+
+- [`docs/python/introduction.md`](docs/python/introduction.md)
+
+Then continue to focused docs:
+
+- [`docs/python/quickstart.md`](docs/python/quickstart.md)
+- [`docs/python/practical-recipes.md`](docs/python/practical-recipes.md)
+- [`docs/python/api-surface.md`](docs/python/api-surface.md)
+- [`docs/python/streaming-and-handlers.md`](docs/python/streaming-and-handlers.md)
+- [`docs/python/settings-and-automation.md`](docs/python/settings-and-automation.md)
+- [`docs/python/protocol-interfaces.md`](docs/python/protocol-interfaces.md)
+- [`docs/python/typed-models.md`](docs/python/typed-models.md)
+- [`docs/python/development-and-packaging.md`](docs/python/development-and-packaging.md)
+
+For practical patterns, use:
+
+- `docs/python/quickstart.md` for first workflows
+- `docs/python/practical-recipes.md` for common production automation recipes
+- `docs/python/settings-and-automation.md` for settings-driven automation recipes
+- `docs/python/streaming-and-handlers.md` for event-driven orchestration patterns
 
 ---
 
@@ -411,7 +504,7 @@ Example env wiring:
 
 ```bash
 # Linux/macOS path delimiter is :
-AGENT_EXTENSION_PACKAGE_ROOTS=/opt/codex/extensions:/home/user/my-extension-packages
+AGENT_EXTENSION_PACKAGE_ROOTS=/opt/codex/extensions:/path/to/extension-packages
 AGENT_EXTENSION_CONFIGURED_ROOTS=/etc/codex/extensions
 ```
 
@@ -585,6 +678,7 @@ packages/
   agent-runtime-sdk/ Provider-neutral extension event/runtime contracts
   api-client/ Generated TypeScript API client
   codex-protocol/ Generated protocol schema/types
+  python-client/ Python SDK for codex-manager API + stream automation
 scripts/      Generation + runtime verification utilities
 tests/e2e/    Playwright browser smoke coverage
 docs/         Product, architecture, protocol, and operations knowledge tree
@@ -596,6 +690,8 @@ docs/         Product, architecture, protocol, and operations knowledge tree
 
 - Product requirements: [`docs/prd.md`](docs/prd.md)
 - Architecture and invariants: [`docs/architecture.md`](docs/architecture.md)
+- Python client introduction: [`docs/python/introduction.md`](docs/python/introduction.md)
+- Python deep dives: [`docs/python/`](docs/python/)
 - Codex protocol index: [`docs/codex-app-server.md`](docs/codex-app-server.md)
 - Protocol deep dives: [`docs/protocol/`](docs/protocol/)
 - Operations index: [`docs/ops.md`](docs/ops.md)

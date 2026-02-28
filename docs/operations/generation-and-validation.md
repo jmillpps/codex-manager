@@ -5,6 +5,7 @@
 This repo has two distinct generation categories:
 
 - OpenAPI + API client generation (for browser↔API contract)
+- Python OpenAPI model generation (for typed Python client facade)
 - Codex App Server schema/type generation (for backend↔Codex contract)
 
 ### Generate OpenAPI spec
@@ -33,6 +34,31 @@ Required behavior:
 - Generates/updates the TypeScript client in `packages/api-client/src/generated/`
 - Generated code is never edited manually
 - If policy requires generated output committed, commit it in the same PR
+
+### Generate Python OpenAPI models
+
+Run:
+
+```bash
+pnpm python:openapi:gen
+```
+
+Required behavior:
+
+- Generates/updates Python typed models in `packages/python-client/src/codex_manager/generated/`
+- Output is deterministic and must not be edited manually
+
+### Check Python OpenAPI determinism
+
+Run:
+
+```bash
+pnpm python:openapi:check
+```
+
+Required behavior:
+
+- Regenerates models and fails when generated output differs from committed files
 
 ### Generate everything
 
@@ -96,11 +122,37 @@ pnpm --filter @repo/cli test
 pnpm --filter @repo/api test
 ```
 
+### Run OpenAPI route parity test only
+
+```bash
+pnpm --filter @repo/api exec tsx --test src/openapi-route-coverage.test.ts
+```
+
+### Run OpenAPI schema quality gates only
+
+```bash
+pnpm --filter @repo/api exec tsx --test src/openapi-schema-quality.test.ts
+```
+
 ### Run web tests only
 
 ```bash
 pnpm --filter @repo/web test
 ```
+
+### Run Python client unit tests
+
+From repo root:
+
+```bash
+python3 -m pytest packages/python-client/tests/unit
+```
+
+Note:
+
+- Requires Python dev dependencies installed for `packages/python-client` (for example `pip install -e packages/python-client[dev]`).
+- Coverage includes route parity and protocol boundary suites (`test_route_coverage.py`, `test_client_protocols.py`, `test_hooks.py`, `test_stream_router.py`, `test_plugins.py`).
+- Coverage also includes typed OpenAPI model/facade checks (`test_typed_openapi.py`).
 
 ### Typecheck
 
@@ -150,6 +202,12 @@ pnpm build
 pnpm --filter @repo/cli build
 ```
 
+### Validate Python client package
+
+```bash
+python3 -m compileall packages/python-client/src/codex_manager
+```
+
 ### Runtime smoke (API + WebSocket lifecycle)
 
 Run:
@@ -188,6 +246,7 @@ Before opening a PR, these must all pass locally:
 
 ```bash
 pnpm gen
+pnpm python:openapi:check
 pnpm lint
 pnpm typecheck
 pnpm test
@@ -195,6 +254,8 @@ pnpm build
 pnpm smoke:runtime
 node scripts/run-agent-conformance.mjs
 pnpm test:e2e
+python3 -m compileall packages/python-client/src/codex_manager
+python3 -m pytest packages/python-client/tests/unit
 ```
 
 If any command changes generated artifacts, commit those changes in the same PR.

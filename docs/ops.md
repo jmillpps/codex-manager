@@ -34,6 +34,8 @@ The operations manual was split into focused documents to keep setup, validation
   - Safe reset flows, git workflow rules, CI expectations, and operational invariants.
 - `docs/implementation-status.md`
   - Current code-level feature coverage and user-visible API/workflow semantics.
+- `docs/python/introduction.md`
+  - Python SDK entrypoint and links to focused Python client docs (`quickstart`, `practical-recipes`, `api-surface`, `streaming-and-handlers`, `settings-and-automation`, `protocol-interfaces`, `typed-models`, `development-and-packaging`).
 
 ## Fast-path commands
 
@@ -48,6 +50,8 @@ The operations manual was split into focused documents to keep setup, validation
 - Runtime smoke (API + WebSocket lifecycle): `pnpm smoke:runtime`
 - Runtime profile portability conformance: `node scripts/run-agent-conformance.mjs`
 - Browser smoke/e2e: `pnpm test:e2e`
+- Python client compile check: `python3 -m compileall packages/python-client/src/codex_manager`
+- Python client unit tests: `python3 -m pytest packages/python-client/tests/unit`
 
 ## Current validation posture
 
@@ -55,6 +59,7 @@ The operations manual was split into focused documents to keep setup, validation
 - Runtime smoke validation is active (`smoke:runtime`) and exercises core session/project/message/thread-control flows.
 - Runtime profile portability conformance validation is active (`node scripts/run-agent-conformance.mjs`) and emits `.data/agent-conformance-report.json`.
 - Workspace tests are active (`pnpm test`) with API contract/runtime harness, web integration tests, and API-client compile checks.
+- Python client validation is active through compile checks and dedicated unit suites (route parity + protocol boundary tests).
 - Browser-level Playwright smoke is active (`pnpm test:e2e`) via a wrapper that bootstraps missing Linux shared libraries into `.data/playwright-libs` when possible; see `docs/operations/troubleshooting.md` for edge cases.
 - Lint commands are still placeholders in workspace packages and should be replaced with enforceable lint rules.
 
