@@ -94,6 +94,82 @@
         }
       }
     },
+    "/api/stream": {
+      "get": {
+        "summary": "Websocket stream endpoint",
+        "operationId": "connectEventStream",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "threadId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional initial thread filter for websocket subscribe."
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "Switching protocols"
+          },
+          "400": {
+            "description": "Invalid websocket upgrade request"
+          }
+        }
+      }
+    },
+    "/api/agents/extensions": {
+      "get": {
+        "summary": "List loaded agent extensions and runtime snapshot info",
+        "operationId": "listAgentExtensions",
+        "responses": {
+          "200": {
+            "description": "Extension runtime snapshot"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        }
+      }
+    },
+    "/api/agents/extensions/reload": {
+      "post": {
+        "summary": "Reload agent extensions",
+        "operationId": "reloadAgentExtensions",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reload completed"
+          },
+          "400": {
+            "description": "Reload failed"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "409": {
+            "description": "Reload already in progress"
+          }
+        }
+      }
+    },
     "/api/capabilities": {
       "get": {
         "summary": "Read probed Codex capabilities",
@@ -937,6 +1013,117 @@
         }
       }
     },
+    "/api/orchestrator/jobs/{jobId}": {
+      "get": {
+        "summary": "Read one orchestrator queue job",
+        "operationId": "getOrchestratorJob",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "jobId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Queue job id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Queue job"
+          },
+          "404": {
+            "description": "Job not found"
+          },
+          "503": {
+            "description": "Queue unavailable"
+          }
+        }
+      }
+    },
+    "/api/projects/{projectId}/orchestrator/jobs": {
+      "get": {
+        "summary": "List orchestrator queue jobs by project",
+        "operationId": "listProjectOrchestratorJobs",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Project id"
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "queued",
+                "running",
+                "completed",
+                "failed",
+                "canceled"
+              ]
+            },
+            "description": "Optional state filter"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Project queue jobs"
+          },
+          "503": {
+            "description": "Queue unavailable"
+          }
+        }
+      }
+    },
+    "/api/orchestrator/jobs/{jobId}/cancel": {
+      "post": {
+        "summary": "Cancel one orchestrator queue job",
+        "operationId": "cancelOrchestratorJob",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "jobId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Queue job id"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Queue job canceled"
+          },
+          "404": {
+            "description": "Job not found"
+          },
+          "409": {
+            "description": "Job already terminal"
+          },
+          "503": {
+            "description": "Queue unavailable"
+          }
+        }
+      }
+    },
     "/api/projects": {
       "get": {
         "summary": "List projects",
@@ -1216,22 +1403,21 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "properties": {
-                  "cwd": {
-                    "type": "string"
-                  },
-                  "model": {
-                    "type": "string"
-                  }
-                }
+                "$ref": "#/components/schemas/CreateSessionRequest"
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "Session created"
+            "description": "Session created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateSessionResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -1253,10 +1439,24 @@
         ],
         "responses": {
           "200": {
-            "description": "Session detail"
+            "description": "Session detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadSessionResponse"
+                }
+              }
+            }
           },
           "410": {
-            "description": "Session deleted"
+            "description": "Session deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedSessionPayload"
+                }
+              }
+            }
           }
         }
       },
@@ -1283,6 +1483,97 @@
           },
           "410": {
             "description": "Session already deleted"
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/transcript/upsert": {
+      "post": {
+        "summary": "Upsert one supplemental transcript entry",
+        "operationId": "upsertSessionTranscriptEntry",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Session id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "messageId",
+                  "turnId",
+                  "role",
+                  "type",
+                  "content",
+                  "status"
+                ],
+                "properties": {
+                  "messageId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "turnId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "user",
+                      "assistant",
+                      "system"
+                    ]
+                  },
+                  "type": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "content": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "streaming",
+                      "complete",
+                      "canceled",
+                      "error"
+                    ]
+                  },
+                  "details": {
+                    "type": "string"
+                  },
+                  "startedAt": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "completedAt": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transcript entry upserted"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "410": {
+            "description": "Session deleted"
           }
         }
       }
@@ -1919,13 +2210,44 @@
         ],
         "responses": {
           "200": {
-            "description": "Session settings"
+            "description": "Session settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSettingsGetResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "System session forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemSessionError"
+                }
+              }
+            }
           },
           "404": {
-            "description": "Session not found"
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionNotFoundPayload"
+                }
+              }
+            }
           },
           "410": {
-            "description": "Session deleted"
+            "description": "Session deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedSessionPayload"
+                }
+              }
+            }
           }
         }
       },
@@ -1948,59 +2270,71 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "required": [
-                  "scope"
-                ],
-                "properties": {
-                  "scope": {
-                    "type": "string",
-                    "enum": [
-                      "session",
-                      "default"
-                    ]
-                  },
-                  "key": {
-                    "type": "string"
-                  },
-                  "value": {},
-                  "settings": {
-                    "type": "object",
-                    "additionalProperties": true
-                  },
-                  "mode": {
-                    "type": "string",
-                    "enum": [
-                      "merge",
-                      "replace"
-                    ]
-                  },
-                  "actor": {
-                    "type": "string"
-                  },
-                  "source": {
-                    "type": "string"
-                  }
-                }
+                "$ref": "#/components/schemas/SetSessionSettingsRequest"
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "Session settings updated"
+            "description": "Session settings updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSettingsSetResponse"
+                }
+              }
+            }
           },
           "400": {
-            "description": "Invalid request"
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiValidationError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "System session forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemSessionError"
+                }
+              }
+            }
           },
           "404": {
-            "description": "Session not found"
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionNotFoundPayload"
+                }
+              }
+            }
           },
           "410": {
-            "description": "Session deleted"
+            "description": "Session deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedSessionPayload"
+                }
+              }
+            }
           },
           "423": {
-            "description": "Default settings locked"
+            "description": "Default settings locked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSettingsLockedResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -2062,16 +2396,54 @@
         ],
         "responses": {
           "200": {
-            "description": "Session setting deleted or unchanged"
+            "description": "Session setting deleted or unchanged",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSettingsDeleteResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "System session forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemSessionError"
+                }
+              }
+            }
           },
           "404": {
-            "description": "Session not found"
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionNotFoundPayload"
+                }
+              }
+            }
           },
           "410": {
-            "description": "Session deleted"
+            "description": "Session deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedSessionPayload"
+                }
+              }
+            }
           },
           "423": {
-            "description": "Default settings locked"
+            "description": "Default settings locked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSettingsLockedResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -2112,6 +2484,198 @@
         }
       }
     },
+    "/api/sessions/{sessionId}/approval-policy": {
+      "post": {
+        "summary": "Set session approval policy",
+        "operationId": "setSessionApprovalPolicy",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Session id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "approvalPolicy"
+                ],
+                "properties": {
+                  "approvalPolicy": {
+                    "type": "string",
+                    "enum": [
+                      "untrusted",
+                      "on-failure",
+                      "on-request",
+                      "never"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Approval policy updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionApprovalPolicyResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "System session forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemSessionError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionNotFoundPayload"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Session deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedSessionPayload"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/suggested-request/jobs": {
+      "post": {
+        "summary": "Enqueue suggested-request generation job",
+        "operationId": "enqueueSuggestedSessionRequest",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Session id"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SuggestedRequestBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Suggested request queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuggestedRequestQueuedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiValidationError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "System session forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemSessionError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionNotFoundPayload"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Queue job conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Session deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedSessionPayload"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Queue full",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Queue unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/sessions/{sessionId}/suggested-request": {
       "post": {
         "summary": "Generate a suggested user request for a session",
@@ -2132,41 +2696,180 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "properties": {
-                  "model": {
-                    "type": "string"
-                  },
-                  "effort": {
-                    "type": "string",
-                    "enum": [
-                      "none",
-                      "minimal",
-                      "low",
-                      "medium",
-                      "high",
-                      "xhigh"
-                    ]
-                  },
-                  "draft": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 4000
-                  }
-                }
+                "$ref": "#/components/schemas/SuggestedRequestBody"
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "Suggested request generated"
+            "description": "Suggested request generated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuggestSessionRequestSuccessResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Suggested request queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuggestedRequestQueuedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiValidationError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "System session forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemSessionError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionNotFoundPayload"
+                }
+              }
+            }
           },
           "409": {
-            "description": "No available context for suggestion"
+            "description": "No available context for suggestion",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuggestSessionRequestNoContextResponse"
+                }
+              }
+            }
           },
           "410": {
-            "description": "Session deleted"
+            "description": "Session deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedSessionPayload"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Queue full",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Queue unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{sessionId}/suggested-request/upsert": {
+      "post": {
+        "summary": "Upsert suggested-request runtime state",
+        "operationId": "upsertSuggestedSessionRequest",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Session id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SuggestedRequestUpsertBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Suggested request state updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuggestedRequestUpsertResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuggestedRequestUpsertErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "System session forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemSessionError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionNotFoundPayload"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Session deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedSessionPayload"
+                }
+              }
+            }
           }
         }
       }
@@ -2242,39 +2945,61 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "required": [
-                  "text"
-                ],
-                "properties": {
-                  "text": {
-                    "type": "string"
-                  },
-                  "model": {
-                    "type": "string"
-                  },
-                  "effort": {
-                    "type": "string",
-                    "enum": [
-                      "none",
-                      "minimal",
-                      "low",
-                      "medium",
-                      "high",
-                      "xhigh"
-                    ]
-                  }
-                }
+                "$ref": "#/components/schemas/SendSessionMessageRequest"
               }
             }
           }
         },
         "responses": {
           "202": {
-            "description": "Turn accepted"
+            "description": "Turn accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendSessionMessageAcceptedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiValidationError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "System session forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemSessionError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionNotFoundPayload"
+                }
+              }
+            }
           },
           "410": {
-            "description": "Session deleted"
+            "description": "Session deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedSessionPayload"
+                }
+              }
+            }
           }
         }
       }
@@ -2342,48 +3067,41 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "required": [
-                  "decision"
-                ],
-                "properties": {
-                  "decision": {
-                    "type": "string",
-                    "enum": [
-                      "accept",
-                      "decline",
-                      "cancel"
-                    ]
-                  },
-                  "answers": {
-                    "type": "object",
-                    "additionalProperties": {
-                      "type": "object",
-                      "required": [
-                        "answers"
-                      ],
-                      "properties": {
-                        "answers": {
-                          "type": "array",
-                          "items": {
-                            "type": "string"
-                          }
-                        }
-                      }
-                    }
-                  },
-                  "response": {}
-                }
+                "$ref": "#/components/schemas/ToolInputDecisionRequest"
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "Decision submitted"
+            "description": "Decision submitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolInputDecisionSuccessResponse"
+                }
+              }
+            }
           },
           "404": {
-            "description": "Request not found"
+            "description": "Request not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolInputDecisionNotFoundResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Decision failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolInputDecisionErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -2408,37 +3126,1259 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "required": [
-                  "decision"
-                ],
-                "properties": {
-                  "decision": {
-                    "type": "string",
-                    "enum": [
-                      "accept",
-                      "decline",
-                      "cancel"
-                    ]
-                  },
-                  "scope": {
-                    "type": "string",
-                    "enum": [
-                      "turn",
-                      "session"
-                    ]
-                  }
-                }
+                "$ref": "#/components/schemas/ApprovalDecisionRequest"
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "Decision submitted"
+            "description": "Decision submitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalDecisionSuccessResponse"
+                }
+              }
+            }
           },
           "404": {
-            "description": "Approval not found"
+            "description": "Approval not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalDecisionNotFoundResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Approval reconciled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalDecisionReconciledResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Decision failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalDecisionErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApprovalPolicy": {
+        "type": "string",
+        "enum": [
+          "untrusted",
+          "on-failure",
+          "on-request",
+          "never"
+        ]
+      },
+      "NetworkAccess": {
+        "type": "string",
+        "enum": [
+          "restricted",
+          "enabled"
+        ]
+      },
+      "FilesystemSandbox": {
+        "type": "string",
+        "enum": [
+          "read-only",
+          "workspace-write",
+          "danger-full-access"
+        ]
+      },
+      "SessionSettingsScope": {
+        "type": "string",
+        "enum": [
+          "session",
+          "default"
+        ]
+      },
+      "SessionControlsTuple": {
+        "type": "object",
+        "required": [
+          "model",
+          "approvalPolicy",
+          "networkAccess",
+          "filesystemSandbox"
+        ],
+        "properties": {
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "approvalPolicy": {
+            "$ref": "#/components/schemas/ApprovalPolicy"
+          },
+          "networkAccess": {
+            "$ref": "#/components/schemas/NetworkAccess"
+          },
+          "filesystemSandbox": {
+            "$ref": "#/components/schemas/FilesystemSandbox"
+          },
+          "settings": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "SessionSummary": {
+        "type": "object",
+        "required": [
+          "sessionId",
+          "title",
+          "materialized",
+          "modelProvider",
+          "approvalPolicy",
+          "sessionControls",
+          "createdAt",
+          "updatedAt",
+          "cwd",
+          "source",
+          "projectId"
+        ],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "materialized": {
+            "type": "boolean"
+          },
+          "modelProvider": {
+            "type": "string"
+          },
+          "approvalPolicy": {
+            "$ref": "#/components/schemas/ApprovalPolicy"
+          },
+          "sessionControls": {
+            "$ref": "#/components/schemas/SessionControlsTuple"
+          },
+          "createdAt": {
+            "type": "number"
+          },
+          "updatedAt": {
+            "type": "number"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "CodexThreadItem": {
+        "type": "object",
+        "required": [
+          "type",
+          "id"
+        ],
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "CodexTurn": {
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "items"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CodexThreadItem"
+            }
+          },
+          "startedAt": {},
+          "startTime": {},
+          "completedAt": {},
+          "endTime": {}
+        },
+        "additionalProperties": true
+      },
+      "CodexThread": {
+        "type": "object",
+        "required": [
+          "id",
+          "preview",
+          "modelProvider",
+          "createdAt",
+          "updatedAt",
+          "cwd",
+          "source"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "preview": {
+            "type": "string"
+          },
+          "modelProvider": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "number"
+          },
+          "updatedAt": {
+            "type": "number"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "source": {},
+          "turns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CodexTurn"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "TranscriptEntry": {
+        "type": "object",
+        "required": [
+          "messageId",
+          "turnId",
+          "role",
+          "type",
+          "content",
+          "status"
+        ],
+        "properties": {
+          "messageId": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "assistant",
+              "system"
+            ]
+          },
+          "type": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "details": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "startedAt": {
+            "type": "integer"
+          },
+          "completedAt": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "streaming",
+              "complete",
+              "canceled",
+              "error"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "DeletedSessionPayload": {
+        "type": "object",
+        "required": [
+          "status",
+          "sessionId",
+          "message",
+          "deletedAt"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "deleted"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "deletedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SessionNotFoundPayload": {
+        "type": "object",
+        "required": [
+          "status",
+          "sessionId"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "not_found"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          }
+        }
+      },
+      "SystemSessionError": {
+        "type": "object",
+        "required": [
+          "status",
+          "code",
+          "sessionId",
+          "message"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "error"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "system_session"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "ApiValidationError": {
+        "type": "object",
+        "required": [
+          "status",
+          "code",
+          "message"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "error"
+            ]
+          },
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "issues": {
+            "type": "array",
+            "items": {}
+          }
+        },
+        "additionalProperties": true
+      },
+      "CreateSessionRequest": {
+        "type": "object",
+        "properties": {
+          "cwd": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "approvalPolicy": {
+            "$ref": "#/components/schemas/ApprovalPolicy"
+          },
+          "networkAccess": {
+            "$ref": "#/components/schemas/NetworkAccess"
+          },
+          "filesystemSandbox": {
+            "$ref": "#/components/schemas/FilesystemSandbox"
+          }
+        }
+      },
+      "SendSessionMessageRequest": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model": {
+            "type": "string"
+          },
+          "effort": {
+            "type": "string",
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          },
+          "approvalPolicy": {
+            "$ref": "#/components/schemas/ApprovalPolicy"
+          },
+          "networkAccess": {
+            "$ref": "#/components/schemas/NetworkAccess"
+          },
+          "filesystemSandbox": {
+            "$ref": "#/components/schemas/FilesystemSandbox"
+          }
+        }
+      },
+      "SuggestedRequestBody": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "effort": {
+            "type": "string",
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          },
+          "draft": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          }
+        }
+      },
+      "SuggestedRequestUpsertBody": {
+        "type": "object",
+        "required": [
+          "requestKey",
+          "status"
+        ],
+        "properties": {
+          "requestKey": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "streaming",
+              "complete",
+              "error",
+              "canceled"
+            ]
+          },
+          "suggestion": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8000
+          },
+          "error": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          }
+        }
+      },
+      "ApprovalDecisionRequest": {
+        "type": "object",
+        "required": [
+          "decision"
+        ],
+        "properties": {
+          "decision": {
+            "type": "string",
+            "enum": [
+              "accept",
+              "decline",
+              "cancel"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "turn",
+              "session"
+            ]
+          }
+        }
+      },
+      "ToolInputDecisionOptionAnswers": {
+        "type": "object",
+        "required": [
+          "answers"
+        ],
+        "properties": {
+          "answers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ToolInputDecisionRequest": {
+        "type": "object",
+        "required": [
+          "decision"
+        ],
+        "properties": {
+          "decision": {
+            "type": "string",
+            "enum": [
+              "accept",
+              "decline",
+              "cancel"
+            ]
+          },
+          "answers": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ToolInputDecisionOptionAnswers"
+            }
+          },
+          "response": {}
+        }
+      },
+      "CreateSessionResponse": {
+        "type": "object",
+        "required": [
+          "session",
+          "thread"
+        ],
+        "properties": {
+          "session": {
+            "$ref": "#/components/schemas/SessionSummary"
+          },
+          "thread": {
+            "$ref": "#/components/schemas/CodexThread"
+          }
+        }
+      },
+      "ReadSessionResponse": {
+        "type": "object",
+        "required": [
+          "session",
+          "thread",
+          "transcript"
+        ],
+        "properties": {
+          "session": {
+            "$ref": "#/components/schemas/SessionSummary"
+          },
+          "thread": {
+            "$ref": "#/components/schemas/CodexThread"
+          },
+          "transcript": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TranscriptEntry"
+            }
+          }
+        }
+      },
+      "SessionSettingsListResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "sessionId",
+          "scope",
+          "settings"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/SessionSettingsScope"
+          },
+          "settings": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "SessionSettingsKeyResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "sessionId",
+          "scope",
+          "key",
+          "found",
+          "value"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/SessionSettingsScope"
+          },
+          "key": {
+            "type": "string"
+          },
+          "found": {
+            "type": "boolean"
+          },
+          "value": {}
+        }
+      },
+      "SessionSettingsGetResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SessionSettingsListResponse"
+          },
+          {
+            "$ref": "#/components/schemas/SessionSettingsKeyResponse"
+          }
+        ]
+      },
+      "SetSessionSettingsRequest": {
+        "type": "object",
+        "required": [
+          "scope"
+        ],
+        "properties": {
+          "scope": {
+            "$ref": "#/components/schemas/SessionSettingsScope"
+          },
+          "key": {
+            "type": "string"
+          },
+          "value": {},
+          "settings": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "merge",
+              "replace"
+            ]
+          },
+          "actor": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        }
+      },
+      "SessionSettingsSetResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "sessionId",
+          "scope",
+          "settings"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "unchanged"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/SessionSettingsScope"
+          },
+          "key": {
+            "type": "string"
+          },
+          "settings": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "SessionSettingsDeleteResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "sessionId",
+          "scope",
+          "key",
+          "removed",
+          "settings"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "unchanged"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/SessionSettingsScope"
+          },
+          "key": {
+            "type": "string"
+          },
+          "removed": {
+            "type": "boolean"
+          },
+          "settings": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "SessionSettingsLockedResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "scope",
+          "message",
+          "sessionId",
+          "settings"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "locked"
+            ]
+          },
+          "scope": {
+            "$ref": "#/components/schemas/SessionSettingsScope"
+          },
+          "message": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "settings": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "SessionApprovalPolicyResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "sessionId",
+          "approvalPolicy"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "approvalPolicy": {
+            "$ref": "#/components/schemas/ApprovalPolicy"
+          }
+        }
+      },
+      "SuggestedRequestQueuedResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "jobId",
+          "requestKey",
+          "sessionId",
+          "projectId",
+          "dedupe"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued"
+            ]
+          },
+          "jobId": {
+            "type": "string"
+          },
+          "requestKey": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "dedupe": {
+            "type": "string",
+            "enum": [
+              "already_queued",
+              "enqueued"
+            ]
+          }
+        }
+      },
+      "QueueErrorResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "code",
+          "sessionId",
+          "message"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "error"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "queue_full",
+              "job_conflict",
+              "invalid_payload"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "SuggestSessionRequestOkResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "sessionId",
+          "requestKey",
+          "suggestion"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "requestKey": {
+            "type": "string"
+          },
+          "suggestion": {
+            "type": "string"
+          }
+        }
+      },
+      "SuggestSessionRequestFallbackResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "sessionId",
+          "requestKey",
+          "suggestion"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "fallback"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "requestKey": {
+            "type": "string"
+          },
+          "suggestion": {
+            "type": "string"
+          }
+        }
+      },
+      "SuggestSessionRequestSuccessResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SuggestSessionRequestOkResponse"
+          },
+          {
+            "$ref": "#/components/schemas/SuggestSessionRequestFallbackResponse"
+          }
+        ]
+      },
+      "SuggestSessionRequestNoContextResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "sessionId",
+          "requestKey",
+          "message"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "no_context"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "requestKey": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "SuggestedRequestRuntimeEntry": {
+        "type": "object",
+        "required": [
+          "status",
+          "updatedAt"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "streaming",
+              "complete",
+              "error",
+              "canceled"
+            ]
+          },
+          "suggestion": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SuggestedRequestUpsertResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "sessionId",
+          "requestKey",
+          "entry"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "requestKey": {
+            "type": "string"
+          },
+          "entry": {
+            "$ref": "#/components/schemas/SuggestedRequestRuntimeEntry"
+          }
+        }
+      },
+      "SuggestedRequestUpsertInvalidResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "code",
+          "message"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "invalid_request"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "missing_suggestion"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "SuggestedRequestUpsertErrorResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ApiValidationError"
+          },
+          {
+            "$ref": "#/components/schemas/SuggestedRequestUpsertInvalidResponse"
+          }
+        ]
+      },
+      "SendSessionMessageAcceptedResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "sessionId",
+          "turnId"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "accepted"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          }
+        }
+      },
+      "ToolInputDecisionSuccessResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "requestId",
+          "threadId"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        }
+      },
+      "ToolInputDecisionNotFoundResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "requestId"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "not_found"
+            ]
+          },
+          "requestId": {
+            "type": "string"
+          }
+        }
+      },
+      "ToolInputDecisionErrorResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "requestId"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "error"
+            ]
+          },
+          "requestId": {
+            "type": "string"
+          }
+        }
+      },
+      "ApprovalDecisionSuccessResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "approvalId",
+          "threadId"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "approvalId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        }
+      },
+      "ApprovalDecisionNotFoundResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "approvalId"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "not_found"
+            ]
+          },
+          "approvalId": {
+            "type": "string"
+          }
+        }
+      },
+      "ApprovalDecisionReconciledResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "approvalId",
+          "threadId",
+          "code"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "reconciled"
+            ]
+          },
+          "approvalId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "already_resolved",
+              "not_eligible",
+              "conflict"
+            ]
+          }
+        }
+      },
+      "ApprovalDecisionErrorResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "approvalId"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "error"
+            ]
+          },
+          "approvalId": {
+            "type": "string"
           }
         }
       }

@@ -30,7 +30,27 @@ const requestBody = (schema, required = true) => ({
 });
 
 const responses = (entries) =>
-  Object.fromEntries(entries.map(([status, description]) => [String(status), { description }]));
+  Object.fromEntries(
+    entries.map(([status, value]) => {
+      if (typeof value === "string") {
+        return [String(status), { description: value }];
+      }
+      return [String(status), value];
+    })
+  );
+
+const jsonResponse = (description, schema) => ({
+  description,
+  content: {
+    "application/json": {
+      schema
+    }
+  }
+});
+
+const schemaRef = (name) => ({
+  $ref: `#/components/schemas/${name}`
+});
 
 const paginationParams = [
   queryParam("cursor", { type: "string" }, "Pagination cursor from a previous response."),
@@ -41,6 +61,36 @@ const reasoningEffortValues = ["none", "minimal", "low", "medium", "high", "xhig
 const reasoningEffortSchema = {
   type: "string",
   enum: reasoningEffortValues
+};
+
+const approvalPolicyValues = ["untrusted", "on-failure", "on-request", "never"];
+const approvalPolicySchema = {
+  type: "string",
+  enum: approvalPolicyValues
+};
+
+const networkAccessValues = ["restricted", "enabled"];
+const networkAccessSchema = {
+  type: "string",
+  enum: networkAccessValues
+};
+
+const filesystemSandboxValues = ["read-only", "workspace-write", "danger-full-access"];
+const filesystemSandboxSchema = {
+  type: "string",
+  enum: filesystemSandboxValues
+};
+
+const settingsScopeValues = ["session", "default"];
+const settingsScopeSchema = {
+  type: "string",
+  enum: settingsScopeValues
+};
+
+const suggestionStatusValues = ["streaming", "complete", "error", "canceled"];
+const suggestionStatusSchema = {
+  type: "string",
+  enum: suggestionStatusValues
 };
 
 const openApiDocument = {
@@ -98,6 +148,44 @@ const openApiDocument = {
         operationId: "getApiInfo",
         responses: responses([
           [200, "API metadata"]
+        ])
+      }
+    },
+    "/api/stream": {
+      get: {
+        summary: "Websocket stream endpoint",
+        operationId: "connectEventStream",
+        parameters: [
+          queryParam("threadId", { type: "string" }, "Optional initial thread filter for websocket subscribe.")
+        ],
+        responses: responses([
+          [101, "Switching protocols"],
+          [400, "Invalid websocket upgrade request"]
+        ])
+      }
+    },
+    "/api/agents/extensions": {
+      get: {
+        summary: "List loaded agent extensions and runtime snapshot info",
+        operationId: "listAgentExtensions",
+        responses: responses([
+          [200, "Extension runtime snapshot"],
+          [401, "Authentication required"],
+          [403, "Forbidden"]
+        ])
+      }
+    },
+    "/api/agents/extensions/reload": {
+      post: {
+        summary: "Reload agent extensions",
+        operationId: "reloadAgentExtensions",
+        requestBody: requestBody({ type: "object", additionalProperties: true }, false),
+        responses: responses([
+          [200, "Reload completed"],
+          [400, "Reload failed"],
+          [401, "Authentication required"],
+          [403, "Forbidden"],
+          [409, "Reload already in progress"]
         ])
       }
     },
@@ -467,6 +555,50 @@ const openApiDocument = {
         ])
       }
     },
+    "/api/orchestrator/jobs/{jobId}": {
+      get: {
+        summary: "Read one orchestrator queue job",
+        operationId: "getOrchestratorJob",
+        parameters: [pathParam("jobId", "Queue job id")],
+        responses: responses([
+          [200, "Queue job"],
+          [404, "Job not found"],
+          [503, "Queue unavailable"]
+        ])
+      }
+    },
+    "/api/projects/{projectId}/orchestrator/jobs": {
+      get: {
+        summary: "List orchestrator queue jobs by project",
+        operationId: "listProjectOrchestratorJobs",
+        parameters: [
+          pathParam("projectId", "Project id"),
+          queryParam(
+            "state",
+            { type: "string", enum: ["queued", "running", "completed", "failed", "canceled"] },
+            "Optional state filter"
+          )
+        ],
+        responses: responses([
+          [200, "Project queue jobs"],
+          [503, "Queue unavailable"]
+        ])
+      }
+    },
+    "/api/orchestrator/jobs/{jobId}/cancel": {
+      post: {
+        summary: "Cancel one orchestrator queue job",
+        operationId: "cancelOrchestratorJob",
+        parameters: [pathParam("jobId", "Queue job id")],
+        requestBody: requestBody({ type: "object", additionalProperties: true }, false),
+        responses: responses([
+          [200, "Queue job canceled"],
+          [404, "Job not found"],
+          [409, "Job already terminal"],
+          [503, "Queue unavailable"]
+        ])
+      }
+    },
     "/api/projects": {
       get: {
         summary: "List projects",
@@ -579,18 +711,9 @@ const openApiDocument = {
       post: {
         summary: "Create a session",
         operationId: "createSession",
-        requestBody: requestBody(
-          {
-            type: "object",
-            properties: {
-              cwd: { type: "string" },
-              model: { type: "string" }
-            }
-          },
-          false
-        ),
+        requestBody: requestBody(schemaRef("CreateSessionRequest"), false),
         responses: responses([
-          [200, "Session created"]
+          [200, jsonResponse("Session created", schemaRef("CreateSessionResponse"))]
         ])
       }
     },
@@ -600,8 +723,8 @@ const openApiDocument = {
         operationId: "readSession",
         parameters: [pathParam("sessionId", "Session id")],
         responses: responses([
-          [200, "Session detail"],
-          [410, "Session deleted"]
+          [200, jsonResponse("Session detail", schemaRef("ReadSessionResponse"))],
+          [410, jsonResponse("Session deleted", schemaRef("DeletedSessionPayload"))]
         ])
       },
       delete: {
@@ -612,6 +735,33 @@ const openApiDocument = {
           [200, "Session deleted"],
           [404, "Session not found"],
           [410, "Session already deleted"]
+        ])
+      }
+    },
+    "/api/sessions/{sessionId}/transcript/upsert": {
+      post: {
+        summary: "Upsert one supplemental transcript entry",
+        operationId: "upsertSessionTranscriptEntry",
+        parameters: [pathParam("sessionId", "Session id")],
+        requestBody: requestBody({
+          type: "object",
+          required: ["messageId", "turnId", "role", "type", "content", "status"],
+          properties: {
+            messageId: { type: "string", minLength: 1 },
+            turnId: { type: "string", minLength: 1 },
+            role: { type: "string", enum: ["user", "assistant", "system"] },
+            type: { type: "string", minLength: 1 },
+            content: { type: "string" },
+            status: { type: "string", enum: ["streaming", "complete", "canceled", "error"] },
+            details: { type: "string" },
+            startedAt: { type: "integer", minimum: 0 },
+            completedAt: { type: "integer", minimum: 0 }
+          }
+        }),
+        responses: responses([
+          [200, "Transcript entry upserted"],
+          [404, "Session not found"],
+          [410, "Session deleted"]
         ])
       }
     },
@@ -836,38 +986,28 @@ const openApiDocument = {
         operationId: "getSessionSettings",
         parameters: [
           pathParam("sessionId", "Session id"),
-          queryParam("scope", { type: "string", enum: ["session", "default"] }, "Settings scope"),
+          queryParam("scope", settingsScopeSchema, "Settings scope"),
           queryParam("key", { type: "string" }, "Optional top-level settings key")
         ],
         responses: responses([
-          [200, "Session settings"],
-          [404, "Session not found"],
-          [410, "Session deleted"]
+          [200, jsonResponse("Session settings", schemaRef("SessionSettingsGetResponse"))],
+          [403, jsonResponse("System session forbidden", schemaRef("SystemSessionError"))],
+          [404, jsonResponse("Session not found", schemaRef("SessionNotFoundPayload"))],
+          [410, jsonResponse("Session deleted", schemaRef("DeletedSessionPayload"))]
         ])
       },
       post: {
         summary: "Upsert session settings",
         operationId: "setSessionSettings",
         parameters: [pathParam("sessionId", "Session id")],
-        requestBody: requestBody({
-          type: "object",
-          required: ["scope"],
-          properties: {
-            scope: { type: "string", enum: ["session", "default"] },
-            key: { type: "string" },
-            value: {},
-            settings: { type: "object", additionalProperties: true },
-            mode: { type: "string", enum: ["merge", "replace"] },
-            actor: { type: "string" },
-            source: { type: "string" }
-          }
-        }),
+        requestBody: requestBody(schemaRef("SetSessionSettingsRequest")),
         responses: responses([
-          [200, "Session settings updated"],
-          [400, "Invalid request"],
-          [404, "Session not found"],
-          [410, "Session deleted"],
-          [423, "Default settings locked"]
+          [200, jsonResponse("Session settings updated", schemaRef("SessionSettingsSetResponse"))],
+          [400, jsonResponse("Invalid request", schemaRef("ApiValidationError"))],
+          [403, jsonResponse("System session forbidden", schemaRef("SystemSessionError"))],
+          [404, jsonResponse("Session not found", schemaRef("SessionNotFoundPayload"))],
+          [410, jsonResponse("Session deleted", schemaRef("DeletedSessionPayload"))],
+          [423, jsonResponse("Default settings locked", schemaRef("SessionSettingsLockedResponse"))]
         ])
       }
     },
@@ -878,15 +1018,16 @@ const openApiDocument = {
         parameters: [
           pathParam("sessionId", "Session id"),
           pathParam("key", "Top-level settings key"),
-          queryParam("scope", { type: "string", enum: ["session", "default"] }, "Settings scope"),
+          queryParam("scope", settingsScopeSchema, "Settings scope"),
           queryParam("actor", { type: "string" }, "Optional audit actor"),
           queryParam("source", { type: "string" }, "Optional audit source")
         ],
         responses: responses([
-          [200, "Session setting deleted or unchanged"],
-          [404, "Session not found"],
-          [410, "Session deleted"],
-          [423, "Default settings locked"]
+          [200, jsonResponse("Session setting deleted or unchanged", schemaRef("SessionSettingsDeleteResponse"))],
+          [403, jsonResponse("System session forbidden", schemaRef("SystemSessionError"))],
+          [404, jsonResponse("Session not found", schemaRef("SessionNotFoundPayload"))],
+          [410, jsonResponse("Session deleted", schemaRef("DeletedSessionPayload"))],
+          [423, jsonResponse("Default settings locked", schemaRef("SessionSettingsLockedResponse"))]
         ])
       }
     },
@@ -902,26 +1043,75 @@ const openApiDocument = {
         ])
       }
     },
+    "/api/sessions/{sessionId}/approval-policy": {
+      post: {
+        summary: "Set session approval policy",
+        operationId: "setSessionApprovalPolicy",
+        parameters: [pathParam("sessionId", "Session id")],
+        requestBody: requestBody({
+          type: "object",
+          required: ["approvalPolicy"],
+          properties: {
+            approvalPolicy: approvalPolicySchema
+          }
+        }),
+        responses: responses([
+          [200, jsonResponse("Approval policy updated", schemaRef("SessionApprovalPolicyResponse"))],
+          [403, jsonResponse("System session forbidden", schemaRef("SystemSessionError"))],
+          [404, jsonResponse("Session not found", schemaRef("SessionNotFoundPayload"))],
+          [410, jsonResponse("Session deleted", schemaRef("DeletedSessionPayload"))]
+        ])
+      }
+    },
+    "/api/sessions/{sessionId}/suggested-request/jobs": {
+      post: {
+        summary: "Enqueue suggested-request generation job",
+        operationId: "enqueueSuggestedSessionRequest",
+        parameters: [pathParam("sessionId", "Session id")],
+        requestBody: requestBody(schemaRef("SuggestedRequestBody"), false),
+        responses: responses([
+          [202, jsonResponse("Suggested request queued", schemaRef("SuggestedRequestQueuedResponse"))],
+          [400, jsonResponse("Invalid request", schemaRef("ApiValidationError"))],
+          [403, jsonResponse("System session forbidden", schemaRef("SystemSessionError"))],
+          [404, jsonResponse("Session not found", schemaRef("SessionNotFoundPayload"))],
+          [409, jsonResponse("Queue job conflict", schemaRef("QueueErrorResponse"))],
+          [410, jsonResponse("Session deleted", schemaRef("DeletedSessionPayload"))],
+          [429, jsonResponse("Queue full", schemaRef("QueueErrorResponse"))],
+          [503, jsonResponse("Queue unavailable", schemaRef("QueueErrorResponse"))]
+        ])
+      }
+    },
     "/api/sessions/{sessionId}/suggested-request": {
       post: {
         summary: "Generate a suggested user request for a session",
         operationId: "suggestSessionRequest",
         parameters: [pathParam("sessionId", "Session id")],
-        requestBody: requestBody(
-          {
-            type: "object",
-            properties: {
-              model: { type: "string" },
-              effort: reasoningEffortSchema,
-              draft: { type: "string", minLength: 1, maxLength: 4000 }
-            }
-          },
-          false
-        ),
+        requestBody: requestBody(schemaRef("SuggestedRequestBody"), false),
         responses: responses([
-          [200, "Suggested request generated"],
-          [409, "No available context for suggestion"],
-          [410, "Session deleted"]
+          [200, jsonResponse("Suggested request generated", schemaRef("SuggestSessionRequestSuccessResponse"))],
+          [202, jsonResponse("Suggested request queued", schemaRef("SuggestedRequestQueuedResponse"))],
+          [400, jsonResponse("Invalid request", schemaRef("ApiValidationError"))],
+          [403, jsonResponse("System session forbidden", schemaRef("SystemSessionError"))],
+          [404, jsonResponse("Session not found", schemaRef("SessionNotFoundPayload"))],
+          [409, jsonResponse("No available context for suggestion", schemaRef("SuggestSessionRequestNoContextResponse"))],
+          [410, jsonResponse("Session deleted", schemaRef("DeletedSessionPayload"))],
+          [429, jsonResponse("Queue full", schemaRef("QueueErrorResponse"))],
+          [503, jsonResponse("Queue unavailable", schemaRef("QueueErrorResponse"))]
+        ])
+      }
+    },
+    "/api/sessions/{sessionId}/suggested-request/upsert": {
+      post: {
+        summary: "Upsert suggested-request runtime state",
+        operationId: "upsertSuggestedSessionRequest",
+        parameters: [pathParam("sessionId", "Session id")],
+        requestBody: requestBody(schemaRef("SuggestedRequestUpsertBody")),
+        responses: responses([
+          [200, jsonResponse("Suggested request state updated", schemaRef("SuggestedRequestUpsertResponse"))],
+          [400, jsonResponse("Invalid request", schemaRef("SuggestedRequestUpsertErrorResponse"))],
+          [403, jsonResponse("System session forbidden", schemaRef("SystemSessionError"))],
+          [404, jsonResponse("Session not found", schemaRef("SessionNotFoundPayload"))],
+          [410, jsonResponse("Session deleted", schemaRef("DeletedSessionPayload"))]
         ])
       }
     },
@@ -953,18 +1143,13 @@ const openApiDocument = {
         summary: "Start a turn in a session",
         operationId: "sendSessionMessage",
         parameters: [pathParam("sessionId", "Session id")],
-        requestBody: requestBody({
-          type: "object",
-          required: ["text"],
-          properties: {
-            text: { type: "string" },
-            model: { type: "string" },
-            effort: reasoningEffortSchema
-          }
-        }),
+        requestBody: requestBody(schemaRef("SendSessionMessageRequest")),
         responses: responses([
-          [202, "Turn accepted"],
-          [410, "Session deleted"]
+          [202, jsonResponse("Turn accepted", schemaRef("SendSessionMessageAcceptedResponse"))],
+          [400, jsonResponse("Invalid request", schemaRef("ApiValidationError"))],
+          [403, jsonResponse("System session forbidden", schemaRef("SystemSessionError"))],
+          [404, jsonResponse("Session not found", schemaRef("SessionNotFoundPayload"))],
+          [410, jsonResponse("Session deleted", schemaRef("DeletedSessionPayload"))]
         ])
       }
     },
@@ -994,30 +1179,11 @@ const openApiDocument = {
         summary: "Submit tool-input decision",
         operationId: "decideToolInput",
         parameters: [pathParam("requestId", "Tool-input request id")],
-        requestBody: requestBody({
-          type: "object",
-          required: ["decision"],
-          properties: {
-            decision: { type: "string", enum: ["accept", "decline", "cancel"] },
-            answers: {
-              type: "object",
-              additionalProperties: {
-                type: "object",
-                required: ["answers"],
-                properties: {
-                  answers: {
-                    type: "array",
-                    items: { type: "string" }
-                  }
-                }
-              }
-            },
-            response: {}
-          }
-        }),
+        requestBody: requestBody(schemaRef("ToolInputDecisionRequest")),
         responses: responses([
-          [200, "Decision submitted"],
-          [404, "Request not found"]
+          [200, jsonResponse("Decision submitted", schemaRef("ToolInputDecisionSuccessResponse"))],
+          [404, jsonResponse("Request not found", schemaRef("ToolInputDecisionNotFoundResponse"))],
+          [500, jsonResponse("Decision failed", schemaRef("ToolInputDecisionErrorResponse"))]
         ])
       }
     },
@@ -1026,18 +1192,509 @@ const openApiDocument = {
         summary: "Submit approval decision",
         operationId: "decideApproval",
         parameters: [pathParam("approvalId", "Approval id")],
-        requestBody: requestBody({
-          type: "object",
-          required: ["decision"],
-          properties: {
-            decision: { type: "string", enum: ["accept", "decline", "cancel"] },
-            scope: { type: "string", enum: ["turn", "session"] }
-          }
-        }),
+        requestBody: requestBody(schemaRef("ApprovalDecisionRequest")),
         responses: responses([
-          [200, "Decision submitted"],
-          [404, "Approval not found"]
+          [200, jsonResponse("Decision submitted", schemaRef("ApprovalDecisionSuccessResponse"))],
+          [404, jsonResponse("Approval not found", schemaRef("ApprovalDecisionNotFoundResponse"))],
+          [409, jsonResponse("Approval reconciled", schemaRef("ApprovalDecisionReconciledResponse"))],
+          [500, jsonResponse("Decision failed", schemaRef("ApprovalDecisionErrorResponse"))]
         ])
+      }
+    }
+  },
+  components: {
+    schemas: {
+      ApprovalPolicy: approvalPolicySchema,
+      NetworkAccess: networkAccessSchema,
+      FilesystemSandbox: filesystemSandboxSchema,
+      SessionSettingsScope: settingsScopeSchema,
+      SessionControlsTuple: {
+        type: "object",
+        required: ["model", "approvalPolicy", "networkAccess", "filesystemSandbox"],
+        properties: {
+          model: { type: ["string", "null"] },
+          approvalPolicy: schemaRef("ApprovalPolicy"),
+          networkAccess: schemaRef("NetworkAccess"),
+          filesystemSandbox: schemaRef("FilesystemSandbox"),
+          settings: {
+            type: "object",
+            additionalProperties: true
+          }
+        }
+      },
+      SessionSummary: {
+        type: "object",
+        required: [
+          "sessionId",
+          "title",
+          "materialized",
+          "modelProvider",
+          "approvalPolicy",
+          "sessionControls",
+          "createdAt",
+          "updatedAt",
+          "cwd",
+          "source",
+          "projectId"
+        ],
+        properties: {
+          sessionId: { type: "string" },
+          title: { type: "string" },
+          materialized: { type: "boolean" },
+          modelProvider: { type: "string" },
+          approvalPolicy: schemaRef("ApprovalPolicy"),
+          sessionControls: schemaRef("SessionControlsTuple"),
+          createdAt: { type: "number" },
+          updatedAt: { type: "number" },
+          cwd: { type: "string" },
+          source: { type: "string" },
+          projectId: { type: ["string", "null"] }
+        }
+      },
+      CodexThreadItem: {
+        type: "object",
+        required: ["type", "id"],
+        properties: {
+          type: { type: "string" },
+          id: { type: "string" }
+        },
+        additionalProperties: true
+      },
+      CodexTurn: {
+        type: "object",
+        required: ["id", "status", "items"],
+        properties: {
+          id: { type: "string" },
+          status: { type: "string" },
+          items: {
+            type: "array",
+            items: schemaRef("CodexThreadItem")
+          },
+          startedAt: {},
+          startTime: {},
+          completedAt: {},
+          endTime: {}
+        },
+        additionalProperties: true
+      },
+      CodexThread: {
+        type: "object",
+        required: ["id", "preview", "modelProvider", "createdAt", "updatedAt", "cwd", "source"],
+        properties: {
+          id: { type: "string" },
+          preview: { type: "string" },
+          modelProvider: { type: "string" },
+          createdAt: { type: "number" },
+          updatedAt: { type: "number" },
+          cwd: { type: "string" },
+          source: {},
+          turns: {
+            type: "array",
+            items: schemaRef("CodexTurn")
+          }
+        },
+        additionalProperties: true
+      },
+      TranscriptEntry: {
+        type: "object",
+        required: ["messageId", "turnId", "role", "type", "content", "status"],
+        properties: {
+          messageId: { type: "string" },
+          turnId: { type: "string" },
+          role: { type: "string", enum: ["user", "assistant", "system"] },
+          type: { type: "string" },
+          content: { type: "string" },
+          details: { type: ["string", "null"] },
+          startedAt: { type: "integer" },
+          completedAt: { type: "integer" },
+          status: { type: "string", enum: ["streaming", "complete", "canceled", "error"] }
+        },
+        additionalProperties: true
+      },
+      DeletedSessionPayload: {
+        type: "object",
+        required: ["status", "sessionId", "message", "deletedAt"],
+        properties: {
+          status: { type: "string", enum: ["deleted"] },
+          sessionId: { type: "string" },
+          title: { type: ["string", "null"] },
+          message: { type: "string" },
+          deletedAt: { type: "string", format: "date-time" }
+        }
+      },
+      SessionNotFoundPayload: {
+        type: "object",
+        required: ["status", "sessionId"],
+        properties: {
+          status: { type: "string", enum: ["not_found"] },
+          sessionId: { type: "string" }
+        }
+      },
+      SystemSessionError: {
+        type: "object",
+        required: ["status", "code", "sessionId", "message"],
+        properties: {
+          status: { type: "string", enum: ["error"] },
+          code: { type: "string", enum: ["system_session"] },
+          sessionId: { type: "string" },
+          message: { type: "string" }
+        }
+      },
+      ApiValidationError: {
+        type: "object",
+        required: ["status", "code", "message"],
+        properties: {
+          status: { type: "string", enum: ["error"] },
+          code: { type: "string" },
+          message: { type: "string" },
+          issues: {
+            type: "array",
+            items: {}
+          }
+        },
+        additionalProperties: true
+      },
+      CreateSessionRequest: {
+        type: "object",
+        properties: {
+          cwd: { type: "string" },
+          model: { type: "string" },
+          approvalPolicy: schemaRef("ApprovalPolicy"),
+          networkAccess: schemaRef("NetworkAccess"),
+          filesystemSandbox: schemaRef("FilesystemSandbox")
+        }
+      },
+      SendSessionMessageRequest: {
+        type: "object",
+        required: ["text"],
+        properties: {
+          text: { type: "string", minLength: 1 },
+          model: { type: "string" },
+          effort: reasoningEffortSchema,
+          approvalPolicy: schemaRef("ApprovalPolicy"),
+          networkAccess: schemaRef("NetworkAccess"),
+          filesystemSandbox: schemaRef("FilesystemSandbox")
+        }
+      },
+      SuggestedRequestBody: {
+        type: "object",
+        properties: {
+          model: { type: "string" },
+          effort: reasoningEffortSchema,
+          draft: { type: "string", minLength: 1, maxLength: 4000 }
+        }
+      },
+      SuggestedRequestUpsertBody: {
+        type: "object",
+        required: ["requestKey", "status"],
+        properties: {
+          requestKey: { type: "string", minLength: 1 },
+          status: suggestionStatusSchema,
+          suggestion: { type: "string", minLength: 1, maxLength: 8000 },
+          error: { type: "string", minLength: 1, maxLength: 4000 }
+        }
+      },
+      ApprovalDecisionRequest: {
+        type: "object",
+        required: ["decision"],
+        properties: {
+          decision: { type: "string", enum: ["accept", "decline", "cancel"] },
+          scope: { type: "string", enum: ["turn", "session"] }
+        }
+      },
+      ToolInputDecisionOptionAnswers: {
+        type: "object",
+        required: ["answers"],
+        properties: {
+          answers: {
+            type: "array",
+            items: { type: "string" }
+          }
+        }
+      },
+      ToolInputDecisionRequest: {
+        type: "object",
+        required: ["decision"],
+        properties: {
+          decision: { type: "string", enum: ["accept", "decline", "cancel"] },
+          answers: {
+            type: "object",
+            additionalProperties: schemaRef("ToolInputDecisionOptionAnswers")
+          },
+          response: {}
+        }
+      },
+      CreateSessionResponse: {
+        type: "object",
+        required: ["session", "thread"],
+        properties: {
+          session: schemaRef("SessionSummary"),
+          thread: schemaRef("CodexThread")
+        }
+      },
+      ReadSessionResponse: {
+        type: "object",
+        required: ["session", "thread", "transcript"],
+        properties: {
+          session: schemaRef("SessionSummary"),
+          thread: schemaRef("CodexThread"),
+          transcript: {
+            type: "array",
+            items: schemaRef("TranscriptEntry")
+          }
+        }
+      },
+      SessionSettingsListResponse: {
+        type: "object",
+        required: ["status", "sessionId", "scope", "settings"],
+        properties: {
+          status: { type: "string", enum: ["ok"] },
+          sessionId: { type: "string" },
+          scope: schemaRef("SessionSettingsScope"),
+          settings: {
+            type: "object",
+            additionalProperties: true
+          }
+        }
+      },
+      SessionSettingsKeyResponse: {
+        type: "object",
+        required: ["status", "sessionId", "scope", "key", "found", "value"],
+        properties: {
+          status: { type: "string", enum: ["ok"] },
+          sessionId: { type: "string" },
+          scope: schemaRef("SessionSettingsScope"),
+          key: { type: "string" },
+          found: { type: "boolean" },
+          value: {}
+        }
+      },
+      SessionSettingsGetResponse: {
+        oneOf: [schemaRef("SessionSettingsListResponse"), schemaRef("SessionSettingsKeyResponse")]
+      },
+      SetSessionSettingsRequest: {
+        type: "object",
+        required: ["scope"],
+        properties: {
+          scope: schemaRef("SessionSettingsScope"),
+          key: { type: "string" },
+          value: {},
+          settings: {
+            type: "object",
+            additionalProperties: true
+          },
+          mode: { type: "string", enum: ["merge", "replace"] },
+          actor: { type: "string" },
+          source: { type: "string" }
+        }
+      },
+      SessionSettingsSetResponse: {
+        type: "object",
+        required: ["status", "sessionId", "scope", "settings"],
+        properties: {
+          status: { type: "string", enum: ["ok", "unchanged"] },
+          sessionId: { type: "string" },
+          scope: schemaRef("SessionSettingsScope"),
+          key: { type: "string" },
+          settings: {
+            type: "object",
+            additionalProperties: true
+          }
+        }
+      },
+      SessionSettingsDeleteResponse: {
+        type: "object",
+        required: ["status", "sessionId", "scope", "key", "removed", "settings"],
+        properties: {
+          status: { type: "string", enum: ["ok", "unchanged"] },
+          sessionId: { type: "string" },
+          scope: schemaRef("SessionSettingsScope"),
+          key: { type: "string" },
+          removed: { type: "boolean" },
+          settings: {
+            type: "object",
+            additionalProperties: true
+          }
+        }
+      },
+      SessionSettingsLockedResponse: {
+        type: "object",
+        required: ["status", "scope", "message", "sessionId", "settings"],
+        properties: {
+          status: { type: "string", enum: ["locked"] },
+          scope: schemaRef("SessionSettingsScope"),
+          message: { type: "string" },
+          sessionId: { type: "string" },
+          settings: {
+            type: "object",
+            additionalProperties: true
+          }
+        }
+      },
+      SessionApprovalPolicyResponse: {
+        type: "object",
+        required: ["status", "sessionId", "approvalPolicy"],
+        properties: {
+          status: { type: "string", enum: ["ok"] },
+          sessionId: { type: "string" },
+          approvalPolicy: schemaRef("ApprovalPolicy")
+        }
+      },
+      SuggestedRequestQueuedResponse: {
+        type: "object",
+        required: ["status", "jobId", "requestKey", "sessionId", "projectId", "dedupe"],
+        properties: {
+          status: { type: "string", enum: ["queued"] },
+          jobId: { type: "string" },
+          requestKey: { type: "string" },
+          sessionId: { type: "string" },
+          projectId: { type: "string" },
+          dedupe: { type: "string", enum: ["already_queued", "enqueued"] }
+        }
+      },
+      QueueErrorResponse: {
+        type: "object",
+        required: ["status", "code", "sessionId", "message"],
+        properties: {
+          status: { type: "string", enum: ["error"] },
+          code: { type: "string", enum: ["queue_full", "job_conflict", "invalid_payload"] },
+          sessionId: { type: "string" },
+          message: { type: "string" }
+        }
+      },
+      SuggestSessionRequestOkResponse: {
+        type: "object",
+        required: ["status", "sessionId", "requestKey", "suggestion"],
+        properties: {
+          status: { type: "string", enum: ["ok"] },
+          sessionId: { type: "string" },
+          requestKey: { type: "string" },
+          suggestion: { type: "string" }
+        }
+      },
+      SuggestSessionRequestFallbackResponse: {
+        type: "object",
+        required: ["status", "sessionId", "requestKey", "suggestion"],
+        properties: {
+          status: { type: "string", enum: ["fallback"] },
+          sessionId: { type: "string" },
+          requestKey: { type: "string" },
+          suggestion: { type: "string" }
+        }
+      },
+      SuggestSessionRequestSuccessResponse: {
+        oneOf: [schemaRef("SuggestSessionRequestOkResponse"), schemaRef("SuggestSessionRequestFallbackResponse")]
+      },
+      SuggestSessionRequestNoContextResponse: {
+        type: "object",
+        required: ["status", "sessionId", "requestKey", "message"],
+        properties: {
+          status: { type: "string", enum: ["no_context"] },
+          sessionId: { type: "string" },
+          requestKey: { type: "string" },
+          message: { type: "string" }
+        }
+      },
+      SuggestedRequestRuntimeEntry: {
+        type: "object",
+        required: ["status", "updatedAt"],
+        properties: {
+          status: suggestionStatusSchema,
+          suggestion: { type: "string" },
+          error: { type: "string" },
+          updatedAt: { type: "string", format: "date-time" }
+        }
+      },
+      SuggestedRequestUpsertResponse: {
+        type: "object",
+        required: ["status", "sessionId", "requestKey", "entry"],
+        properties: {
+          status: { type: "string", enum: ["ok"] },
+          sessionId: { type: "string" },
+          requestKey: { type: "string" },
+          entry: schemaRef("SuggestedRequestRuntimeEntry")
+        }
+      },
+      SuggestedRequestUpsertInvalidResponse: {
+        type: "object",
+        required: ["status", "code", "message"],
+        properties: {
+          status: { type: "string", enum: ["invalid_request"] },
+          code: { type: "string", enum: ["missing_suggestion"] },
+          message: { type: "string" }
+        }
+      },
+      SuggestedRequestUpsertErrorResponse: {
+        oneOf: [schemaRef("ApiValidationError"), schemaRef("SuggestedRequestUpsertInvalidResponse")]
+      },
+      SendSessionMessageAcceptedResponse: {
+        type: "object",
+        required: ["status", "sessionId", "turnId"],
+        properties: {
+          status: { type: "string", enum: ["accepted"] },
+          sessionId: { type: "string" },
+          turnId: { type: "string" }
+        }
+      },
+      ToolInputDecisionSuccessResponse: {
+        type: "object",
+        required: ["status", "requestId", "threadId"],
+        properties: {
+          status: { type: "string", enum: ["ok"] },
+          requestId: { type: "string" },
+          threadId: { type: "string" }
+        }
+      },
+      ToolInputDecisionNotFoundResponse: {
+        type: "object",
+        required: ["status", "requestId"],
+        properties: {
+          status: { type: "string", enum: ["not_found"] },
+          requestId: { type: "string" }
+        }
+      },
+      ToolInputDecisionErrorResponse: {
+        type: "object",
+        required: ["status", "requestId"],
+        properties: {
+          status: { type: "string", enum: ["error"] },
+          requestId: { type: "string" }
+        }
+      },
+      ApprovalDecisionSuccessResponse: {
+        type: "object",
+        required: ["status", "approvalId", "threadId"],
+        properties: {
+          status: { type: "string", enum: ["ok"] },
+          approvalId: { type: "string" },
+          threadId: { type: "string" }
+        }
+      },
+      ApprovalDecisionNotFoundResponse: {
+        type: "object",
+        required: ["status", "approvalId"],
+        properties: {
+          status: { type: "string", enum: ["not_found"] },
+          approvalId: { type: "string" }
+        }
+      },
+      ApprovalDecisionReconciledResponse: {
+        type: "object",
+        required: ["status", "approvalId", "threadId", "code"],
+        properties: {
+          status: { type: "string", enum: ["reconciled"] },
+          approvalId: { type: "string" },
+          threadId: { type: "string" },
+          code: { type: "string", enum: ["already_resolved", "not_eligible", "conflict"] }
+        }
+      },
+      ApprovalDecisionErrorResponse: {
+        type: "object",
+        required: ["status", "approvalId"],
+        properties: {
+          status: { type: "string", enum: ["error"] },
+          approvalId: { type: "string" }
+        }
       }
     }
   }
