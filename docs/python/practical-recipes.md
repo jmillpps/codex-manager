@@ -161,3 +161,10 @@ PYTHONPATH=packages/python-client/src python packages/python-client/examples/tea
 ```
 
 This spins up `developer`/`docs`/`reviewer` sessions that coordinate through remote skills and shared Python team state.
+
+## Related docs
+
+- Quickstart: [`quickstart.md`](./quickstart.md)
+- Team mesh walkthrough: [`team-mesh.md`](./team-mesh.md)
+- Remote skill lifecycle/details: [`remote-skills.md`](./remote-skills.md)
+- Event stream handler patterns: [`streaming-and-handlers.md`](./streaming-and-handlers.md)

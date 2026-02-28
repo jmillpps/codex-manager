@@ -2,77 +2,118 @@
 
 ## Purpose
 
-This is the entrypoint for the Codex App Server protocol documentation used by this repository.
+This is the one-level-deeper protocol foundation for Codex Manager.
 
-The previous single-file reference was split into focused documents so protocol knowledge stays maintainable and does not mix unrelated concerns.
+`README.md` explains the product architecture; this guide explains how protocol knowledge is organized and what runtime rules matter most when building against `codex app-server`.
 
-## Last verified
+Use this before editing protocol mappings in API/web/CLI/Python surfaces.
 
-- Codex Manager API surface: February 23, 2026
-- Codex Manager web integration: February 23, 2026
-- Codex protocol source in repo: `packages/codex-protocol/generated/stable/*`
+## Core Mental Model
 
-## Protocol knowledge tree
+`codex app-server` is the runtime authority.
 
-- `docs/protocol/overview.md`
-  - Transport, framing, JSON-RPC model, initialization handshake, capabilities model, and core primitives (thread/turn/item).
-- `docs/protocol/methods-core.md`
-  - Core method surface for lifecycle operations (initialize, thread lifecycle, turn lifecycle, review entry).
-- `docs/protocol/methods-integrations.md`
-  - Integrations/configuration methods (commands, models, collaboration modes, skills, apps, MCP management, config, feedback, account).
-- `docs/protocol/events.md`
-  - Notification/event stream surface and item/delta lifecycle semantics.
-- `docs/protocol/approvals-and-tool-input.md`
-  - Approval request/decision flow and server-initiated tool user-input requests.
-- `docs/protocol/config-security-and-client-rules.md`
-  - MCP config semantics, sandbox/approval policy semantics, UI checklist, and non-negotiable client rules.
-- `docs/protocol/harness-runtime-events.md`
-  - Harness-level runtime contracts: lifecycle surfaces, queue websocket events, transcript deltas, and transcript upsert semantics.
-- `docs/protocol/agent-runtime-sdk.md`
-  - Canonical extension SDK surface (events, tools, emit envelopes, helper contracts).
-- `docs/protocol/agent-dispatch-and-reconciliation.md`
-  - Deterministic fanout dispatch, winner/reconciled action semantics, and queue winner selection rules.
-- `docs/protocol/agent-extension-packaging.md`
-  - Extension package layout, manifest compatibility fields, source-origin model, and conformance expectations.
+Clients interact with three primary primitives:
 
-## How this maps to this repo
+- **Thread**: session container
+- **Turn**: one user->agent exchange
+- **Item**: atomic units inside turns (messages, reasoning, commands, file changes, tool calls)
 
-- API bridge implementation: `apps/api/src/index.ts`
-  - Supervises `codex app-server`.
-  - Maps protocol methods/events into REST + WebSocket for the web client.
-  - Extends protocol with harness-only hard delete (`DELETE /api/sessions/:sessionId`) because app-server has no native `thread/delete`.
-- Web integration: `apps/web/src/App.tsx`
-  - Renders protocol-driven transcript/activity stream, approval cards, tool-input prompts, capabilities/settings state, and thread actions.
+A robust client/runtime bridge must:
 
-## Implementation notes (current)
+1. complete handshake (`initialize` -> `initialized`) once per connection.
+2. keep reading notifications and server-initiated requests continuously.
+3. treat terminal item/turn lifecycle notifications as authoritative state.
+4. respond exactly once to server-initiated request ids (approvals, tool input, dynamic tool calls).
 
-- Method-availability/capability probing is exposed at `GET /api/capabilities` and used for UI state.
-- Server-initiated tool-input requests (`tool/requestUserInput`) are persisted in memory and surfaced via:
-  - WebSocket events: `tool_user_input_requested`, `tool_user_input_resolved`
-  - REST endpoints: `GET /api/sessions/:sessionId/tool-input`, `POST /api/tool-input/:requestId/decision`
-- Server-initiated dynamic tool calls (`item/tool/call`) are persisted in memory and surfaced via:
-  - WebSocket events: `tool_call_requested`, `tool_call_resolved`
-  - REST endpoints: `GET /api/sessions/:sessionId/tool-calls`, `POST /api/tool-calls/:requestId/response`
-- Turn insight events are surfaced via:
-  - `turn_plan_updated`
-  - `turn_diff_updated`
-  - `thread_token_usage_updated`
-- Additional account/integration update events surfaced to clients:
-  - `app_list_updated`
-  - `mcp_oauth_completed`
-  - `account_updated`
-  - `account_login_completed`
-  - `account_rate_limits_updated`
-- Harness-managed system-owned agent sessions are treated as internal runtime threads:
-  - session ids are tracked in metadata by owner+agent mapping (`<ownerId>::<agent>`, where owner can be project id or `session:<sessionId>`),
-  - system-owned worker events are scoped to explicit thread subscribers (not forwarded into global/user stream traffic),
-  - system-owned sessions are filtered from default session-list responses (opt-in via `includeSystemOwned=true`) and remain denied for mutating user chat operations.
-- Agent extension modules loaded from repo-local + configured/package roots translate runtime events into queue jobs (repository workflows currently enqueue `agent_instruction`, including `jobKind: suggest_request`) while protocol transport remains in API core.
+## How Codex Manager Uses the Protocol
 
-## Updating protocol docs
+Codex Manager API supervises app-server over STDIO and exposes:
+
+- REST control-plane routes for session/project/actions.
+- websocket event fan-out for runtime lifecycle visibility.
+- harness-only operational extensions (queue workflows, transcript augmentation, extension dispatch), without replacing app-server runtime truth.
+
+Important boundary:
+
+- harness extensions are additive orchestration around runtime signals; they are not native app-server JSON-RPC methods.
+
+## Last Verified
+
+- Codex Manager API/web integration: February 28, 2026
+- Protocol artifacts in repo: `packages/codex-protocol/generated/stable/*`
+
+## Protocol Knowledge Tree (Level 2)
+
+- Transport, framing, handshake, primitives:
+  - [`protocol/overview.md`](./protocol/overview.md)
+- Core lifecycle methods (`initialize`, `thread/*`, `turn/*`, `review/start`):
+  - [`protocol/methods-core.md`](./protocol/methods-core.md)
+- Integration and configuration methods (`model/list`, `skills/*`, `app/*`, `mcp*`, `config*`, `account*`, `feedback/*`):
+  - [`protocol/methods-integrations.md`](./protocol/methods-integrations.md)
+- Event stream catalog and item delta semantics:
+  - [`protocol/events.md`](./protocol/events.md)
+- Approval and tool-input/dynamic-tool request flows:
+  - [`protocol/approvals-and-tool-input.md`](./protocol/approvals-and-tool-input.md)
+- Config/security/client hard rules:
+  - [`protocol/config-security-and-client-rules.md`](./protocol/config-security-and-client-rules.md)
+
+Harness-layer protocol contracts used by Codex Manager:
+
+- harness runtime event families and websocket envelopes:
+  - [`protocol/harness-runtime-events.md`](./protocol/harness-runtime-events.md)
+- extension SDK contracts:
+  - [`protocol/agent-runtime-sdk.md`](./protocol/agent-runtime-sdk.md)
+- extension dispatch/reconciliation semantics:
+  - [`protocol/agent-dispatch-and-reconciliation.md`](./protocol/agent-dispatch-and-reconciliation.md)
+- extension packaging/compatibility:
+  - [`protocol/agent-extension-packaging.md`](./protocol/agent-extension-packaging.md)
+
+## Protocol Deep References (Level 3)
+
+Transport/primitives:
+
+- [`protocol/overview-transport-and-handshake.md`](./protocol/overview-transport-and-handshake.md)
+- [`protocol/overview-primitives-and-capabilities.md`](./protocol/overview-primitives-and-capabilities.md)
+
+Core methods:
+
+- [`protocol/methods-core-threads-and-turns.md`](./protocol/methods-core-threads-and-turns.md)
+- [`protocol/methods-core-review-and-advanced-thread.md`](./protocol/methods-core-review-and-advanced-thread.md)
+
+Integrations methods:
+
+- [`protocol/methods-integrations-discovery-and-skills.md`](./protocol/methods-integrations-discovery-and-skills.md)
+- [`protocol/methods-integrations-config-and-account.md`](./protocol/methods-integrations-config-and-account.md)
+
+Events:
+
+- [`protocol/events-catalog.md`](./protocol/events-catalog.md)
+- [`protocol/events-item-types-and-deltas.md`](./protocol/events-item-types-and-deltas.md)
+
+Harness runtime:
+
+- [`protocol/harness-runtime-event-catalog.md`](./protocol/harness-runtime-event-catalog.md)
+- [`protocol/harness-runtime-websocket-and-transcript.md`](./protocol/harness-runtime-websocket-and-transcript.md)
+
+## Mapping Protocol to Repository Code
+
+Primary integration points:
+
+- API bridge/supervision: `apps/api/src/index.ts`
+- web runtime rendering: `apps/web/src/App.tsx`
+- CLI route parity workflows: `apps/cli/src`
+- Python SDK route/stream wrappers: `packages/python-client/src/codex_manager`
+
+## Update Rules
 
 When protocol behavior changes in code:
 
-1. Update the focused document under `docs/protocol/` that owns that concern.
-2. Update this index if files were added/renamed or responsibilities moved.
-3. Keep implementation mapping notes accurate so readers can trace protocol semantics into `apps/api` and `apps/web`.
+1. update the owning level-2 protocol document.
+2. update this index if boundaries/filenames changed.
+3. update implementation and operations docs when external behavior/workflow changes.
+
+## Related docs
+
+- Architecture foundation: [`architecture.md`](./architecture.md)
+- Setup and runbook: [`operations/setup-and-run.md`](./operations/setup-and-run.md)
+- Current implementation snapshot: [`implementation-status.md`](./implementation-status.md)

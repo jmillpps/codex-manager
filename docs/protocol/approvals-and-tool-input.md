@@ -128,3 +128,10 @@ Pending requests are also forwarded on websocket as:
 
 - `tool_call_requested`
 - `tool_call_resolved`
+
+## Related docs
+
+- Protocol overview and transport: [`overview.md`](./overview.md)
+- Core lifecycle methods: [`methods-core.md`](./methods-core.md)
+- Event stream catalog: [`events.md`](./events.md)
+- Harness runtime event mapping and websocket envelopes: [`harness-runtime-events.md`](./harness-runtime-events.md)

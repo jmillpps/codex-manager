@@ -111,6 +111,6 @@ Per-event dispatch summary should include:
 
 ## Related references
 
-- `docs/protocol/agent-runtime-sdk.md`
-- `docs/protocol/harness-runtime-events.md`
-- `docs/architecture/agent-extension-runtime.md`
+- Runtime SDK contract: [`agent-runtime-sdk.md`](./agent-runtime-sdk.md)
+- Harness runtime event envelopes: [`harness-runtime-events.md`](./harness-runtime-events.md)
+- Extension runtime architecture: [`../architecture/agent-extension-runtime.md`](../architecture/agent-extension-runtime.md)

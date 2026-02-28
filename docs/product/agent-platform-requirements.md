@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document defines the extension runtime framework requirements that complement the core chat/product requirements in `docs/prd.md`.
+This document defines the extension runtime framework requirements that complement the core chat/product requirements in [`../prd.md`](../prd.md).
 
 Primary question:
 
@@ -108,7 +108,8 @@ Acceptance criteria:
 
 ## Related references
 
-- `docs/prd.md`
-- `docs/operations/agent-platform-verification-matrix.md`
-- `docs/operations/release-gate-checklist.md`
-- `docs/architecture/agent-extension-runtime.md`
+- PRD foundation: [`../prd.md`](../prd.md)
+- Product requirement deep dive: [`core-prd-requirements.md`](./core-prd-requirements.md)
+- Verification matrix: [`../operations/agent-platform-verification-matrix.md`](../operations/agent-platform-verification-matrix.md)
+- Release gate checklist: [`../operations/release-gate-checklist.md`](../operations/release-gate-checklist.md)
+- Extension runtime architecture: [`../architecture/agent-extension-runtime.md`](../architecture/agent-extension-runtime.md)

@@ -19,7 +19,7 @@ Show a minimal but practical multi-agent workflow where team members coordinate 
 From repository root:
 
 ```bash
-PYTHONPATH=packages/python-client/src python packages/python-client/examples/team_mesh.py
+PYTHONPATH=packages/python-client/src python3 packages/python-client/examples/team_mesh.py
 ```
 
 Optional: set `CODEX_MANAGER_API_BASE=http://host:port` to target a non-default codex-manager endpoint.
@@ -56,3 +56,9 @@ If a turn times out, the example also prints pending approval/tool-call counts f
 - add per-member policies (allowed handoffs, approval gates, timeout rules)
 - make review completion criteria explicit (`required artifact kinds`, quality checks)
 - federate by running the same pattern against multiple codex-manager destinations and bridging task APIs
+
+## Related docs
+
+- Remote skill lifecycle and API routes: [`remote-skills.md`](./remote-skills.md)
+- Stream decorators and handler registration: [`streaming-and-handlers.md`](./streaming-and-handlers.md)
+- Copy/paste workflow snippets: [`practical-recipes.md`](./practical-recipes.md)

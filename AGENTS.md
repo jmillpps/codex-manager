@@ -34,53 +34,33 @@ This repository contains both planning documents and active implementation code:
 
 ## Document guide
 
-- `docs/prd.md`: Product requirements and scope. Defines goals, non-goals, functional and UX requirements, milestones, risks, and success metrics.
-- `docs/product/agent-platform-requirements.md`: Extension runtime framework functional/technical requirements and release-blocking portability criteria.
-- `docs/architecture.md`: System architecture and invariants. Describes component responsibilities, lifecycle flows, transport model, persistence boundaries, and security posture.
-- `docs/python/introduction.md`: Python client entrypoint and navigation guide.
-- `docs/python/quickstart.md`: Python install and first-use workflows.
-- `docs/python/practical-recipes.md`: Copy-paste production automation recipes for common Python client tasks.
-- `docs/python/team-mesh.md`: Interconnected multi-agent team workflow example using remote skills without server orchestrator jobs.
-- `docs/python/api-surface.md`: Python client domain/endpoint coverage and runtime-only route support.
-- `docs/python/streaming-and-handlers.md`: Realtime stream usage and decorator-based event/hook registration.
-- `docs/python/remote-skills.md`: Session-scoped Python remote-skill bridge patterns for dynamic tool-call request/response flows.
-- `docs/python/settings-and-automation.md`: Session settings and automation patterns shared with extensions.
-- `docs/python/protocol-interfaces.md`: Protocol-oriented interface design for transport/hook/stream/plugin abstraction boundaries.
-- `docs/python/typed-models.md`: Implemented generated typed Python request/response model architecture, boundary-validation behavior (`typed-only` / `off` / `strict`), strict-operation coverage, diagnostics contract, and validation gates.
-- `docs/python/development-and-packaging.md`: Python package layout, development flow, and validation expectations.
-- `docs/architecture/agent-extension-runtime.md`: Extension runtime source discovery, compatibility, dispatch, lifecycle controls, trust model, and profile-adapter boundaries.
-- `docs/ops.md`: Operations index linking focused runbooks.
-- `docs/operations/setup-and-run.md`: Prerequisites, environment setup, local execution, Codex supervision behavior, and MCP runtime operations.
-- `docs/operations/cli.md`: CLI installation/usage, profile/auth runtime options, command groups, websocket streaming, and route parity expectations.
-- `docs/operations/api-service-supervision.md`: User-level systemd runbook for always-on API supervision (install/enable/status/logs/recovery).
-- `docs/operations/generation-and-validation.md`: Contract generation, protocol schema generation, and validation commands.
-- `docs/operations/release-gate-checklist.md`: Release gate command set, doc/code parity checks, and lock-in closure evidence checklist.
-- `docs/operations/agent-platform-verification-matrix.md`: Requirement-to-test evidence matrix for agent runtime dispatch, lifecycle, trust, and conformance.
-- `docs/operations/agent-extension-authoring.md`: Extension authoring runbook for package layout, event registration, queue-enqueue patterns, and supervisor-style worker workflows.
-- `docs/operations/agent-extension-lifecycle-and-conformance.md`: Extension source roots, lifecycle RBAC/trust controls, audit semantics, and portability conformance gate usage.
-- `docs/operations/agent-queue-troubleshooting.md`: Queue-worker diagnosis and recovery procedures for stuck, timing out, or retrying agent jobs.
-- `docs/operations/troubleshooting.md`: Debugging steps and failure-mode runbooks.
-- `docs/operations/agent-queue-framework.md`: Queue framework contract for agent-driven orchestration (events, jobs, transcript contracts, retries/recovery).
-- `docs/operations/maintenance.md`: Reset procedures, git workflow rules, CI expectations, and operational invariants.
-- `docs/codex-app-server.md`: Protocol index linking focused Codex protocol references.
-- `docs/protocol/overview.md`: Transport/framing, JSON-RPC model, handshake, and protocol primitives.
-- `docs/protocol/methods-core.md`: Core method surface (initialize/thread/turn/review lifecycle).
-- `docs/protocol/methods-integrations.md`: Integration/configuration method surface (commands, skills, apps, MCP, config, account, feedback).
-- `docs/protocol/events.md`: Stream/event and delta semantics.
-- `docs/protocol/harness-runtime-events.md`: Runtime event envelopes and semantics emitted by codex-manager harness integrations.
-- `docs/protocol/agent-runtime-sdk.md`: Canonical extension SDK type/envelope/helper contracts.
-- `docs/protocol/agent-dispatch-and-reconciliation.md`: Deterministic fanout dispatch and reconciliation semantics.
-- `docs/protocol/agent-extension-packaging.md`: Extension package layout, manifest compatibility fields, and source-origin model.
-- `docs/protocol/approvals-and-tool-input.md`: Approval and server-initiated user-input flows.
-- `docs/protocol/config-security-and-client-rules.md`: MCP config semantics, security model, and non-negotiable client rules.
-- `docs/implementation-status.md`: Current code-level implementation status and known gaps versus planned behavior.
-- `docs/queue-runner.md`: Queue-runner worker contract, execution lifecycle, and operational integration details for agent instruction jobs.
+- `docs/prd.md`: L1 product foundation and scope boundaries.
+- `docs/product/core-prd-requirements.md`: L2 core functional/technical/UX requirements.
+- `docs/product/core-prd-delivery-and-risk.md`: L2 milestones, metrics, and risk posture.
+- `docs/product/agent-platform-requirements.md`: L2 extension-platform release requirements.
+- `docs/architecture.md`: L1 system boundary, topology, and invariants.
+- `docs/architecture/agent-extension-runtime.md`: L2 extension-runtime architecture and governance controls.
+- `docs/codex-app-server.md`: L1 protocol map for app-server and harness contracts.
+- `docs/protocol/overview.md`, `docs/protocol/methods-core.md`, `docs/protocol/methods-integrations.md`, `docs/protocol/events.md`, `docs/protocol/harness-runtime-events.md`: L2 protocol guides.
+- `docs/protocol/overview-transport-and-handshake.md`, `docs/protocol/overview-primitives-and-capabilities.md`, `docs/protocol/methods-core-threads-and-turns.md`, `docs/protocol/methods-core-review-and-advanced-thread.md`, `docs/protocol/methods-integrations-discovery-and-skills.md`, `docs/protocol/methods-integrations-config-and-account.md`, `docs/protocol/events-catalog.md`, `docs/protocol/events-item-types-and-deltas.md`, `docs/protocol/harness-runtime-event-catalog.md`, `docs/protocol/harness-runtime-websocket-and-transcript.md`: L3 protocol deep references.
+- `docs/protocol/agent-runtime-sdk.md`, `docs/protocol/agent-dispatch-and-reconciliation.md`, `docs/protocol/agent-extension-packaging.md`, `docs/protocol/approvals-and-tool-input.md`, `docs/protocol/config-security-and-client-rules.md`: protocol contracts used by API/extensions.
+- `docs/ops.md`: L1 operations index.
+- `docs/operations/setup-and-run.md`, `docs/operations/environment-reference.md`, `docs/operations/cli.md`, `docs/operations/troubleshooting.md`, `docs/operations/generation-and-validation.md`, `docs/operations/release-gate-checklist.md`, `docs/operations/api-service-supervision.md`, `docs/operations/agent-extension-authoring.md`, `docs/operations/agent-extension-lifecycle-and-conformance.md`, `docs/operations/agent-queue-framework.md`, `docs/operations/agent-queue-troubleshooting.md`, `docs/operations/maintenance.md`: L2 operations runbooks.
+- `docs/operations/cli-command-reference.md`, `docs/operations/cli-workflow-playbooks.md`, `docs/operations/generation-command-reference.md`, `docs/operations/validation-gate-playbook.md`, `docs/operations/troubleshooting-api-auth-runtime.md`, `docs/operations/troubleshooting-web-stream-state.md`, `docs/operations/agent-extension-authoring-manifest-events.md`, `docs/operations/agent-extension-authoring-worker-jobs.md`, `docs/operations/agent-extension-lifecycle-rbac-trust.md`, `docs/operations/agent-extension-conformance-audit.md`, `docs/operations/agent-queue-event-and-job-contracts.md`, `docs/operations/agent-queue-runtime-semantics.md`: L3 operations deep references.
+- `docs/queue-runner.md`: L2 queue-runner worker guidance.
+- `docs/queue-runner-capability-reference.md`: L3 queue-runner capability details.
+- `docs/python/introduction.md`: L1 Python SDK entrypoint.
+- `docs/python/quickstart.md`, `docs/python/practical-recipes.md`, `docs/python/team-mesh.md`, `docs/python/api-surface.md`, `docs/python/streaming-and-handlers.md`, `docs/python/remote-skills.md`, `docs/python/settings-and-automation.md`, `docs/python/protocol-interfaces.md`, `docs/python/typed-models.md`, `docs/python/development-and-packaging.md`: L2 Python guides.
+- `docs/python/api-surface-domain-reference.md`, `docs/python/api-surface-workflows.md`, `docs/python/streaming-event-routing-reference.md`, `docs/python/streaming-reliability-patterns.md`, `docs/python/remote-skills-lifecycle-and-catalog.md`, `docs/python/remote-skills-dispatch-and-reliability.md`, `docs/python/protocol-interfaces-contracts.md`, `docs/python/protocol-interfaces-examples.md`, `docs/python/typed-models-contract-reference.md`, `docs/python/typed-models-validation-and-gates.md`: L3 Python deep references.
+- `docs/implementation-status.md`: L1 implementation snapshot index.
+- `docs/implementation-status-api.md`, `docs/implementation-status-web-cli.md`, `docs/implementation-status-python-contracts.md`: L2 implementation status by surface.
+- `docs/operations/agent-platform-verification-matrix.md`: requirement-to-test evidence mapping for agent platform gates.
 
 ## How to use these docs
 
 1. Start with `docs/prd.md` for product intent and acceptance criteria.
 2. Use `docs/architecture.md` to align implementation boundaries and invariants.
-3. Use `docs/codex-app-server.md` as the protocol index, then open the focused file under `docs/protocol/` for the concern you are implementing.
-4. Use `docs/ops.md` as the operations index, then open the focused file under `docs/operations/` for setup, validation, troubleshooting, or maintenance tasks.
-5. For Python SDK work, start with `docs/python/introduction.md` and then follow the focused Python docs for your workflow (`quickstart`, `api-surface`, `streaming-and-handlers`, `typed-models`, etc.).
-6. Use `docs/implementation-status.md` to understand current implementation coverage and residual gaps.
+3. Use `docs/codex-app-server.md` as the protocol index, then traverse L2 -> L3 docs under `docs/protocol/` for the exact concern.
+4. Use `docs/ops.md` as the operations index, then traverse L2 -> L3 runbooks under `docs/operations/` plus queue-runner references for execution details.
+5. For Python SDK work, start with `docs/python/introduction.md` and follow L2 -> L3 Python guides for your workflow (`quickstart`, `api-surface`, `streaming-and-handlers`, `remote-skills`, `typed-models`, etc.).
+6. Use `docs/implementation-status.md` and its surface-specific L2 docs to confirm what is implemented right now.

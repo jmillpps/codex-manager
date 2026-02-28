@@ -1,18 +1,36 @@
 # Streaming and Handlers
 
-## Stream entrypoint
+## Purpose
+
+This is the one-level stream and handler guide for the Python client.
+
+It explains how to consume codex-manager websocket events, register handler decorators, and connect stream events to automation workflows.
+
+## Stream entrypoints
 
 - Sync client: `client.stream.run_forever(...)`
 - Async client: `await client.stream.run_forever(...)`
 
-Stream endpoint is codex-manager websocket route `/api/stream`.
+Websocket endpoint:
 
-The default stream router preserves registration-order dispatch with handler isolation.
-Advanced integrations can inject a custom router via client constructor `stream_router=...`.
+- `/api/stream`
 
-## Handler decorators
+By default, the SDK uses a deterministic registration-order event router with handler isolation.
 
-Register handlers with decorators:
+## Core decorator APIs
+
+Generic event routing:
+
+- `on_event(event_type)`
+- `on_event_prefix(prefix)`
+
+App-server specific routing:
+
+- `on_app_server(normalized_method)`
+- `on_app_server_request(normalized_method)`
+- `on_turn_started()` (alias for `app_server.item.started`)
+
+## Minimal async listener
 
 ```python
 import asyncio
@@ -22,44 +40,40 @@ async def main() -> None:
     async with AsyncCodexManager.from_profile("local") as cm:
 
         @cm.on_event("transcript_updated")
-        async def on_transcript(event, ctx):
+        async def on_transcript(event, _ctx):
             print("transcript update", event.thread_id)
 
-        @cm.on_event_prefix("app_server.item.")
-        async def on_item_family(event, ctx):
-            print("item event", event.type)
-
         @cm.on_app_server("item.started")
-        async def on_turn_started(signal, ctx):
-            print("new turn", signal.context.get("turnId"))
+        async def on_item_started(signal, _ctx):
+            print("turn", signal.context.get("turnId"))
 
-        @cm.on_app_server_request("tool.input.requested")
-        async def on_server_request(signal, ctx):
-            print("server request signal", signal.request_id)
+        @cm.on_app_server_request("item.tool.call")
+        async def on_tool_request(signal, _ctx):
+            print("tool call request", signal.request_id)
 
         await cm.stream.run_forever(thread_id="<session-id>")
 
 asyncio.run(main())
 ```
 
-Supported shorthand:
+## Sync listener
 
-- `on_event(event_type)`
-- `on_event_prefix(prefix)`
-- `on_app_server(normalized_method)`
-- `on_app_server_request(normalized_method)`
-- `on_turn_started()` (maps to `app_server.item.started`)
+```python
+from codex_manager import CodexManager
 
-## Dynamic tool-call handling
+with CodexManager.from_profile("local") as cm:
+    @cm.on_turn_started()
+    def on_turn_started(event, _ctx):
+        print("turn started", event.turn_id)
 
-`item/tool/call` requests are surfaced as:
+    cm.stream.run_forever(thread_id="<session-id>")
+```
 
-- stream event: `app_server.request.item.tool.call`
-- API routes:
-  - `GET /api/sessions/:sessionId/tool-calls`
-  - `POST /api/tool-calls/:requestId/response`
+## Dynamic tool-call bridge pattern
 
-Python bridge pattern:
+Tool-call requests are emitted as `app_server.request.item.tool.call`.
+
+Use remote-skill session helpers to dispatch and respond:
 
 ```python
 import asyncio
@@ -75,7 +89,7 @@ async def main() -> None:
             return text.upper()
 
         @cm.on_app_server_request("item.tool.call")
-        async def _on_dynamic_tool_call(signal, _ctx):
+        async def on_dynamic_tool_call(signal, _ctx):
             await skills.respond_to_signal(signal)
 
         await cm.stream.run_forever(thread_id=session_id)
@@ -85,24 +99,7 @@ asyncio.run(main())
 
 ## Hook decorators for REST operations
 
-Use request hooks for global/pattern behavior:
-
-```python
-from codex_manager import CodexManager
-
-cm = CodexManager.from_profile("local")
-
-@cm.before("sessions.send_message")
-def add_actor(call):
-    if isinstance(call.json_body, dict):
-        call.json_body.setdefault("metadata", {})
-
-@cm.after("*")
-def log_status(call, response):
-    print("done", call.operation)
-```
-
-Hook points:
+Hooks allow cross-cutting behavior around SDK request execution:
 
 - `before(operation)`
 - `after(operation)`
@@ -110,11 +107,24 @@ Hook points:
 
 `operation="*"` applies globally.
 
-Async clients also support async hook functions; sync clients require sync hook functions.
+```python
+from codex_manager import CodexManager
 
-## Middleware objects
+cm = CodexManager.from_profile("local")
 
-Instead of registering three separate hook decorators, you can register one middleware object:
+@cm.before("sessions.send_message")
+def add_metadata(call):
+    if isinstance(call.json_body, dict):
+        call.json_body.setdefault("metadata", {})
+
+@cm.after("*")
+def log_status(call, _response):
+    print("completed", call.operation)
+```
+
+## Middleware object registration
+
+For bundled hook behavior, register a middleware object:
 
 ```python
 from codex_manager import CodexManager
@@ -133,28 +143,20 @@ cm = CodexManager.from_profile("local")
 cm.use_middleware(AuditMiddleware())
 ```
 
-## Practical stream pattern
+## Operational guidance
 
-Run a lightweight listener that reacts only to turn starts for one session:
+- keep handler side effects idempotent by stable ids (`threadId`, `turnId`, `requestId`)
+- avoid heavy blocking work inside handlers; queue or offload expensive work
+- for long-running async listeners, use `stop_event` for controlled shutdown
+- combine realtime handlers with polling fallback when workflow reliability requires it
 
-```python
-import asyncio
-from codex_manager import AsyncCodexManager
+## Read Next (Level 3)
 
-async def main() -> None:
-    stop = asyncio.Event()
+- Event routing and matcher semantics: [`streaming-event-routing-reference.md`](./streaming-event-routing-reference.md)
+- Reconnect/backpressure reliability patterns: [`streaming-reliability-patterns.md`](./streaming-reliability-patterns.md)
 
-    async with AsyncCodexManager.from_profile("local") as cm:
-        @cm.on_turn_started()
-        async def on_turn(_event, _ctx):
-            print("new turn started")
+## Related docs
 
-        async def stop_later() -> None:
-            await asyncio.sleep(30)
-            stop.set()
-
-        asyncio.create_task(stop_later())
-        await cm.stream.run_forever(thread_id="<session-id>", stop_event=stop)
-
-asyncio.run(main())
-```
+- Remote-skill bridge and response routes: [`remote-skills.md`](./remote-skills.md)
+- API domain map: [`api-surface.md`](./api-surface.md)
+- Practical automation recipes: [`practical-recipes.md`](./practical-recipes.md)

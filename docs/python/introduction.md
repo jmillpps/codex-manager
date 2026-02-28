@@ -77,32 +77,36 @@ Hook middleware objects can be registered directly with `use_middleware(...)` in
 
 ## Documentation map
 
-- Quickstart: `docs/python/quickstart.md`
-- Practical recipes: `docs/python/practical-recipes.md`
-- Team mesh example (no orchestrator jobs): `docs/python/team-mesh.md`
-- API domain map: `docs/python/api-surface.md`
-- Streaming + decorators + handlers: `docs/python/streaming-and-handlers.md`
-- Remote-skill bridge: `docs/python/remote-skills.md`
-- Session settings + automation patterns: `docs/python/settings-and-automation.md`
-- Protocol-oriented implementation contract: `docs/python/protocol-interfaces.md`
-- Typed model/facade + boundary validation implementation: `docs/python/typed-models.md`
-- Development and packaging details: `docs/python/development-and-packaging.md`
+- Quickstart: [`quickstart.md`](./quickstart.md)
+- Practical recipes: [`practical-recipes.md`](./practical-recipes.md)
+- Team mesh example (no orchestrator jobs): [`team-mesh.md`](./team-mesh.md)
+- API domain map: [`api-surface.md`](./api-surface.md)
+- Streaming + decorators + handlers: [`streaming-and-handlers.md`](./streaming-and-handlers.md)
+- Streaming event routing deep dive: [`streaming-event-routing-reference.md`](./streaming-event-routing-reference.md)
+- Streaming reliability patterns: [`streaming-reliability-patterns.md`](./streaming-reliability-patterns.md)
+- Remote-skill bridge: [`remote-skills.md`](./remote-skills.md)
+- Remote-skill lifecycle/catalog deep dive: [`remote-skills-lifecycle-and-catalog.md`](./remote-skills-lifecycle-and-catalog.md)
+- Remote-skill dispatch/reliability deep dive: [`remote-skills-dispatch-and-reliability.md`](./remote-skills-dispatch-and-reliability.md)
+- Session settings + automation patterns: [`settings-and-automation.md`](./settings-and-automation.md)
+- Protocol-oriented implementation contract: [`protocol-interfaces.md`](./protocol-interfaces.md)
+- Typed model/facade + boundary validation implementation: [`typed-models.md`](./typed-models.md)
+- Development and packaging details: [`development-and-packaging.md`](./development-and-packaging.md)
 
 ## Recommended paths by use case
 
 - "I want to automate chats quickly":
-  - `docs/python/quickstart.md`
+  - [`quickstart.md`](./quickstart.md)
 - "I want copy-paste production recipes":
-  - `docs/python/practical-recipes.md`
+  - [`practical-recipes.md`](./practical-recipes.md)
 - "I need event-driven workflows":
-  - `docs/python/streaming-and-handlers.md`
+  - [`streaming-and-handlers.md`](./streaming-and-handlers.md)
 - "I need dynamic tool calls backed by Python handlers":
-  - `docs/python/remote-skills.md`
+  - [`remote-skills.md`](./remote-skills.md)
 - "I want a multi-agent team workflow without server orchestrator jobs":
-  - `docs/python/team-mesh.md`
+  - [`team-mesh.md`](./team-mesh.md)
 - "I need settings-driven supervisor automation":
-  - `docs/python/settings-and-automation.md`
+  - [`settings-and-automation.md`](./settings-and-automation.md)
 - "I want stronger typed request/response handling":
-  - `docs/python/typed-models.md`
+  - [`typed-models.md`](./typed-models.md)
 - "I want to tune typed/dict boundary validation behavior":
-  - `docs/python/typed-models.md`
+  - [`typed-models.md`](./typed-models.md)

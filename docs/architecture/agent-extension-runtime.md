@@ -182,7 +182,8 @@ This keeps extension/runtime core contracts provider-neutral while allowing conc
 
 ## Related references
 
-- `docs/protocol/agent-runtime-sdk.md`
-- `docs/protocol/agent-dispatch-and-reconciliation.md`
-- `docs/protocol/agent-extension-packaging.md`
-- `docs/operations/agent-extension-lifecycle-and-conformance.md`
+- Runtime SDK contract: [`../protocol/agent-runtime-sdk.md`](../protocol/agent-runtime-sdk.md)
+- Dispatch and reconciliation rules: [`../protocol/agent-dispatch-and-reconciliation.md`](../protocol/agent-dispatch-and-reconciliation.md)
+- Packaging and compatibility model: [`../protocol/agent-extension-packaging.md`](../protocol/agent-extension-packaging.md)
+- Lifecycle and conformance operations: [`../operations/agent-extension-lifecycle-and-conformance.md`](../operations/agent-extension-lifecycle-and-conformance.md)
+- Queue framework foundation: [`../operations/agent-queue-framework.md`](../operations/agent-queue-framework.md)

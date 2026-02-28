@@ -6,10 +6,10 @@ This project is local-first and protocol-sensitive. Changes are easiest to revie
 
 ## Before You Start
 
-1. Read `README.md` for setup and command surface.
-2. Read `docs/architecture.md` for invariants and boundaries.
-3. Read protocol references in `docs/protocol/*` for app-server semantics.
-4. Read `docs/ops.md` + `docs/operations/*` for validation and troubleshooting flows.
+1. Read [`README.md`](./README.md) for setup and command surface.
+2. Read [`docs/architecture.md`](./docs/architecture.md) for invariants and boundaries.
+3. Read protocol references in [`docs/protocol/`](./docs/protocol/) for app-server semantics.
+4. Read [`docs/ops.md`](./docs/ops.md) + [`docs/operations/`](./docs/operations/) for validation and troubleshooting flows.
 
 ## Development Setup
 
@@ -67,7 +67,7 @@ Each PR should include:
 - Any behavior/config/workflow impacts.
 - Validation commands run and their results.
 
-If the change affects API surface, protocol handling, approvals, session lifecycle, or operational setup, update docs under `docs/` in the same PR.
+If the change affects API surface, protocol handling, approvals, session lifecycle, or operational setup, update docs under [`docs/`](./docs/) in the same PR.
 
 ## Documentation Impact Rule
 

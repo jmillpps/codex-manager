@@ -139,3 +139,11 @@ A client that fully supports the app-server surface MUST be able to:
 - Always scope approvals and tool calls by `threadId` + `turnId`.
 - Never assume experimental methods or fields exist unless `experimentalApi` is enabled.
 - Never assume enum values; use generated schema + `configRequirements/read`.
+
+## Related docs
+
+- Protocol overview and handshake: [`overview.md`](./overview.md)
+- Core lifecycle methods: [`methods-core.md`](./methods-core.md)
+- Integration/configuration methods: [`methods-integrations.md`](./methods-integrations.md)
+- Event stream reference: [`events.md`](./events.md)
+- Approvals and tool-input flows: [`approvals-and-tool-input.md`](./approvals-and-tool-input.md)

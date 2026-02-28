@@ -60,6 +60,7 @@ node scripts/run-agent-conformance.mjs
 
 ## Related references
 
-- `docs/operations/release-gate-checklist.md`
-- `docs/operations/generation-and-validation.md`
-- `docs/implementation-status.md`
+- Release gate checklist: [`release-gate-checklist.md`](./release-gate-checklist.md)
+- Generation/validation commands: [`generation-and-validation.md`](./generation-and-validation.md)
+- Extension lifecycle operations: [`agent-extension-lifecycle-and-conformance.md`](./agent-extension-lifecycle-and-conformance.md)
+- Implementation status snapshot: [`../implementation-status.md`](../implementation-status.md)

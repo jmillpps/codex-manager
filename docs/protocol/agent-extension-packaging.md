@@ -125,6 +125,7 @@ Portable extension success requires equivalent pass behavior across at least two
 
 ## Related references
 
-- `docs/protocol/agent-runtime-sdk.md`
-- `docs/protocol/agent-dispatch-and-reconciliation.md`
-- `docs/operations/agent-extension-lifecycle-and-conformance.md`
+- Runtime SDK contract: [`agent-runtime-sdk.md`](./agent-runtime-sdk.md)
+- Dispatch/reconciliation rules: [`agent-dispatch-and-reconciliation.md`](./agent-dispatch-and-reconciliation.md)
+- Lifecycle and conformance operations: [`../operations/agent-extension-lifecycle-and-conformance.md`](../operations/agent-extension-lifecycle-and-conformance.md)
+- Extension authoring runbook: [`../operations/agent-extension-authoring.md`](../operations/agent-extension-authoring.md)
