@@ -23,6 +23,8 @@ This repository contains:
 - `apps/web` — a React + Vite chat UI
 - `apps/api` — a Fastify backend that supervises **Codex App Server** (`codex app-server`) and exposes session/message REST endpoints plus WebSocket streaming
 - `apps/cli` — operator automation CLI that maps to API endpoints and websocket stream operations
+- `packages/python-client` — Python SDK for codex-manager REST/websocket automation (`CodexManager`, `AsyncCodexManager`)
+  - Includes protocol-based injection boundaries (`request_executor`, `header_provider`, `retry_policy`, `hook_registry`, `stream_router`, `plugins`) and middleware object registration (`use_middleware(...)`)
 - `packages/*` — shared configuration and generated clients/types
 
 Codex is managed via:
@@ -181,6 +183,20 @@ pnpm --filter @repo/cli dev system health
 ```
 
 If this command fails, verify API availability and CLI profile/runtime options in `docs/operations/cli.md`.
+
+### Verify Python client wiring
+
+Install editable package and run a minimal health probe:
+
+```bash
+pip install -e packages/python-client
+python3 - <<'PY'
+from codex_manager import CodexManager
+cm = CodexManager.from_profile("local")
+print(cm.system.health()["status"])
+cm.close()
+PY
+```
 
 ---
 

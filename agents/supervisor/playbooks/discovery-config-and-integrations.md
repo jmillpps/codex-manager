@@ -118,7 +118,7 @@ curl -sS 'http://127.0.0.1:3001/api/capabilities?refresh=true'
 curl -sS 'http://127.0.0.1:3001/api/models?limit=50'
 
 # Read effective config for cwd
-curl -sS 'http://127.0.0.1:3001/api/config?cwd=/home/jmiller/projects/codex_manager&includeLayers=true'
+curl -sS 'http://127.0.0.1:3001/api/config?cwd=/path/to/workspace&includeLayers=true'
 
 # Run one command
 curl -sS -X POST http://127.0.0.1:3001/api/commands/exec \
