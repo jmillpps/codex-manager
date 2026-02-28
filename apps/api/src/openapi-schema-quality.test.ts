@@ -19,6 +19,9 @@ type OpenApiOperation = {
 
 type OpenApiDocument = {
   paths?: Record<string, Record<string, OpenApiOperation>>;
+  components?: {
+    schemas?: Record<string, unknown>;
+  };
 };
 
 type ParsedOperation = {
@@ -39,7 +42,8 @@ const typedTargetOperationIds = [
   "enqueueSuggestedSessionRequest",
   "upsertSuggestedSessionRequest",
   "decideApproval",
-  "decideToolInput"
+  "decideToolInput",
+  "respondToolCall"
 ] as const;
 
 const requestSchemaRequired = new Set<string>([
@@ -50,7 +54,8 @@ const requestSchemaRequired = new Set<string>([
   "enqueueSuggestedSessionRequest",
   "upsertSuggestedSessionRequest",
   "decideApproval",
-  "decideToolInput"
+  "decideToolInput",
+  "respondToolCall"
 ]);
 
 const responseSchemasRequired: Record<(typeof typedTargetOperationIds)[number], Array<string>> = {
@@ -64,7 +69,8 @@ const responseSchemasRequired: Record<(typeof typedTargetOperationIds)[number], 
   enqueueSuggestedSessionRequest: ["202", "400", "403", "404", "409", "410", "429", "503"],
   upsertSuggestedSessionRequest: ["200", "400", "403", "404", "410"],
   decideApproval: ["200", "404", "409", "500"],
-  decideToolInput: ["200", "404", "500"]
+  decideToolInput: ["200", "404", "500"],
+  respondToolCall: ["200", "404", "409", "500"]
 };
 
 function parseOperations(document: OpenApiDocument): Array<ParsedOperation> {
@@ -215,4 +221,16 @@ test("typed-target operations expose strict json request/response schemas", asyn
       `loose response schemas: ${looseResponseSchemas.join(", ")}`
     ].join("\n")
   );
+});
+
+test("dynamic tool definition schema requires inputSchema", async () => {
+  const openapi = await loadOpenApiDocument();
+  const dynamicToolDefinition = openapi.components?.schemas?.DynamicToolDefinition;
+  assert.ok(dynamicToolDefinition && typeof dynamicToolDefinition === "object", "DynamicToolDefinition schema missing");
+
+  const required = Array.isArray((dynamicToolDefinition as { required?: unknown }).required)
+    ? ((dynamicToolDefinition as { required: Array<unknown> }).required as Array<unknown>)
+    : [];
+
+  assert.equal(required.includes("inputSchema"), true, "DynamicToolDefinition.inputSchema must be required");
 });
