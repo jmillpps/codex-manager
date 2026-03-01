@@ -7,13 +7,15 @@ import builtins
 import inspect
 import json
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
-from .errors import ApiError
+from docstring_parser import parse as parse_docstring
+
+from .errors import ApiError, WaitTimeoutError
 from .models import AppServerSignal
 
 RemoteSkillHandler = Callable[..., Any | Awaitable[Any]]
@@ -27,6 +29,26 @@ _MATERIALIZE_BOOTSTRAP_TEXT = "Reply with exactly OK."
 _DEFAULT_RESPONSE_SUBMIT_ATTEMPTS = 3
 _DEFAULT_RESPONSE_RETRY_DELAY_SECONDS = 0.05
 _MAX_HANDLED_REQUEST_IDS = 4_096
+_DISPATCH_MODE_SIGNAL = "signal"
+_DISPATCH_MODE_POLLING = "polling"
+_CATALOG_MUTATION_ERROR = (
+    "remote skill catalog mutation is create-time only. "
+    "Register skills in remote_skills.create_session(register=...) "
+    "or remote_skills.lifecycle(register=...)."
+)
+_RUNTIME_SYNC_DISABLED_ERROR = (
+    "runtime catalog sync is disabled for reliability. "
+    "Register skills at session creation."
+)
+_DEFAULT_TERMINAL_TURN_STATUSES: tuple[str, ...] = (
+    "completed",
+    "complete",
+    "failed",
+    "error",
+    "interrupted",
+    "canceled",
+    "cancelled",
+)
 
 
 @dataclass(slots=True)
@@ -58,9 +80,42 @@ class RemoteSkillDispatch:
 
 
 @dataclass(slots=True)
+class RemoteSkillSendResult:
+    """Result payload for send+dispatch+wait remote-skill helpers."""
+
+    session_id: str
+    turn_id: str
+    accepted: Any
+    detail: Any
+    status: str | None
+    assistant_reply: str | None
+    dispatches: builtins.list[RemoteSkillDispatch]
+
+
+@dataclass(slots=True)
+class RemoteSkillLifecycle:
+    """Handle for a managed sync remote-skill session lifecycle."""
+
+    session_id: str
+    created: Any
+    skills: RemoteSkillSession
+
+
+@dataclass(slots=True)
+class AsyncRemoteSkillLifecycle:
+    """Handle for a managed async remote-skill session lifecycle."""
+
+    session_id: str
+    created: Any
+    skills: AsyncRemoteSkillSession
+
+
+@dataclass(slots=True)
 class _SkillRegistry:
     skills: dict[str, RemoteSkill] = field(default_factory=dict)
     handled_request_ids: set[str] = field(default_factory=set)
+    dispatch_mode: str | None = None
+    catalog_locked: bool = False
 
 
 @dataclass(slots=True)
@@ -79,6 +134,76 @@ def _normalize_skill_name(name: str) -> str:
     if not normalized:
         raise ValueError("remote skill name must be non-empty")
     return normalized
+
+
+def _docstring_enrichment(handler: RemoteSkillHandler) -> tuple[str | None, dict[str, str]]:
+    raw_docstring = inspect.getdoc(handler)
+    if not raw_docstring:
+        return None, {}
+
+    try:
+        parsed = parse_docstring(raw_docstring)
+    except Exception:
+        return None, {}
+
+    summary_parts: list[str] = []
+    short_description = getattr(parsed, "short_description", None)
+    if isinstance(short_description, str) and short_description.strip():
+        summary_parts.append(short_description.strip())
+
+    long_description = getattr(parsed, "long_description", None)
+    if isinstance(long_description, str) and long_description.strip():
+        summary_parts.append(long_description.strip())
+
+    schema_description = "\n\n".join(summary_parts) if summary_parts else None
+
+    param_descriptions: dict[str, str] = {}
+    params = getattr(parsed, "params", None)
+    if isinstance(params, list):
+        for param in params:
+            arg_name = getattr(param, "arg_name", None)
+            description = getattr(param, "description", None)
+            if not isinstance(arg_name, str):
+                continue
+            normalized_name = arg_name.strip()
+            if not normalized_name:
+                continue
+            if not isinstance(description, str):
+                continue
+            normalized_description = description.strip()
+            if not normalized_description:
+                continue
+            param_descriptions[normalized_name] = normalized_description
+
+    return schema_description, param_descriptions
+
+
+def _schema_enriched_with_docstrings(
+    handler: RemoteSkillHandler, input_schema: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    if not isinstance(input_schema, dict):
+        return None
+
+    schema = deepcopy(input_schema)
+    schema_description, param_descriptions = _docstring_enrichment(handler)
+
+    if schema_description:
+        existing_description = schema.get("description")
+        if not isinstance(existing_description, str) or not existing_description.strip():
+            schema["description"] = schema_description
+
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        for name, description in param_descriptions.items():
+            property_schema = properties.get(name)
+            if not isinstance(property_schema, dict):
+                continue
+            existing_description = property_schema.get("description")
+            if isinstance(existing_description, str) and existing_description.strip():
+                continue
+            property_schema["description"] = description
+
+    return schema
 
 
 def _invoke_handler(handler: RemoteSkillHandler, arguments: Any) -> Any:
@@ -189,6 +314,17 @@ def _remember_handled_request(registry: _SkillRegistry, request_id: str) -> None
         registry.handled_request_ids.clear()
 
 
+def _require_catalog_mutation_allowed(registry: _SkillRegistry) -> None:
+    if registry.catalog_locked:
+        raise RuntimeError(_CATALOG_MUTATION_ERROR)
+
+
+def _clear_registry_skills(registry: _SkillRegistry) -> int:
+    count = len(registry.skills)
+    registry.skills.clear()
+    return count
+
+
 def _normalize_retry_settings(
     max_submit_attempts: int, retry_delay_seconds: float
 ) -> tuple[int, float]:
@@ -199,6 +335,35 @@ def _normalize_retry_settings(
     if delay < 0:
         delay = 0.0
     return attempts, delay
+
+
+def _normalize_statuses(values: Iterable[str] | None) -> set[str]:
+    source = values if values is not None else _DEFAULT_TERMINAL_TURN_STATUSES
+    normalized: set[str] = set()
+    for value in source:
+        if not isinstance(value, str):
+            raise ValueError("terminal statuses must be strings")
+        candidate = value.strip().lower()
+        if candidate:
+            normalized.add(candidate)
+    if not normalized:
+        raise ValueError("terminal statuses must include at least one non-empty status")
+    return normalized
+
+
+def _require_dispatch_mode(registry: _SkillRegistry, mode: str) -> None:
+    if mode not in {_DISPATCH_MODE_SIGNAL, _DISPATCH_MODE_POLLING}:
+        raise ValueError(f"unsupported dispatch mode {mode!r}")
+    current = registry.dispatch_mode
+    if current is None:
+        registry.dispatch_mode = mode
+        return
+    if current != mode:
+        raise RuntimeError(
+            "remote skill dispatch mode conflict: "
+            f"session locked to '{current}', attempted '{mode}'. "
+            "Call reset_dispatch_mode() before switching dispatch strategies."
+        )
 
 
 def _classify_tool_call_response(response: Any) -> _ToolCallSubmission:
@@ -342,6 +507,27 @@ def _inject_instruction(instruction: str, request_text: str) -> str:
     return f"{instruction}\n\nUser request:\n{request_text}"
 
 
+def _assistant_reply_for_turn(detail: Any, turn_id: str) -> str | None:
+    if not isinstance(detail, dict):
+        return None
+    transcript = detail.get("transcript")
+    if not isinstance(transcript, list):
+        return None
+    for entry in reversed(transcript):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("turnId") != turn_id:
+            continue
+        if entry.get("role") != "assistant":
+            continue
+        if entry.get("status") != "complete":
+            continue
+        content = entry.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+    return None
+
+
 class RemoteSkillSession:
     """Sync session-scoped remote-skill registry and request helper."""
 
@@ -357,10 +543,17 @@ class RemoteSkillSession:
     def list(self) -> builtins.list[RemoteSkill]:
         return list(self._registry.skills.values())
 
-    def clear(self) -> int:
-        count = len(self._registry.skills)
-        self._registry.skills.clear()
-        return count
+    def clear(self, *, sync_runtime: bool = False, ignore_sync_errors: bool = True) -> int:
+        _require_catalog_mutation_allowed(self._registry)
+        if sync_runtime:
+            raise RuntimeError(_RUNTIME_SYNC_DISABLED_ERROR)
+        return _clear_registry_skills(self._registry)
+
+    def dispatch_mode(self) -> str | None:
+        return self._registry.dispatch_mode
+
+    def reset_dispatch_mode(self) -> None:
+        self._registry.dispatch_mode = None
 
     def register(
         self,
@@ -369,20 +562,35 @@ class RemoteSkillSession:
         *,
         description: str,
         input_schema: dict[str, Any] | None = None,
+        sync_runtime: bool = False,
+        ignore_sync_errors: bool = True,
     ) -> RemoteSkill:
+        _require_catalog_mutation_allowed(self._registry)
         normalized_name = _normalize_skill_name(name)
         skill = RemoteSkill(
             name=normalized_name,
             description=description.strip() or f"Remote skill {normalized_name}",
             handler=handler,
-            input_schema=deepcopy(input_schema) if isinstance(input_schema, dict) else None,
+            input_schema=_schema_enriched_with_docstrings(handler, input_schema),
         )
         self._registry.skills[normalized_name] = skill
+        if sync_runtime:
+            raise RuntimeError(_RUNTIME_SYNC_DISABLED_ERROR)
         return skill
 
-    def unregister(self, name: str) -> bool:
+    def unregister(
+        self,
+        name: str,
+        *,
+        sync_runtime: bool = False,
+        ignore_sync_errors: bool = True,
+    ) -> bool:
+        _require_catalog_mutation_allowed(self._registry)
         normalized_name = _normalize_skill_name(name)
-        return self._registry.skills.pop(normalized_name, None) is not None
+        removed = self._registry.skills.pop(normalized_name, None) is not None
+        if removed and sync_runtime:
+            raise RuntimeError(_RUNTIME_SYNC_DISABLED_ERROR)
+        return removed
 
     def skill(
         self,
@@ -407,12 +615,20 @@ class RemoteSkillSession:
         *,
         description: str,
         input_schema: dict[str, Any] | None = None,
+        sync_runtime_on_exit: bool = False,
+        ignore_sync_errors: bool = True,
     ) -> Iterator[RemoteSkillSession]:
+        if sync_runtime_on_exit:
+            raise RuntimeError(_RUNTIME_SYNC_DISABLED_ERROR)
         self.register(name, handler, description=description, input_schema=input_schema)
         try:
             yield self
         finally:
-            self.unregister(name)
+            self.unregister(
+                name,
+                sync_runtime=False,
+                ignore_sync_errors=ignore_sync_errors,
+            )
 
     def instruction_text(self) -> str:
         return _render_instruction(self._registry.skills)
@@ -424,9 +640,7 @@ class RemoteSkillSession:
         return _dynamic_tool_definitions(self._registry.skills)
 
     def sync_runtime(self) -> Any:
-        return self._client.sessions.resume(
-            session_id=self.session_id, dynamic_tools=self.dynamic_tools()
-        )
+        raise RuntimeError(_RUNTIME_SYNC_DISABLED_ERROR)
 
     def _materialize_if_needed(self, *, timeout_seconds: float) -> None:
         detail = self._client.sessions.get(session_id=self.session_id)
@@ -455,26 +669,7 @@ class RemoteSkillSession:
             pass
 
     def prepare_catalog(self, *, timeout_seconds: float = 90.0) -> Any:
-        dynamic_tools = self.dynamic_tools()
-        if not dynamic_tools:
-            return {"status": "noop", "sessionId": self.session_id}
-
-        detail = self._client.sessions.get(session_id=self.session_id)
-        session = detail.get("session") if isinstance(detail, dict) else {}
-        materialized = session.get("materialized") if isinstance(session, dict) else None
-        if materialized is False:
-            self._materialize_if_needed(timeout_seconds=timeout_seconds)
-
-        try:
-            return self._client.sessions.resume(
-                session_id=self.session_id, dynamic_tools=dynamic_tools
-            )
-        except Exception as error:
-            if not _is_no_rollout_error(error):
-                raise
-
-        self._materialize_if_needed(timeout_seconds=timeout_seconds)
-        return self._client.sessions.resume(session_id=self.session_id, dynamic_tools=dynamic_tools)
+        raise RuntimeError(_RUNTIME_SYNC_DISABLED_ERROR)
 
     def send_prepared(
         self,
@@ -484,8 +679,7 @@ class RemoteSkillSession:
         prepare_timeout_seconds: float = 90.0,
         **kwargs: Any,
     ) -> Any:
-        self.prepare_catalog(timeout_seconds=prepare_timeout_seconds)
-        return self.send(request_text, inject_skills=inject_skills, **kwargs)
+        raise RuntimeError(_RUNTIME_SYNC_DISABLED_ERROR)
 
     def send(self, request_text: str, *, inject_skills: bool = True, **kwargs: Any) -> Any:
         if "dynamic_tools" not in kwargs:
@@ -495,6 +689,71 @@ class RemoteSkillSession:
             session_id=self.session_id,
             text=payload,
             **kwargs,
+        )
+
+    def send_and_handle(
+        self,
+        request_text: str,
+        *,
+        inject_skills: bool = True,
+        timeout_seconds: float = 60.0,
+        interval_seconds: float = 0.25,
+        terminal_statuses: Iterable[str] | None = None,
+        require_assistant_reply: bool = False,
+        max_submit_attempts: int = _DEFAULT_RESPONSE_SUBMIT_ATTEMPTS,
+        retry_delay_seconds: float = _DEFAULT_RESPONSE_RETRY_DELAY_SECONDS,
+        **kwargs: Any,
+    ) -> RemoteSkillSendResult:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be > 0")
+        if interval_seconds <= 0:
+            raise ValueError("interval_seconds must be > 0")
+
+        _require_dispatch_mode(self._registry, _DISPATCH_MODE_POLLING)
+        terminal = _normalize_statuses(terminal_statuses)
+
+        accepted = self.send(request_text, inject_skills=inject_skills, **kwargs)
+        if not isinstance(accepted, dict):
+            raise ValueError("remote skill send_and_handle expected dict response with turnId")
+        turn_id = accepted.get("turnId")
+        if not isinstance(turn_id, str) or not turn_id.strip():
+            raise ValueError("remote skill send_and_handle response missing turnId")
+
+        dispatches: builtins.list[RemoteSkillDispatch] = []
+        start = time.monotonic()
+        while True:
+            drained = self.drain_pending_calls(
+                max_submit_attempts=max_submit_attempts,
+                retry_delay_seconds=retry_delay_seconds,
+            )
+            dispatches.extend(drained)
+
+            status = self._client.wait.turn_status(session_id=self.session_id, turn_id=turn_id)
+            if isinstance(status, str) and status.strip().lower() in terminal:
+                break
+
+            if time.monotonic() - start >= timeout_seconds:
+                raise WaitTimeoutError(
+                    f"remote skill turn {turn_id} did not reach terminal status "
+                    f"within {timeout_seconds:.2f}s"
+                )
+            time.sleep(interval_seconds)
+
+        detail = self._client.sessions.get(session_id=self.session_id)
+        final_status = self._client.wait.turn_status(session_id=self.session_id, turn_id=turn_id)
+        assistant_reply = _assistant_reply_for_turn(detail, turn_id)
+        if require_assistant_reply and assistant_reply is None:
+            raise WaitTimeoutError(
+                f"turn {turn_id} reached terminal status without an assistant reply"
+            )
+        return RemoteSkillSendResult(
+            session_id=self.session_id,
+            turn_id=turn_id,
+            accepted=accepted,
+            detail=detail,
+            status=final_status,
+            assistant_reply=assistant_reply,
+            dispatches=dispatches,
         )
 
     def dispatch_tool_call(
@@ -639,6 +898,7 @@ class RemoteSkillSession:
         max_submit_attempts: int = _DEFAULT_RESPONSE_SUBMIT_ATTEMPTS,
         retry_delay_seconds: float = _DEFAULT_RESPONSE_RETRY_DELAY_SECONDS,
     ) -> RemoteSkillDispatch | None:
+        _require_dispatch_mode(self._registry, _DISPATCH_MODE_SIGNAL)
         dispatched = self.dispatch_app_server_signal(signal)
         if dispatched is None:
             return None
@@ -665,6 +925,7 @@ class RemoteSkillSession:
         max_submit_attempts: int = _DEFAULT_RESPONSE_SUBMIT_ATTEMPTS,
         retry_delay_seconds: float = _DEFAULT_RESPONSE_RETRY_DELAY_SECONDS,
     ) -> RemoteSkillDispatch | None:
+        _require_dispatch_mode(self._registry, _DISPATCH_MODE_POLLING)
         pending_session_id = _pending_call_session_id(pending_call)
         if pending_session_id is not None and pending_session_id != self.session_id:
             return None
@@ -701,6 +962,7 @@ class RemoteSkillSession:
         max_submit_attempts: int = _DEFAULT_RESPONSE_SUBMIT_ATTEMPTS,
         retry_delay_seconds: float = _DEFAULT_RESPONSE_RETRY_DELAY_SECONDS,
     ) -> builtins.list[RemoteSkillDispatch]:
+        _require_dispatch_mode(self._registry, _DISPATCH_MODE_POLLING)
         payload = self._client.sessions.tool_calls(session_id=self.session_id)
         rows = _parse_pending_tool_call_rows(payload)
         dispatches: builtins.list[RemoteSkillDispatch] = []
@@ -730,10 +992,17 @@ class AsyncRemoteSkillSession:
     def list(self) -> builtins.list[RemoteSkill]:
         return list(self._registry.skills.values())
 
-    def clear(self) -> int:
-        count = len(self._registry.skills)
-        self._registry.skills.clear()
-        return count
+    def clear(self, *, sync_runtime: bool = False, ignore_sync_errors: bool = True) -> int:
+        _require_catalog_mutation_allowed(self._registry)
+        if sync_runtime:
+            raise RuntimeError(_RUNTIME_SYNC_DISABLED_ERROR)
+        return _clear_registry_skills(self._registry)
+
+    def dispatch_mode(self) -> str | None:
+        return self._registry.dispatch_mode
+
+    def reset_dispatch_mode(self) -> None:
+        self._registry.dispatch_mode = None
 
     def register(
         self,
@@ -742,20 +1011,35 @@ class AsyncRemoteSkillSession:
         *,
         description: str,
         input_schema: dict[str, Any] | None = None,
+        sync_runtime: bool = False,
+        ignore_sync_errors: bool = True,
     ) -> RemoteSkill:
+        _require_catalog_mutation_allowed(self._registry)
         normalized_name = _normalize_skill_name(name)
         skill = RemoteSkill(
             name=normalized_name,
             description=description.strip() or f"Remote skill {normalized_name}",
             handler=handler,
-            input_schema=deepcopy(input_schema) if isinstance(input_schema, dict) else None,
+            input_schema=_schema_enriched_with_docstrings(handler, input_schema),
         )
         self._registry.skills[normalized_name] = skill
+        if sync_runtime:
+            raise RuntimeError(_RUNTIME_SYNC_DISABLED_ERROR)
         return skill
 
-    def unregister(self, name: str) -> bool:
+    def unregister(
+        self,
+        name: str,
+        *,
+        sync_runtime: bool = False,
+        ignore_sync_errors: bool = True,
+    ) -> bool:
+        _require_catalog_mutation_allowed(self._registry)
         normalized_name = _normalize_skill_name(name)
-        return self._registry.skills.pop(normalized_name, None) is not None
+        removed = self._registry.skills.pop(normalized_name, None) is not None
+        if removed and sync_runtime:
+            raise RuntimeError(_RUNTIME_SYNC_DISABLED_ERROR)
+        return removed
 
     def skill(
         self,
@@ -780,12 +1064,16 @@ class AsyncRemoteSkillSession:
         *,
         description: str,
         input_schema: dict[str, Any] | None = None,
+        sync_runtime_on_exit: bool = False,
+        ignore_sync_errors: bool = True,
     ) -> AsyncIterator[AsyncRemoteSkillSession]:
+        if sync_runtime_on_exit:
+            raise RuntimeError(_RUNTIME_SYNC_DISABLED_ERROR)
         self.register(name, handler, description=description, input_schema=input_schema)
         try:
             yield self
         finally:
-            self.unregister(name)
+            self.unregister(name, sync_runtime=False)
 
     def instruction_text(self) -> str:
         return _render_instruction(self._registry.skills)
@@ -797,9 +1085,7 @@ class AsyncRemoteSkillSession:
         return _dynamic_tool_definitions(self._registry.skills)
 
     async def sync_runtime(self) -> Any:
-        return await self._client.sessions.resume(
-            session_id=self.session_id, dynamic_tools=self.dynamic_tools()
-        )
+        raise RuntimeError(_RUNTIME_SYNC_DISABLED_ERROR)
 
     async def _materialize_if_needed(self, *, timeout_seconds: float) -> None:
         detail = await self._client.sessions.get(session_id=self.session_id)
@@ -828,28 +1114,7 @@ class AsyncRemoteSkillSession:
             pass
 
     async def prepare_catalog(self, *, timeout_seconds: float = 90.0) -> Any:
-        dynamic_tools = self.dynamic_tools()
-        if not dynamic_tools:
-            return {"status": "noop", "sessionId": self.session_id}
-
-        detail = await self._client.sessions.get(session_id=self.session_id)
-        session = detail.get("session") if isinstance(detail, dict) else {}
-        materialized = session.get("materialized") if isinstance(session, dict) else None
-        if materialized is False:
-            await self._materialize_if_needed(timeout_seconds=timeout_seconds)
-
-        try:
-            return await self._client.sessions.resume(
-                session_id=self.session_id, dynamic_tools=dynamic_tools
-            )
-        except Exception as error:
-            if not _is_no_rollout_error(error):
-                raise
-
-        await self._materialize_if_needed(timeout_seconds=timeout_seconds)
-        return await self._client.sessions.resume(
-            session_id=self.session_id, dynamic_tools=dynamic_tools
-        )
+        raise RuntimeError(_RUNTIME_SYNC_DISABLED_ERROR)
 
     async def send_prepared(
         self,
@@ -859,8 +1124,7 @@ class AsyncRemoteSkillSession:
         prepare_timeout_seconds: float = 90.0,
         **kwargs: Any,
     ) -> Any:
-        await self.prepare_catalog(timeout_seconds=prepare_timeout_seconds)
-        return await self.send(request_text, inject_skills=inject_skills, **kwargs)
+        raise RuntimeError(_RUNTIME_SYNC_DISABLED_ERROR)
 
     async def send(self, request_text: str, *, inject_skills: bool = True, **kwargs: Any) -> Any:
         if "dynamic_tools" not in kwargs:
@@ -870,6 +1134,78 @@ class AsyncRemoteSkillSession:
             session_id=self.session_id,
             text=payload,
             **kwargs,
+        )
+
+    async def send_and_handle(
+        self,
+        request_text: str,
+        *,
+        inject_skills: bool = True,
+        timeout_seconds: float = 60.0,
+        interval_seconds: float = 0.25,
+        terminal_statuses: Iterable[str] | None = None,
+        require_assistant_reply: bool = False,
+        max_submit_attempts: int = _DEFAULT_RESPONSE_SUBMIT_ATTEMPTS,
+        retry_delay_seconds: float = _DEFAULT_RESPONSE_RETRY_DELAY_SECONDS,
+        **kwargs: Any,
+    ) -> RemoteSkillSendResult:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be > 0")
+        if interval_seconds <= 0:
+            raise ValueError("interval_seconds must be > 0")
+
+        _require_dispatch_mode(self._registry, _DISPATCH_MODE_POLLING)
+        terminal = _normalize_statuses(terminal_statuses)
+
+        accepted = await self.send(request_text, inject_skills=inject_skills, **kwargs)
+        if not isinstance(accepted, dict):
+            raise ValueError("remote skill send_and_handle expected dict response with turnId")
+        turn_id = accepted.get("turnId")
+        if not isinstance(turn_id, str) or not turn_id.strip():
+            raise ValueError("remote skill send_and_handle response missing turnId")
+
+        dispatches: builtins.list[RemoteSkillDispatch] = []
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while True:
+            drained = await self.drain_pending_calls(
+                max_submit_attempts=max_submit_attempts,
+                retry_delay_seconds=retry_delay_seconds,
+            )
+            dispatches.extend(drained)
+
+            status = await self._client.wait.turn_status(
+                session_id=self.session_id,
+                turn_id=turn_id,
+            )
+            if isinstance(status, str) and status.strip().lower() in terminal:
+                break
+
+            if loop.time() >= deadline:
+                raise WaitTimeoutError(
+                    f"remote skill turn {turn_id} did not reach terminal status "
+                    f"within {timeout_seconds:.2f}s"
+                )
+            await asyncio.sleep(interval_seconds)
+
+        detail = await self._client.sessions.get(session_id=self.session_id)
+        final_status = await self._client.wait.turn_status(
+            session_id=self.session_id,
+            turn_id=turn_id,
+        )
+        assistant_reply = _assistant_reply_for_turn(detail, turn_id)
+        if require_assistant_reply and assistant_reply is None:
+            raise WaitTimeoutError(
+                f"turn {turn_id} reached terminal status without an assistant reply"
+            )
+        return RemoteSkillSendResult(
+            session_id=self.session_id,
+            turn_id=turn_id,
+            accepted=accepted,
+            detail=detail,
+            status=final_status,
+            assistant_reply=assistant_reply,
+            dispatches=dispatches,
         )
 
     async def dispatch_tool_call(
@@ -1008,6 +1344,7 @@ class AsyncRemoteSkillSession:
         max_submit_attempts: int = _DEFAULT_RESPONSE_SUBMIT_ATTEMPTS,
         retry_delay_seconds: float = _DEFAULT_RESPONSE_RETRY_DELAY_SECONDS,
     ) -> RemoteSkillDispatch | None:
+        _require_dispatch_mode(self._registry, _DISPATCH_MODE_SIGNAL)
         dispatched = await self.dispatch_app_server_signal(signal)
         if dispatched is None:
             return None
@@ -1034,6 +1371,7 @@ class AsyncRemoteSkillSession:
         max_submit_attempts: int = _DEFAULT_RESPONSE_SUBMIT_ATTEMPTS,
         retry_delay_seconds: float = _DEFAULT_RESPONSE_RETRY_DELAY_SECONDS,
     ) -> RemoteSkillDispatch | None:
+        _require_dispatch_mode(self._registry, _DISPATCH_MODE_POLLING)
         pending_session_id = _pending_call_session_id(pending_call)
         if pending_session_id is not None and pending_session_id != self.session_id:
             return None
@@ -1070,6 +1408,7 @@ class AsyncRemoteSkillSession:
         max_submit_attempts: int = _DEFAULT_RESPONSE_SUBMIT_ATTEMPTS,
         retry_delay_seconds: float = _DEFAULT_RESPONSE_RETRY_DELAY_SECONDS,
     ) -> builtins.list[RemoteSkillDispatch]:
+        _require_dispatch_mode(self._registry, _DISPATCH_MODE_POLLING)
         payload = await self._client.sessions.tool_calls(session_id=self.session_id)
         rows = _parse_pending_tool_call_rows(payload)
         dispatches: builtins.list[RemoteSkillDispatch] = []
@@ -1093,6 +1432,7 @@ class RemoteSkillsFacade:
 
     def session(self, session_id: str) -> RemoteSkillSession:
         registry = self._registries.setdefault(session_id, _SkillRegistry())
+        registry.catalog_locked = True
         return RemoteSkillSession(client=self._client, session_id=session_id, registry=registry)
 
     def create_session(
@@ -1101,7 +1441,7 @@ class RemoteSkillsFacade:
         register: Callable[[RemoteSkillSession], None] | None = None,
         **create_kwargs: Any,
     ) -> tuple[Any, RemoteSkillSession]:
-        registry = _SkillRegistry()
+        registry = _SkillRegistry(catalog_locked=False)
         draft = RemoteSkillSession(client=self._client, session_id="draft", registry=registry)
         if register is not None:
             registered = register(draft)
@@ -1126,7 +1466,61 @@ class RemoteSkillsFacade:
 
         bound = self.session(session_id)
         bound._registry.skills = dict(registry.skills)
+        bound._registry.catalog_locked = True
         return created, bound
+
+    def close_session(
+        self,
+        session_id: str,
+        *,
+        delete_session: bool = False,
+        sync_runtime_on_cleanup: bool = True,
+        ignore_cleanup_errors: bool = True,
+    ) -> dict[str, Any]:
+        registry = self._registries.setdefault(session_id, _SkillRegistry(catalog_locked=True))
+        cleared = _clear_registry_skills(registry)
+
+        delete_response: Any | None = None
+        if delete_session:
+            try:
+                delete_response = self._client.sessions.delete(session_id=session_id)
+            except Exception:
+                if not ignore_cleanup_errors:
+                    raise
+
+        self._registries.pop(session_id, None)
+        return {
+            "sessionId": session_id,
+            "cleared": cleared,
+            "deleted": delete_response is not None,
+            **({"deleteResponse": delete_response} if delete_response is not None else {}),
+        }
+
+    @contextmanager
+    def lifecycle(
+        self,
+        *,
+        register: Callable[[RemoteSkillSession], None] | None = None,
+        keep_session: bool = False,
+        sync_runtime_on_cleanup: bool = True,
+        ignore_cleanup_errors: bool = True,
+        **create_kwargs: Any,
+    ) -> Iterator[RemoteSkillLifecycle]:
+        created, skills = self.create_session(register=register, **create_kwargs)
+        lifecycle = RemoteSkillLifecycle(
+            session_id=skills.session_id,
+            created=created,
+            skills=skills,
+        )
+        try:
+            yield lifecycle
+        finally:
+            self.close_session(
+                skills.session_id,
+                delete_session=not keep_session,
+                sync_runtime_on_cleanup=sync_runtime_on_cleanup,
+                ignore_cleanup_errors=ignore_cleanup_errors,
+            )
 
     @contextmanager
     def using(
@@ -1138,9 +1532,7 @@ class RemoteSkillsFacade:
         description: str,
         input_schema: dict[str, Any] | None = None,
     ) -> Iterator[RemoteSkillSession]:
-        session = self.session(session_id)
-        with session.using(name, handler, description=description, input_schema=input_schema):
-            yield session
+        raise RuntimeError(_CATALOG_MUTATION_ERROR)
 
 
 class AsyncRemoteSkillsFacade:
@@ -1152,6 +1544,7 @@ class AsyncRemoteSkillsFacade:
 
     def session(self, session_id: str) -> AsyncRemoteSkillSession:
         registry = self._registries.setdefault(session_id, _SkillRegistry())
+        registry.catalog_locked = True
         return AsyncRemoteSkillSession(
             client=self._client, session_id=session_id, registry=registry
         )
@@ -1162,7 +1555,7 @@ class AsyncRemoteSkillsFacade:
         register: Callable[[AsyncRemoteSkillSession], None | Awaitable[None]] | None = None,
         **create_kwargs: Any,
     ) -> tuple[Any, AsyncRemoteSkillSession]:
-        registry = _SkillRegistry()
+        registry = _SkillRegistry(catalog_locked=False)
         draft = AsyncRemoteSkillSession(client=self._client, session_id="draft", registry=registry)
         if register is not None:
             registered = register(draft)
@@ -1181,7 +1574,61 @@ class AsyncRemoteSkillsFacade:
 
         bound = self.session(session_id)
         bound._registry.skills = dict(registry.skills)
+        bound._registry.catalog_locked = True
         return created, bound
+
+    async def close_session(
+        self,
+        session_id: str,
+        *,
+        delete_session: bool = False,
+        sync_runtime_on_cleanup: bool = True,
+        ignore_cleanup_errors: bool = True,
+    ) -> dict[str, Any]:
+        registry = self._registries.setdefault(session_id, _SkillRegistry(catalog_locked=True))
+        cleared = _clear_registry_skills(registry)
+
+        delete_response: Any | None = None
+        if delete_session:
+            try:
+                delete_response = await self._client.sessions.delete(session_id=session_id)
+            except Exception:
+                if not ignore_cleanup_errors:
+                    raise
+
+        self._registries.pop(session_id, None)
+        return {
+            "sessionId": session_id,
+            "cleared": cleared,
+            "deleted": delete_response is not None,
+            **({"deleteResponse": delete_response} if delete_response is not None else {}),
+        }
+
+    @asynccontextmanager
+    async def lifecycle(
+        self,
+        *,
+        register: Callable[[AsyncRemoteSkillSession], None | Awaitable[None]] | None = None,
+        keep_session: bool = False,
+        sync_runtime_on_cleanup: bool = True,
+        ignore_cleanup_errors: bool = True,
+        **create_kwargs: Any,
+    ) -> AsyncIterator[AsyncRemoteSkillLifecycle]:
+        created, skills = await self.create_session(register=register, **create_kwargs)
+        lifecycle = AsyncRemoteSkillLifecycle(
+            session_id=skills.session_id,
+            created=created,
+            skills=skills,
+        )
+        try:
+            yield lifecycle
+        finally:
+            await self.close_session(
+                skills.session_id,
+                delete_session=not keep_session,
+                sync_runtime_on_cleanup=sync_runtime_on_cleanup,
+                ignore_cleanup_errors=ignore_cleanup_errors,
+            )
 
     @asynccontextmanager
     async def using(
@@ -1193,6 +1640,4 @@ class AsyncRemoteSkillsFacade:
         description: str,
         input_schema: dict[str, Any] | None = None,
     ) -> AsyncIterator[AsyncRemoteSkillSession]:
-        session = self.session(session_id)
-        async with session.using(name, handler, description=description, input_schema=input_schema):
-            yield session
+        raise RuntimeError(_CATALOG_MUTATION_ERROR)

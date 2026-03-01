@@ -297,6 +297,27 @@ def test_assistant_reply_waits_for_terminal_turn_when_status_available() -> None
     assert sessions.get_calls >= 2
 
 
+def test_turn_status_sync_returns_current_status_without_expected() -> None:
+    sessions = _SyncSessionsTurnStatus()
+    waiter = WaitApi(sessions_api=sessions)
+    status = waiter.turn_status(session_id="session-3", turn_id="turn-3")
+    assert status == "inProgress"
+
+
+def test_turn_status_sync_waits_for_expected_status() -> None:
+    sessions = _SyncSessionsTurnStatus()
+    waiter = WaitApi(sessions_api=sessions)
+    status = waiter.turn_status(
+        session_id="session-3",
+        turn_id="turn-3",
+        expected={"completed", "failed"},
+        timeout_seconds=1,
+        interval_seconds=0.01,
+    )
+    assert status == "completed"
+    assert sessions.get_calls >= 2
+
+
 def test_assistant_reply_fails_fast_when_turn_is_terminal_without_reply() -> None:
     sessions = _SyncSessionsTerminalNoReply()
     waiter = WaitApi(sessions_api=sessions)
@@ -333,6 +354,29 @@ async def test_async_assistant_reply_waits_for_terminal_turn_when_status_availab
         interval_seconds=0.01,
     )
     assert result.assistant_reply == "Final async"
+    assert sessions.get_calls >= 2
+
+
+@pytest.mark.asyncio
+async def test_turn_status_async_returns_current_status_without_expected() -> None:
+    sessions = _AsyncSessionsTurnStatus()
+    waiter = AsyncWaitApi(sessions_api=sessions)
+    status = await waiter.turn_status(session_id="session-4", turn_id="turn-4")
+    assert status == "inProgress"
+
+
+@pytest.mark.asyncio
+async def test_turn_status_async_waits_for_expected_status() -> None:
+    sessions = _AsyncSessionsTurnStatus()
+    waiter = AsyncWaitApi(sessions_api=sessions)
+    status = await waiter.turn_status(
+        session_id="session-4",
+        turn_id="turn-4",
+        expected=["completed", "failed"],
+        timeout_seconds=1,
+        interval_seconds=0.01,
+    )
+    assert status == "completed"
     assert sessions.get_calls >= 2
 
 

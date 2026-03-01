@@ -1165,6 +1165,9 @@ class SessionScope:
     def get(self) -> Any:
         return self._sessions.get(session_id=self.session_id)
 
+    def delete(self) -> Any:
+        return self._sessions.delete(session_id=self.session_id)
+
     def rename(self, title: str) -> Any:
         return self._sessions.rename(session_id=self.session_id, title=title)
 
