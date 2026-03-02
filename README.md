@@ -223,7 +223,7 @@ with CodexManager.from_profile("local") as cm:
     print(reply.assistant_reply)
 ```
 
-This workflow is straightforward to run in scripts and CI: one helper handles send + wait, keeps control flow linear, and avoids additional event-loop wiring when you only need a final answer; see the later [Python SDK](#python-sdk) section for an example streaming solution.
+This workflow is straightforward to run in scripts and CI: one helper handles send + wait, keeps control flow linear, and avoids additional event-loop wiring when you only need a final answer; see the later [Python SDK Remote Skills](#python-sdk-remote-skills) section for an example streaming solution.
 
 ## How Codex Manager Works
 
