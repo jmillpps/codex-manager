@@ -1,4 +1,4 @@
-# Python Deep Dive: Remote Skill Dispatch and Reliability
+# Python Remote Skill Dispatch and Reliability
 
 ## Purpose
 
@@ -43,6 +43,7 @@ SDK wrapper:
 - `client.tool_calls.respond(request_id=..., response=...)`
 
 Submission classification handles server outcomes (`accepted`, retryable, idempotent, terminal error).
+Malformed response payloads (including dict payloads missing `status`) are treated as retryable submission failures, not accepted outcomes.
 
 ## Retry Behavior
 
@@ -67,6 +68,17 @@ Duplicate paths are tagged as idempotent outcomes:
 - server-level `404 not_found` / `409 in_flight` can also be classified idempotently
 
 This prevents repeated side effects when listeners reconnect or receive duplicate work windows.
+The cache is bounded and trimmed while preserving immediate duplicate protection for the most recently handled request id.
+
+## Dispatch mode guard
+
+Each session registry enforces one dispatch mode at a time:
+
+- signal mode (`respond_to_signal(...)`)
+- polling mode (`drain_pending_calls()` / `respond_to_pending_call(...)`)
+
+Mixing modes on the same session handle raises a dispatch-mode conflict until `reset_dispatch_mode()` is called.
+No-op paths (ignored non-tool signals or polling with no actionable rows) remain mode-neutral.
 
 ## Session Guarding
 
@@ -74,7 +86,7 @@ This prevents repeated side effects when listeners reconnect or receive duplicat
 
 Guideline:
 
-- always use session-scoped `skills = cm.remote_skills.session(session_id)`
+- prefer the session-scoped handle returned by `remote_skills.create_session(...)` / `remote_skills.lifecycle(...)`
 - register handler on global stream, but dispatch only through session-scoped `skills` object
 
 ## Combined Realtime + Fallback Loop

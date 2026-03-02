@@ -1,4 +1,4 @@
-# Python Deep Dive: Streaming Reliability Patterns
+# Python Streaming Reliability Patterns
 
 ## Purpose
 
@@ -31,11 +31,11 @@ async def run_listener(session_id: str) -> None:
     stop = asyncio.Event()
 
     async with AsyncCodexManager.from_profile("local") as cm:
-        @cm.on_turn_started()
-        async def on_turn(event, _ctx):
-            if event.thread_id != session_id:
+        @cm.on_app_server("item.started")
+        async def on_turn(signal, _ctx):
+            if signal.context.get("threadId") != session_id:
                 return
-            print("turn started", event.turn_id)
+            print("turn started", signal.context.get("turnId"))
 
         await cm.stream.run_forever(thread_id=session_id, stop_event=stop)
 ```

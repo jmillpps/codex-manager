@@ -1,4 +1,4 @@
-# Python Deep Dive: Protocol Interface Examples
+# Python Protocol Interface Examples
 
 ## Purpose
 
@@ -79,4 +79,4 @@ cm.close()
 ## Related docs
 
 - Protocol interface index: [`protocol-interfaces.md`](./protocol-interfaces.md)
-- Contract deep dive: [`protocol-interfaces-contracts.md`](./protocol-interfaces-contracts.md)
+- Contract reference: [`protocol-interfaces-contracts.md`](./protocol-interfaces-contracts.md)

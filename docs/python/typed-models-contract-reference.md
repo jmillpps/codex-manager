@@ -1,4 +1,4 @@
-# Python Deep Dive: Typed Models Contract Reference
+# Python Typed Models Contract Reference
 
 ## Purpose
 
@@ -37,5 +37,5 @@ Per-call `validate=True/False` overrides mode behavior.
 ## Related docs
 
 - Typed models index: [`typed-models.md`](./typed-models.md)
-- Validation/gate deep dive: [`typed-models-validation-and-gates.md`](./typed-models-validation-and-gates.md)
+- Validation and quality gates: [`typed-models-validation-and-gates.md`](./typed-models-validation-and-gates.md)
 - API surface guide: [`api-surface.md`](./api-surface.md)

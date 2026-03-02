@@ -1,106 +1,146 @@
-# Python Deep Dive: Remote Skill Lifecycle and Catalog Management
+# Python Remote Skill Lifecycle and Catalog Management
 
 ## Purpose
 
-Detailed reference for remote-skill registration lifecycle, catalog injection, and runtime synchronization.
+Detailed reference for how remote-skill catalogs are defined, bound to sessions, and cleaned up in the current Python SDK implementation.
 
-Use with [`remote-skills.md`](./remote-skills.md) when building stable tool catalogs across session creation and turn execution.
+Use with [`remote-skills.md`](./remote-skills.md) for end-to-end route flow and dispatch behavior.
 
-## Session-Scoped Registry Model
+## Lifecycle model
 
-`client.remote_skills.session(session_id)` returns a session-scoped registry object.
+Remote-skill catalogs are create-time assets.
 
-Registry responsibilities:
+Primary entrypoints:
 
-- hold Python tool handlers for one session
-- build `dynamic_tools` payloads from registered skills
-- generate instruction text that describes available skills
-- submit responses for tool-call requests when invoked
+- `remote_skills.create_session(register=..., **session_create_kwargs)`
+- `remote_skills.lifecycle(register=..., keep_session=False, **session_create_kwargs)`
 
-## Registration APIs
+Inside `register(...)`, you define the catalog on a draft session object. After the session is created, the returned session handle is bound and catalog mutation is locked.
 
-Core operations:
+Bound session behavior:
 
-- `register(name, handler, description=..., input_schema=...)`
-- `skill(...)` decorator
-- `unregister(name)`
-- `clear()`
-- `list()`
+- `register(...)`, `unregister(...)`, and `clear(...)` on an existing session raise a create-time-only runtime error.
+- `remote_skills.session(session_id)` returns a bound handle intended for dispatch/send operations, not catalog mutation.
 
-Name behavior:
+## Register callback semantics
 
-- names are normalized for internal lookup consistency
-- registration overwrites existing skill with same normalized name
+Sync facade:
 
-## Catalog Payload Construction
+- `RemoteSkillsFacade.create_session(...)` requires a sync register callback.
+- If callback code returns an awaitable, the SDK raises `TypeError` and instructs using `AsyncCodexManager`.
 
-`dynamic_tools()` produces app-server compatible tool definitions:
+Async facade:
+
+- `AsyncRemoteSkillsFacade.create_session(...)` accepts sync or async register callbacks.
+
+Registration surface inside callbacks:
+
+- `register(name, handler, description=None, input_schema=None, output_schema=None)`
+- `skill(...)` decorator with the same optional metadata fields
+- when metadata is omitted, signature/docstring inference is applied before the catalog is bound
+
+## Catalog payload contract
+
+`dynamic_tools()` emits app-server-compatible tool definitions:
 
 - `name`
 - `description`
 - `inputSchema`
 
-If `input_schema` is omitted, a permissive object schema is generated.
+`output_schema` and `output_description` are SDK-level instruction metadata. They are included in `instruction_text()` but not forwarded in dynamic-tool transport payloads.
 
-## Instruction Catalog Text
+## Instruction catalog behavior
 
-`instruction_text()` renders a deterministic text block describing registered skills and schemas.
+- `instruction_text()` renders deterministic catalog text for prompt grounding.
+- `inject_request(text)` prepends catalog instruction text.
+- `send(..., inject_skills=True)` automatically injects both prompt instruction and `dynamic_tools` payload unless overridden.
 
-`inject_request(text)` prepends catalog instructions to user text.
+## Cleanup and ownership
 
-Use this only when you explicitly want prompt-grounding in addition to tool registration.
+Use explicit lifecycle ownership when creating temporary sessions:
 
-## First-Turn Reliability Pattern
+- `lifecycle(...)` returns `RemoteSkillLifecycle` / `AsyncRemoteSkillLifecycle` with:
+  - `session_id`
+  - `created`
+  - `skills`
 
-Preferred path:
+`close_session(session_id, ...)` clears in-memory registry state and optionally deletes the runtime session:
 
-- use `remote_skills.create_session(register=..., **kwargs)`
+- `delete_session=False` keeps runtime session
+- `delete_session=True` calls session delete route
+- `deleted` in the returned cleanup payload is `True` only when delete response status indicates an actual deleted end state (`ok` or `deleted`)
+- `sync_runtime_on_cleanup` is currently a compatibility parameter (no runtime-catalog sync is performed)
 
-This creates a new session and includes `dynamic_tools` at session creation, which avoids first-turn gaps where catalog sync has not happened yet.
+`lifecycle(...)` defaults to deleting the created session on exit unless `keep_session=True`.
 
-## Runtime Sync Paths
+## Unsupported runtime-catalog sync paths
 
-- `sync_runtime()` pushes current catalog through session resume route
-- `prepare_catalog()` ensures catalog is present before next send
-- `send_prepared(...)` runs `prepare_catalog()` then sends message
+The SDK intentionally disables runtime catalog mutation/sync paths for reliability:
 
-`prepare_catalog()` includes fallback behavior for unmaterialized sessions:
+- `sync_runtime()`
+- `prepare_catalog()`
+- `send_prepared(...)`
+- facade-level `using(...)` / `async using(...)`
 
-- sends a lightweight bootstrap message when needed
-- waits for reply
-- best-effort rollback to remove bootstrap turn
-- retries resume with dynamic tools
+These methods raise runtime errors by design.
 
-## Context-Managed Skill Windows
-
-For temporary capability windows:
-
-```python
-with skills.using(
-    "lookup_ticket",
-    handler=lookup_ticket,
-    description="Lookup ticket status",
-    input_schema={"type": "object", "properties": {"ticket_id": {"type": "string"}}},
-):
-    skills.send_prepared("Check ticket ABC-123")
-# lookup_ticket automatically unregistered here
-```
-
-Async equivalent:
+## Practical create-time pattern
 
 ```python
-async with skills.using(...):
-    await skills.send_prepared("...")
+from codex_manager import CodexManager
+
+with CodexManager.from_profile("local") as cm:
+    def register(skills):
+        @skills.skill(name="lookup_ticket")
+        def lookup_ticket(ticket_id: str) -> dict[str, str]:
+            """Lookup ticket status by id.
+
+            Args:
+                ticket_id: Stable ticket identifier.
+            """
+            return {"ticketId": ticket_id, "status": "open"}
+
+    created, skills = cm.remote_skills.create_session(register=register, cwd=".")
+    session_id = created["session"]["sessionId"]
+
+    # catalog is now bound; use for sends/dispatch only
+    result = skills.send_and_handle(
+        "Use lookup_ticket for ABC-123 and summarize.",
+        require_assistant_reply=True,
+    )
+
+    print(session_id)
+    print(result.assistant_reply)
 ```
 
-## Lifecycle Guidance
+## Practical lifecycle pattern
 
-- register skills before starting stream listener or before first `send_prepared`
-- call `sync_runtime()` after significant register/unregister changes if next turn timing is critical
-- keep skill schemas stable and minimal to improve model/tool selection consistency
+```python
+from codex_manager import CodexManager
+
+with CodexManager.from_profile("local") as cm:
+    def register(skills):
+        @skills.skill(name="echo")
+        def echo(text: str) -> str:
+            return text
+
+    with cm.remote_skills.lifecycle(register=register, cwd=".", keep_session=False) as run:
+        reply = run.skills.send_and_handle(
+            "Call echo with 'hello', then reply with the echoed value.",
+            require_assistant_reply=True,
+        )
+        print(reply.assistant_reply)
+```
+
+## Operational guidance
+
+- Treat remote-skill catalogs as immutable after session creation.
+- Prefer `create_session(...)` or `lifecycle(...)` over `session(session_id)` for skill definition.
+- Use `send_and_handle(...)` when you want one helper to send, dispatch pending tool calls, and wait for terminal status.
+- Use stream-driven `respond_to_signal(...)` when operating long-lived listeners.
 
 ## Related docs
 
 - Remote skills overview: [`remote-skills.md`](./remote-skills.md)
-- Dispatch and response reliability: [`remote-skills-dispatch-and-reliability.md`](./remote-skills-dispatch-and-reliability.md)
+- Dispatch and reliability details: [`remote-skills-dispatch-and-reliability.md`](./remote-skills-dispatch-and-reliability.md)
 - Streaming integration: [`streaming-and-handlers.md`](./streaming-and-handlers.md)

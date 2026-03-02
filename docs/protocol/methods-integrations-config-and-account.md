@@ -50,11 +50,15 @@ Reads current auth state and provider requirements.
 
 ## `account/login/start`
 
-Starts login flow (`apiKey` or `chatgpt` mode).
+Starts login flow with one of three payload modes:
+
+- `{"type":"apiKey","apiKey":"..."}`
+- `{"type":"chatgpt"}`
+- `{"type":"chatgptAuthTokens","accessToken":"...","chatgptAccountId":"...","chatgptPlanType":"..."?}`
 
 ## `account/login/cancel`
 
-Cancels in-progress chatgpt login flow.
+Cancels an in-progress login flow by `loginId`.
 
 ## `account/logout`
 
@@ -64,7 +68,17 @@ Clears auth state.
 
 Reads account-related rate-limit information.
 
-Associated notifications include login/account/rate-limit updates.
+Associated notifications include:
+
+- `account/updated`
+- `account/login/completed`
+- `account/rateLimits/updated`
+
+The runtime also emits legacy/compatibility login signals in some versions (for example `loginChatGptComplete`), so clients should keep unknown-signal handling tolerant.
+
+Related server-request method:
+
+- `account/chatgptAuthTokens/refresh` (refresh prompt request path for ChatGPT token mode)
 
 ## Related docs
 

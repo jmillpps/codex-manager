@@ -31,6 +31,11 @@ Typical extension folder includes:
 - `app_server.<normalized_method>`
 - `app_server.request.<normalized_method>`
 
+Scope behavior:
+
+- pass-through app-server events are user-session scoped
+- system-owned and purged/deleted sessions do not emit normal pass-through events into extension handlers
+
 ## Queue and worker model summary
 
 - handlers enqueue jobs (`agent_instruction` common)

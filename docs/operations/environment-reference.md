@@ -34,11 +34,19 @@ Operational guidance:
   - Codex home directory used by supervised runtime.
   - Repo-local value (for example `.data/codex-home`) keeps local dev deterministic.
 - `OPENAI_API_KEY`
-  - API-key auth path when Codex auth state is not already present in `CODEX_HOME`/default home.
+  - API-key auth path when Codex auth state is not already present in `CODEX_HOME/auth.json`.
+
+Credential source behavior:
+
+- On API startup, if `CODEX_HOME` is set and `CODEX_HOME/auth.json` is missing, codex-manager attempts a one-time bootstrap copy from `~/.codex/auth.json`.
+- If `CODEX_HOME/auth.json` already exists, no bootstrap copy is performed.
+- If `CODEX_HOME` is unset, bootstrap copy is skipped.
 
 Health/auth signal:
 
 - `GET /api/health` exposes `auth.hasOpenAiApiKey`, `auth.codexHomeAuthFile`, and `auth.likelyUnauthenticated`.
+- `likelyUnauthenticated` is a heuristic: it is `true` only when both `OPENAI_API_KEY` is absent and `CODEX_HOME/auth.json` is not present.
+- For deterministic local behavior, prefer setting `CODEX_HOME` explicitly (for example `.data/codex-home`) and keeping auth state there.
 
 ## Default Session Policy Variables
 

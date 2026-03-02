@@ -78,6 +78,14 @@ Auth-ready quick check:
 curl -s http://127.0.0.1:3001/api/health | grep -Eq '"likelyUnauthenticated"[[:space:]]*:[[:space:]]*false'
 ```
 
+If `likelyUnauthenticated` is `true`, complete one login flow:
+
+```bash
+pnpm --filter @repo/cli dev account login start --type chatgpt
+# or:
+pnpm --filter @repo/cli dev account login start --type apiKey --api-key "$OPENAI_API_KEY"
+```
+
 ## Baseline validation flow
 
 ```bash

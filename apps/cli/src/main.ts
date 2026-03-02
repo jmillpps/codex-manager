@@ -1370,7 +1370,7 @@ function buildProgram(): Command {
             sessionId: options.sessionId
           },
           body: dynamicTools === undefined ? {} : { dynamicTools },
-          allowStatuses: [200, 410]
+          allowStatuses: [200, 403, 410]
         });
       })
     );
@@ -1496,7 +1496,7 @@ function buildProgram(): Command {
             ...(options.filesystemSandbox ? { filesystemSandbox: options.filesystemSandbox } : {}),
             ...(dynamicTools !== undefined ? { dynamicTools } : {})
           },
-          allowStatuses: [202, 404, 410]
+          allowStatuses: [202, 400, 403, 404, 410]
         });
       })
     );
@@ -1516,7 +1516,7 @@ function buildProgram(): Command {
             sessionId: options.sessionId
           },
           body: options.turnId ? { turnId: options.turnId } : {},
-          allowStatuses: [200, 409, 410]
+          allowStatuses: [200, 403, 409, 410]
         });
       })
     );
@@ -1687,7 +1687,7 @@ function buildProgram(): Command {
           pathParams: {
             sessionId: options.sessionId
           },
-          allowStatuses: [200, 404, 410]
+          allowStatuses: [200, 403, 404, 410]
         });
       })
     );
@@ -1734,7 +1734,7 @@ function buildProgram(): Command {
             ...(options.actor ? { actor: options.actor } : {}),
             ...(options.source ? { source: options.source } : {})
           },
-          allowStatuses: [200, 400, 404, 410, 423]
+          allowStatuses: [200, 400, 403, 404, 410, 423]
         });
       })
     );
@@ -1760,7 +1760,7 @@ function buildProgram(): Command {
             scope,
             key: options.key
           },
-          allowStatuses: [200, 404, 410]
+          allowStatuses: [200, 403, 404, 410]
         });
       })
     );
@@ -1838,7 +1838,7 @@ function buildProgram(): Command {
               ...(options.actor ? { actor: options.actor } : {}),
               ...(options.source ? { source: options.source } : {})
             },
-            allowStatuses: [200, 400, 404, 410, 423]
+            allowStatuses: [200, 400, 403, 404, 410, 423]
           });
           return;
         }
@@ -1872,7 +1872,7 @@ function buildProgram(): Command {
             ...(options.actor ? { actor: options.actor } : {}),
             ...(options.source ? { source: options.source } : {})
           },
-          allowStatuses: [200, 400, 404, 410, 423]
+          allowStatuses: [200, 400, 403, 404, 410, 423]
         });
       })
     );
@@ -1907,7 +1907,7 @@ function buildProgram(): Command {
             actor: options.actor,
             source: options.source
           },
-          allowStatuses: [200, 404, 410, 423]
+          allowStatuses: [200, 403, 404, 410, 423]
         });
       })
     );
@@ -1930,7 +1930,7 @@ function buildProgram(): Command {
           body: {
             approvalPolicy: options.approvalPolicy
           },
-          allowStatuses: [200, 404, 410]
+          allowStatuses: [200, 403, 404, 410]
         });
       })
     );
@@ -1949,7 +1949,7 @@ function buildProgram(): Command {
           pathParams: {
             sessionId: options.sessionId
           },
-          allowStatuses: [200, 410]
+          allowStatuses: [200, 403, 410]
         });
       })
     );
@@ -1968,7 +1968,7 @@ function buildProgram(): Command {
           pathParams: {
             sessionId: options.sessionId
           },
-          allowStatuses: [200, 410]
+          allowStatuses: [200, 403, 410]
         });
       })
     );
@@ -2079,7 +2079,7 @@ function buildProgram(): Command {
             ...(options.effort ? { effort: options.effort } : {}),
             ...(options.draft ? { draft: options.draft } : {})
           },
-          allowStatuses: [200, 202, 404, 409, 410]
+          allowStatuses: [200, 202, 400, 403, 404, 409, 410, 429]
         });
       })
     );
@@ -2105,7 +2105,7 @@ function buildProgram(): Command {
             ...(options.effort ? { effort: options.effort } : {}),
             ...(options.draft ? { draft: options.draft } : {})
           },
-          allowStatuses: [202, 404, 409, 410]
+          allowStatuses: [202, 400, 403, 404, 409, 410, 429]
         });
       })
     );

@@ -2,9 +2,7 @@
 
 ## Purpose
 
-This is the one-level harness contract reference.
-
-It explains how codex-manager layers runtime event dispatch, websocket publishing, transcript upsert behavior, and extension lifecycle controls on top of app-server signals.
+This reference explains how codex-manager layers runtime event dispatch, websocket publishing, transcript upsert behavior, and extension lifecycle controls on top of app-server signals.
 
 ## Harness Contract Scope
 
@@ -35,8 +33,15 @@ These are codex-manager contracts, not native app-server RPC methods.
 
 - queue lifecycle websocket events (`orchestrator_job_*`)
 - interactive decision request/resolution events
+- raw compatibility websocket events (`notification`, `server_request`)
 - transcript delta event (`transcript_updated`)
 - transcript upsert route for extension/queue side effects
+
+Pass-through and lifecycle notes:
+
+- app-server pass-through families are emitted for normal user sessions
+- pass-through signals are suppressed for purged/deleted and system-owned sessions
+- system-owned interactive requests are auto-reconciled by codex-manager and do not surface as normal user pending-decision events
 
 ## Extension Lifecycle Summary
 
@@ -44,7 +49,7 @@ These are codex-manager contracts, not native app-server RPC methods.
 - `POST /api/agents/extensions/reload`
 - RBAC and trust modes govern mutation access and capability enforcement
 
-## Read Next (Level 3)
+## Read next
 
 - Event catalog and normalized signal envelope details: [`harness-runtime-event-catalog.md`](./harness-runtime-event-catalog.md)
 - Websocket/transcript/lifecycle endpoint details: [`harness-runtime-websocket-and-transcript.md`](./harness-runtime-websocket-and-transcript.md)

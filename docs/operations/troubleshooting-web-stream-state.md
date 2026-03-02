@@ -13,6 +13,7 @@ Checks:
 - API is reachable
 - web dev proxy forwards `/api` and websocket upgrades
 - browser network panel shows active `/api/stream`
+- first websocket frame from server is `type=ready`
 
 ## Streaming stalls or missing updates
 
@@ -21,6 +22,8 @@ Checks:
 - websocket connectivity status in UI/devtools
 - API logs for runtime parse/disconnect issues
 - runtime process health and restart behavior
+- send websocket `{"type":"ping"}` and confirm `{"type":"pong"}` response
+- validate thread subscription filter (`subscribe`/`unsubscribe`) matches active chat
 
 ## Approval/tool-input rows stuck
 

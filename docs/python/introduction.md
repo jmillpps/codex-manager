@@ -50,6 +50,7 @@ Both clients expose the same domain structure.
 Both clients also expose polling-based wait helpers for synchronization:
 
 - `cm.wait.until(...)` / `await acm.wait.until(...)` for generic conditions
+- `cm.wait.turn_status(...)` / `await acm.wait.turn_status(...)` for turn-status reads and expected-status waits
 - `cm.wait.send_message_and_wait_reply(...)` / `await acm.wait.send_message_and_wait_reply(...)` for request/reply flows
 - default polling cadence is latency-oriented (`interval_seconds=0.25`) and can be overridden per call when slower polling is preferred
 
@@ -82,11 +83,11 @@ Hook middleware objects can be registered directly with `use_middleware(...)` in
 - Team mesh example (no orchestrator jobs): [`team-mesh.md`](./team-mesh.md)
 - API domain map: [`api-surface.md`](./api-surface.md)
 - Streaming + decorators + handlers: [`streaming-and-handlers.md`](./streaming-and-handlers.md)
-- Streaming event routing deep dive: [`streaming-event-routing-reference.md`](./streaming-event-routing-reference.md)
+- Streaming event routing reference: [`streaming-event-routing-reference.md`](./streaming-event-routing-reference.md)
 - Streaming reliability patterns: [`streaming-reliability-patterns.md`](./streaming-reliability-patterns.md)
 - Remote-skill bridge: [`remote-skills.md`](./remote-skills.md)
-- Remote-skill lifecycle/catalog deep dive: [`remote-skills-lifecycle-and-catalog.md`](./remote-skills-lifecycle-and-catalog.md)
-- Remote-skill dispatch/reliability deep dive: [`remote-skills-dispatch-and-reliability.md`](./remote-skills-dispatch-and-reliability.md)
+- Remote-skill lifecycle/catalog: [`remote-skills-lifecycle-and-catalog.md`](./remote-skills-lifecycle-and-catalog.md)
+- Remote-skill dispatch/reliability: [`remote-skills-dispatch-and-reliability.md`](./remote-skills-dispatch-and-reliability.md)
 - Session settings + automation patterns: [`settings-and-automation.md`](./settings-and-automation.md)
 - Protocol-oriented implementation contract: [`protocol-interfaces.md`](./protocol-interfaces.md)
 - Typed model/facade + boundary validation implementation: [`typed-models.md`](./typed-models.md)

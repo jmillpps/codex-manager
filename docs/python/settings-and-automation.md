@@ -1,129 +1,126 @@
 # Session Settings and Automation
 
-## Why settings matter
+## Purpose
 
-Codex-manager session settings are generic key/value storage per session or default scope.
+Session settings are codex-manager's shared per-session state store for automation and policy.
+The same values are visible to Web UI, API, CLI, extensions, and Python workflows.
 
-They are shared across:
+## Data model and scope behavior
 
-- web UI controls
-- API/CLI scripts
-- extension runtime logic
+Settings are persisted inside the session controls tuple (`controls.settings`) alongside:
 
-Python client exposes these settings directly.
+- `model`
+- `approvalPolicy`
+- `networkAccess`
+- `filesystemSandbox`
 
-## Basic settings operations
+Two scopes are available:
+
+- `session`: only this session
+- `default`: baseline for future/new sessions
+
+Default-scope writes can be locked by `SESSION_DEFAULTS_LOCKED=true`. In that case, write attempts return `423 locked`.
+
+## Write semantics
+
+Codex-manager supports two mutation styles for `POST /api/sessions/:sessionId/settings`:
+
+- object update: `{settings, mode}` where `mode` is `merge` (default) or `replace`
+- single-key update: `{key, value}`
+
+Rules:
+
+- use either `{settings}` or `{key,value}`; never both
+- `{key,value}` requires both fields
+- `mode=replace` replaces the entire settings map for the target scope
+- `mode=merge` preserves existing keys and updates only provided keys
+
+`DELETE /api/sessions/:sessionId/settings/:key` removes one top-level key and returns `removed: true|false`.
+
+`POST /api/sessions/:sessionId/session-controls` can include `controls.settings`. If `controls.settings` is omitted, codex-manager preserves existing settings for the selected scope.
+
+All write routes support optional `actor` and `source` fields for audit provenance.
+
+## Status behavior to handle
+
+For settings and controls operations, handle these statuses as first-class outcomes:
+
+- `200`: success or unchanged payload
+- `400`: invalid request payload
+- `403`: system-owned session (orchestrator worker session)
+- `404`: session not found
+- `410`: session deleted/purged
+- `423`: default scope locked by harness configuration
+
+## Python wrappers
+
+Session-scoped wrapper (`chat = cm.session(session_id)`) exposes:
+
+- `chat.controls.get()`
+- `chat.controls.apply(controls=..., scope="session" | "default", actor=..., source=...)`
+- `chat.settings.get(scope=..., key=...)`
+- `chat.settings.set(scope=..., settings=..., mode="merge"|"replace", key=..., value=..., actor=..., source=...)`
+- `chat.settings.unset(key, scope=..., actor=..., source=...)`
+- `chat.settings.namespace("dot.path").get()/set()/merge()/unset()`
+
+Namespace helpers only shape payload ergonomics in Python. Storage remains a top-level settings object in codex-manager.
+
+## Practical examples
 
 ```python
 from codex_manager import CodexManager
 
-cm = CodexManager.from_profile("local")
-chat = cm.session("<session-id>")
+with CodexManager.from_profile("local") as cm:
+    session_id = cm.sessions.create(cwd=".")["session"]["sessionId"]
+    chat = cm.session(session_id)
 
-# Read all session-scoped settings
-all_settings = chat.settings.get(scope="session")
-
-# Set one top-level key
-chat.settings.set(key="supervisor", value={"fileChange": {"diffExplainability": True}})
-
-# Remove one top-level key
-chat.settings.unset("supervisor")
-
-cm.close()
-```
-
-## Namespace helper
-
-Use nested namespace shorthand for targeted reads/writes:
-
-```python
-policy = chat.settings.namespace("supervisor.fileChange")
-current = policy.get()
-policy.merge({
-    "autoActions": {
-        "approve": {"enabled": False, "threshold": "low"},
-        "reject": {"enabled": False, "threshold": "high"},
-        "steer": {"enabled": False, "threshold": "high"}
-    }
-})
-```
-
-## Approval and turn automation
-
-```python
-pending = chat.approvals.list()
-for row in pending.get("data", []):
-    cm.approvals.decide(
-        approval_id=row["approvalId"],
-        decision="accept",
-        scope="turn",
+    # Merge one top-level key.
+    chat.settings.set(
+        key="team",
+        value={"definitionOfDone": "tests green + docs updated"},
+        source="python-script",
     )
+
+    # Namespace ergonomics for nested data.
+    policy = chat.settings.namespace("team.review")
+    policy.merge({"autoApprove": {"enabled": True, "threshold": "low"}})
+
+    # Replace the full settings map for this session scope.
+    chat.settings.set(
+        settings={
+            "team": {
+                "definitionOfDone": "tests green + docs updated",
+                "review": {"autoApprove": {"enabled": False, "threshold": "low"}},
+            }
+        },
+        mode="replace",
+        source="python-script",
+    )
+
+    # Read one key and remove it.
+    print(chat.settings.get(key="team"))
+    chat.settings.unset("team")
 ```
 
-Pair this with stream handlers to create policy-driven workflows.
-
-## Practical settings patterns
-
-Assume an active client such as `cm = CodexManager.from_profile("local")`.
-
-### Set global defaults once, then override per session
+Apply controls while preserving settings:
 
 ```python
-chat = cm.session("<session-id>")
-
-# default scope baseline for future sessions
-chat.settings.set(
-    scope="default",
-    key="supervisor",
-    value={"fileChange": {"diffExplainability": True}},
+chat.controls.apply(
+    controls={
+        "model": None,
+        "approvalPolicy": "on-request",
+        "networkAccess": "restricted",
+        "filesystemSandbox": "workspace-write",
+        # Omit "settings" to preserve existing settings map.
+    },
+    scope="session",
+    source="policy-update",
 )
-
-# one-session override
-chat.settings.namespace("supervisor.fileChange").merge({
-    "autoActions": {"approve": {"enabled": True, "threshold": "low"}}
-})
-```
-
-### Read one flag safely inside automation
-
-```python
-chat = cm.session("<session-id>")
-
-file_change = chat.settings.namespace("supervisor.fileChange").get() or {}
-auto = (file_change.get("autoActions") or {}).get("approve") or {}
-enabled = bool(auto.get("enabled"))
-threshold = auto.get("threshold", "low")
-```
-
-### End-to-end approval worker loop (practical baseline)
-
-```python
-import asyncio
-from codex_manager import AsyncCodexManager
-
-async def run_worker(session_id: str) -> None:
-    async with AsyncCodexManager.from_profile("local") as cm:
-        chat = cm.session(session_id)
-        policy = chat.settings.namespace("supervisor.fileChange").get() or {}
-        auto = (policy.get("autoActions") or {}).get("approve") or {}
-
-        if not auto.get("enabled"):
-            return
-
-        pending = await chat.approvals.list()
-        for item in pending.get("data", []):
-            await cm.approvals.decide(
-                approval_id=item["approvalId"],
-                decision="accept",
-                scope="turn",
-            )
-
-asyncio.run(run_worker("<session-id>"))
 ```
 
 ## Related docs
 
 - Python introduction: [`introduction.md`](./introduction.md)
-- Practical recipes: [`practical-recipes.md`](./practical-recipes.md)
+- API domain map: [`api-surface.md`](./api-surface.md)
 - Streaming handlers: [`streaming-and-handlers.md`](./streaming-and-handlers.md)
-- Remote skill workflows: [`remote-skills.md`](./remote-skills.md)
+- Remote skills: [`remote-skills.md`](./remote-skills.md)

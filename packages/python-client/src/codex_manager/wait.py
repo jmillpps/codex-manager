@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
@@ -108,6 +108,20 @@ def _is_terminal_turn_status(status: str) -> bool:
     }
 
 
+def _normalize_expected_statuses(expected: str | Iterable[str]) -> set[str]:
+    values = [expected] if isinstance(expected, str) else list(expected)
+    normalized: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            raise ValueError("expected statuses must be strings")
+        candidate = value.strip().lower()
+        if candidate:
+            normalized.add(candidate)
+    if not normalized:
+        raise ValueError("expected statuses must include at least one non-empty status")
+    return normalized
+
+
 class WaitApi:
     """Synchronous wait helpers for polling and common session workflows."""
 
@@ -202,6 +216,38 @@ class WaitApi:
             detail=detail,
             assistant_reply=assistant_reply,
         )
+
+    def turn_status(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        expected: str | Iterable[str] | None = None,
+        timeout_seconds: float = 60.0,
+        interval_seconds: float = 0.25,
+    ) -> str | None:
+        if expected is None:
+            detail = self._sessions.get(session_id=session_id)
+            return _turn_status(detail, turn_id)
+
+        expected_statuses = _normalize_expected_statuses(expected)
+
+        def _matches(payload: Any) -> bool:
+            status = _turn_status(payload, turn_id)
+            if not isinstance(status, str):
+                return False
+            return status.strip().lower() in expected_statuses
+
+        detail = self.until(
+            lambda: self._sessions.get(session_id=session_id),
+            predicate=_matches,
+            timeout_seconds=timeout_seconds,
+            interval_seconds=interval_seconds,
+            description=(
+                f"turn {turn_id} status in {', '.join(sorted(expected_statuses))}"
+            ),
+        )
+        return _turn_status(detail, turn_id)
 
     def send_message_and_wait_reply(
         self,
@@ -340,6 +386,38 @@ class AsyncWaitApi:
             detail=detail,
             assistant_reply=assistant_reply,
         )
+
+    async def turn_status(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        expected: str | Iterable[str] | None = None,
+        timeout_seconds: float = 60.0,
+        interval_seconds: float = 0.25,
+    ) -> str | None:
+        if expected is None:
+            detail = await self._sessions.get(session_id=session_id)
+            return _turn_status(detail, turn_id)
+
+        expected_statuses = _normalize_expected_statuses(expected)
+
+        def _matches(payload: Any) -> bool:
+            status = _turn_status(payload, turn_id)
+            if not isinstance(status, str):
+                return False
+            return status.strip().lower() in expected_statuses
+
+        detail = await self.until(
+            lambda: self._sessions.get(session_id=session_id),
+            predicate=_matches,
+            timeout_seconds=timeout_seconds,
+            interval_seconds=interval_seconds,
+            description=(
+                f"turn {turn_id} status in {', '.join(sorted(expected_statuses))}"
+            ),
+        )
+        return _turn_status(detail, turn_id)
 
     async def send_message_and_wait_reply(
         self,
