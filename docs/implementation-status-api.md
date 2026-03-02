@@ -35,11 +35,19 @@ Implemented:
 - interrupt active turn
 - thread actions (fork, compact, rollback, review, background terminals clean)
 - turn steering endpoint
+- send/interrupt/approval-policy and suggest-request routes are system-owned gated (`403`)
+- suggest-request run/enqueue routes expose queue/backpressure statuses (`409`, `429`, `503`) in addition to standard session lifecycle statuses
 
 Controls/settings:
 
 - session control tuple persisted and applied (`model`, approval policy, network, sandbox)
 - generic per-session/per-default key-value settings APIs
+- settings are stored as `controls.settings` and share the same scope model (`session` | `default`)
+- control updates preserve existing settings when `controls.settings` is omitted
+- settings writes support both single-key (`key/value`) and object (`settings` + `mode=merge|replace`) mutations
+- controls/settings writes emit auditable provenance fields (`actor`, `source`) into supplemental transcript history
+- default-scope writes enforce lock semantics with `423` when `SESSION_DEFAULTS_LOCKED=true`
+- system-owned session access for these routes returns `403`
 
 ## Queue and Extension Runtime
 
@@ -80,7 +88,9 @@ Implemented:
 Implemented:
 
 - health endpoint includes auth and queue visibility
+- websocket stream control contract (`ready`, `ping`/`pong`, subscribe/unsubscribe commands, invalid-command error frames)
 - queue lifecycle websocket events (`orchestrator_job_*`)
+- raw websocket compatibility envelopes (`notification`, `server_request`) with pass-through app-server event families
 - extension reload audit log under `.data/`
 
 ## Related docs

@@ -33,6 +33,7 @@ pnpm python:openapi:gen
 - Use [`protocol-interfaces.md`](./protocol-interfaces.md) as the protocol-architecture contract when expanding transport/hook/plugin interfaces.
 - Use [`typed-models.md`](./typed-models.md) for generated typed request/response model architecture, operation coverage, and boundary-validation behavior.
 - Keep `pydantic` as a runtime dependency because typed facades are always available (`cm.typed`, `acm.typed`).
+- Keep `docstring-parser` as a runtime dependency because remote-skill schema/description enrichment reads `Args:` and `Returns:` metadata from docstrings.
 
 ## Typed model generation
 

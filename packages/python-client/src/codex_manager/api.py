@@ -696,7 +696,7 @@ class SessionsApi:
             "sessions.approvals.list",
             "GET",
             f"/sessions/{session_id}/approvals",
-            allow_statuses=(200, 410),
+            allow_statuses=(200, 403, 410),
         )
 
     def tool_input(self, *, session_id: str) -> Any:
@@ -704,7 +704,7 @@ class SessionsApi:
             "sessions.tool_input.list",
             "GET",
             f"/sessions/{session_id}/tool-input",
-            allow_statuses=(200, 410),
+            allow_statuses=(200, 403, 410),
         )
 
     def tool_calls(self, *, session_id: str) -> Any:
@@ -720,7 +720,7 @@ class SessionsApi:
             "sessions.controls.get",
             "GET",
             f"/sessions/{session_id}/session-controls",
-            allow_statuses=(200, 404, 410),
+            allow_statuses=(200, 403, 404, 410),
         )
 
     def controls_apply(
@@ -739,7 +739,7 @@ class SessionsApi:
             json_body=_omit_none_fields(
                 {"scope": scope, "actor": actor, "source": source, "controls": controls}
             ),
-            allow_statuses=(200, 400, 404, 410, 423),
+            allow_statuses=(200, 400, 403, 404, 410, 423),
         )
 
     def settings_get(
@@ -754,7 +754,7 @@ class SessionsApi:
             "GET",
             f"/sessions/{session_id}/settings",
             query={"scope": scope, "key": key},
-            allow_statuses=(200, 404, 410),
+            allow_statuses=(200, 403, 404, 410),
         )
 
     def settings_set(
@@ -790,7 +790,7 @@ class SessionsApi:
             "POST",
             f"/sessions/{session_id}/settings",
             json_body=body,
-            allow_statuses=(200, 400, 404, 410, 423),
+            allow_statuses=(200, 400, 403, 404, 410, 423),
         )
 
     def settings_unset(
@@ -807,7 +807,7 @@ class SessionsApi:
             "DELETE",
             f"/sessions/{session_id}/settings/{key}",
             query={"scope": scope, "actor": actor, "source": source},
-            allow_statuses=(200, 404, 410, 423),
+            allow_statuses=(200, 403, 404, 410, 423),
         )
 
     def resume(
@@ -822,7 +822,7 @@ class SessionsApi:
             "POST",
             f"/sessions/{session_id}/resume",
             json_body=_omit_none_fields({"dynamicTools": dynamic_tools_payload}),
-            allow_statuses=(200, 410),
+            allow_statuses=(200, 403, 410),
         )
 
     def suggest_request(
@@ -838,7 +838,7 @@ class SessionsApi:
             "POST",
             f"/sessions/{session_id}/suggested-request",
             json_body=_omit_none_fields({"model": model, "effort": effort, "draft": draft}),
-            allow_statuses=(200, 202, 409, 410),
+            allow_statuses=(200, 202, 400, 403, 404, 409, 410, 429, 503),
         )
 
     def suggest_request_enqueue(
@@ -854,7 +854,7 @@ class SessionsApi:
             "POST",
             f"/sessions/{session_id}/suggested-request/jobs",
             json_body=_omit_none_fields({"model": model, "effort": effort, "draft": draft}),
-            allow_statuses=(202, 404, 410),
+            allow_statuses=(202, 400, 403, 404, 409, 410, 429, 503),
         )
 
     def suggest_request_upsert(
@@ -878,6 +878,7 @@ class SessionsApi:
                     "error": error,
                 }
             ),
+            allow_statuses=(200, 400, 403, 404, 410),
         )
 
     def transcript_upsert(
@@ -942,7 +943,7 @@ class SessionsApi:
                     "dynamicTools": dynamic_tools_payload,
                 }
             ),
-            allow_statuses=(202, 404, 410),
+            allow_statuses=(202, 400, 403, 404, 410),
         )
 
     def interrupt(self, *, session_id: str, turn_id: str | None = None) -> Any:
@@ -951,7 +952,7 @@ class SessionsApi:
             "POST",
             f"/sessions/{session_id}/interrupt",
             json_body={"turnId": turn_id} if turn_id else {},
-            allow_statuses=(200, 404, 409),
+            allow_statuses=(200, 403, 404, 409, 410),
         )
 
     def approval_policy(self, *, session_id: str, approval_policy: ApprovalPolicy) -> Any:
@@ -960,7 +961,7 @@ class SessionsApi:
             "POST",
             f"/sessions/{session_id}/approval-policy",
             json_body={"approvalPolicy": approval_policy},
-            allow_statuses=(200, 404, 410),
+            allow_statuses=(200, 403, 404, 410),
         )
 
 

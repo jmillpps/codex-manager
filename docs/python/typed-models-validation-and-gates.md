@@ -1,4 +1,4 @@
-# Python Deep Dive: Typed Validation and Gates
+# Python Typed Validation and Gates
 
 ## Purpose
 

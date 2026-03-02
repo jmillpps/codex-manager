@@ -20,6 +20,25 @@ pnpm --filter @repo/cli dev sessions send --session-id <sessionId> --text "Summa
 pnpm --filter @repo/cli dev sessions get --session-id <sessionId>
 ```
 
+## Turn and suggestion control loop
+
+```bash
+pnpm --filter @repo/cli dev sessions interrupt --session-id <sessionId>
+pnpm --filter @repo/cli dev sessions approval-policy set --session-id <sessionId> --approval-policy on-request
+pnpm --filter @repo/cli dev sessions suggest-request run --session-id <sessionId>
+pnpm --filter @repo/cli dev sessions suggest-request enqueue --session-id <sessionId>
+```
+
+## Session controls and settings loop
+
+```bash
+pnpm --filter @repo/cli dev sessions controls get --session-id <sessionId>
+pnpm --filter @repo/cli dev sessions controls apply --session-id <sessionId> --scope session --approval-policy on-request --network-access restricted --filesystem-sandbox workspace-write --inherit-model
+pnpm --filter @repo/cli dev sessions settings set --session-id <sessionId> --scope session --key supervisor --value '{"diffExplainability":true}'
+pnpm --filter @repo/cli dev sessions settings get --session-id <sessionId> --scope session --key supervisor
+pnpm --filter @repo/cli dev sessions settings unset --session-id <sessionId> --scope session --key supervisor
+```
+
 ## Queue and worker diagnosis
 
 ```bash
@@ -61,7 +80,7 @@ pnpm --filter @repo/cli dev stream events --session-id <sessionId>
 ## Raw fallback
 
 ```bash
-pnpm --filter @repo/cli dev api request --method POST --path /api/sessions/<id>/interrupt --allow-status 200,409
+pnpm --filter @repo/cli dev api request --method POST --path /api/sessions/<id>/interrupt --allow-status 200,403,409,410
 ```
 
 ## Related docs

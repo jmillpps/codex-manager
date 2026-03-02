@@ -110,9 +110,9 @@ SESSION_ID = "<session-id>"
 
 async def main() -> None:
     async with AsyncCodexManager.from_profile("local") as cm:
-        @cm.on_turn_started()
-        async def _on_turn_started(event, _ctx):
-            print("turn started:", event.context.get("turnId"))
+        @cm.on_app_server("item.started")
+        async def _on_turn_started(signal, _ctx):
+            print("turn started:", signal.context.get("turnId"))
 
         await cm.stream.run_forever(thread_id=SESSION_ID)
 

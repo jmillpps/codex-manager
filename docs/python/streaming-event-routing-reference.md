@@ -1,4 +1,4 @@
-# Python Deep Dive: Streaming Event Routing Reference
+# Python Streaming Event Routing Reference
 
 ## Purpose
 
@@ -15,13 +15,24 @@ Relevant fields in handler logic:
 - `event.type`
 - `event.payload`
 - `event.thread_id`
-- `event.turn_id`
-- `event.request_id`
+
+`StreamEvent` does not expose top-level `turn_id` or `request_id` fields.
+For app-server pass-through handlers, use `on_app_server(...)` / `on_app_server_request(...)` and read those fields from `AppServerSignal`:
+
+- `signal.context["turnId"]`
+- `signal.request_id`
 
 App-server passthrough events follow normalized names:
 
 - notifications: `app_server.<normalized_method>`
 - server requests: `app_server.request.<normalized_method>`
+
+Control and compatibility frames you may see:
+
+- control: `ready`, `pong`, `error`
+- raw compatibility: `notification`, `server_request`
+
+Control frames generally have no business payload and should be ignored by automation handlers unless you are implementing transport diagnostics.
 
 ## Handler Registration APIs
 
@@ -34,7 +45,7 @@ App-server helpers:
 
 - `on_app_server(normalized_method)`
 - `on_app_server_request(normalized_method)`
-- `on_turn_started()`
+- `on_turn_started()` (returns `StreamEvent`, alias of `app_server.item.started`)
 
 Registration order is preserved inside the default router.
 

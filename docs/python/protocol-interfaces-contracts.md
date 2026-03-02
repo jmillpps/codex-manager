@@ -1,4 +1,4 @@
-# Python Deep Dive: Protocol Interface Contracts
+# Python Protocol Interface Contracts
 
 ## Purpose
 

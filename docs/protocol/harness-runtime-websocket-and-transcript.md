@@ -1,4 +1,4 @@
-# Harness Deep Dive: Websocket, Transcript, and Lifecycle Surfaces
+# Harness Runtime: Websocket, Transcript, and Lifecycle Surfaces
 
 ## Purpose
 
@@ -32,6 +32,50 @@ Action execution is first-wins reconciled within one emit pass.
 - `approval` / `approval_resolved`
 - `tool_user_input_requested` / `tool_user_input_resolved`
 - `tool_call_requested` / `tool_call_resolved`
+
+## Raw Compatibility Websocket Events
+
+codex-manager also emits raw compatibility envelopes for diagnostics/fallback routing:
+
+- `notification` (raw app-server notification payload)
+- `server_request` (raw server-initiated request payload for unsupported methods)
+
+For supported interactive request methods (approval/tool-input/tool-call), specialized events are emitted instead of `server_request`.
+
+## Notification-Derived Alias Websocket Events
+
+codex-manager emits focused websocket aliases for several high-value app-server notifications:
+
+- `turn_plan_updated`
+- `turn_diff_updated`
+- `thread_token_usage_updated`
+- `app_list_updated` (global broadcast)
+- `mcp_oauth_completed` (global broadcast)
+- `account_updated` (global broadcast)
+- `account_login_completed` (global broadcast)
+- `account_rate_limits_updated` (global broadcast)
+
+## `/api/stream` Control-Message Contract
+
+Connection and control frames:
+
+- server sends `{"type":"ready","threadId":<initial|null>}` immediately after connect
+- client may send `{"type":"subscribe","threadId":"<sessionId>"}` to set/replace thread filter
+- client may send `{"type":"unsubscribe"}` to clear thread filter
+- client may send `{"type":"ping"}` and receives `{"type":"pong"}`
+- invalid command payloads receive `{"type":"error","message":"invalid websocket command"}`
+
+Event envelope shape:
+
+- normal event frames are published as `{"type": "...", "threadId": "...|null", "payload": ...}`
+- control frames (`ready`, `pong`, `error`) do not carry normal event payloads
+
+Thread-filter behavior:
+
+- when a socket has a thread filter, it receives only events for that thread
+- filtered sockets do not receive `threadId: null` events unless event is published as global broadcast
+- global broadcast events bypass normal thread filters
+- system-owned thread events are force-filtered and only delivered to sockets explicitly subscribed to that exact thread
 
 ## Transcript Contracts
 

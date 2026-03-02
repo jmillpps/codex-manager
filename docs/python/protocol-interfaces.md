@@ -2,9 +2,7 @@
 
 ## Purpose
 
-This is the one-level protocol-architecture guide for the Python SDK.
-
-It explains how transport, hooks, stream routing, retry/header providers, and plugins can be customized without changing public domain APIs.
+This guide explains how transport, hooks, stream routing, retry/header providers, and plugins can be customized without changing public domain APIs.
 
 ## Implemented architecture summary
 
@@ -41,7 +39,7 @@ Expected checks:
 - protocol-boundary unit tests
 - route parity checks
 
-## Read Next (Level 3)
+## Next References
 
 - Contract reference: [`protocol-interfaces-contracts.md`](./protocol-interfaces-contracts.md)
 - Example customizations: [`protocol-interfaces-examples.md`](./protocol-interfaces-examples.md)

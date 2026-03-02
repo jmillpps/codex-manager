@@ -2,9 +2,7 @@
 
 ## Purpose
 
-This is the one-level typed-model guide for the Python SDK.
-
-It summarizes generated model architecture, typed facade behavior, and validation-mode strategy.
+This guide summarizes generated model architecture, typed facade behavior, and validation-mode strategy.
 
 ## What is implemented
 
@@ -36,7 +34,7 @@ Use typed facade when you need stronger request/response guarantees for:
 - suggest-request flows
 - approval/tool-input decisions
 
-## Read Next (Level 3)
+## Next References
 
 - Typed contract reference: [`typed-models-contract-reference.md`](./typed-models-contract-reference.md)
 - Validation errors and quality gates: [`typed-models-validation-and-gates.md`](./typed-models-validation-and-gates.md)

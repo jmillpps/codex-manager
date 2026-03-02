@@ -2,9 +2,7 @@
 
 ## Purpose
 
-This is the one-level API surface guide for the Python SDK.
-
-It summarizes client domain layout, typed facade posture, and high-value workflow entrypoints.
+This guide summarizes client domain layout, typed facade posture, and high-value workflow entrypoints.
 
 ## Client layout summary
 
@@ -37,16 +35,20 @@ Optional constructor injection supports advanced integrations:
 ## Session and wait ergonomics
 
 - `client.session(session_id)` for scoped operations
+- `session.delete()` / `sessions.delete(session_id=...)` for explicit session cleanup
 - `wait.until(...)` for generic poll+predicate synchronization
+- `wait.turn_status(...)` for turn-status reads or expected-status waits
 - `wait.assistant_reply(...)`
 - `wait.send_message_and_wait_reply(...)`
+- turn/suggestion wrappers expose structured non-2xx outcomes for operational handling (`400`, `403`, `404`, `409`, `410`, `429`, `503` where applicable)
 
 ## Remote skill and dynamic tool integration
 
 - dynamic tools can be forwarded on session lifecycle/message calls
-- `remote_skills` helpers provide session-scoped tool registry and response routing
+- `remote_skills.create_session(...)` and `remote_skills.lifecycle(...)` provide create-time catalog registration with bound dispatch helpers
+- `remote_skills.session(session_id)` provides bound send/dispatch access for existing sessions
 
-## Read Next (Level 3)
+## Next References
 
 - Domain reference details: [`api-surface-domain-reference.md`](./api-surface-domain-reference.md)
 - Workflow snippets: [`api-surface-workflows.md`](./api-surface-workflows.md)

@@ -1,11 +1,52 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal, NotRequired, Required, TypedDict
 
 import pytest
 
 from codex_manager.models import AppServerSignal
 from codex_manager.remote_skills import AsyncRemoteSkillsFacade, RemoteSkillsFacade
+
+
+class _OwnerSchema:
+    def __init__(self, name: str, team: Literal["platform", "api"] = "platform") -> None:
+        self.name = name
+        self.team = team
+
+
+class _BacklogItemSchema:
+    def __init__(self, title: str, owner: _OwnerSchema, estimate: int | None = None) -> None:
+        self.title = title
+        self.owner = owner
+        self.estimate = estimate
+
+
+class _BacklogResultSchema(TypedDict):
+    issue_id: str
+    status: Literal["queued", "created"]
+
+
+class _TypedDictWithRequiredOptionalSchema(TypedDict):
+    issue_id: Required[str]
+    summary: NotRequired[str]
+
+
+class _ClassAnnotationsOnlySchema:
+    title: str
+    owner: _OwnerSchema
+    estimate: int | None
+
+
+class _NestedOwnerSchema:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _NestedForwardRefSchema:
+    Owner = _NestedOwnerSchema
+
+    def __init__(self, owner: "Owner") -> None:
+        self.owner = owner
 
 
 class _SyncSessions:
@@ -114,6 +155,13 @@ class _SyncToolCallsServerError(_SyncToolCalls):
         return {"status": "error", "requestId": request_id, "message": "runtime failure"}
 
 
+class _SyncToolCallsMissingStatus(_SyncToolCalls):
+    def respond(self, *, request_id: str, **kwargs: Any) -> dict[str, Any]:
+        call = {"request_id": request_id, **kwargs}
+        self.calls.append(call)
+        return {"requestId": request_id}
+
+
 class _SyncToolCallsFlaky(_SyncToolCalls):
     def __init__(self) -> None:
         super().__init__()
@@ -149,6 +197,20 @@ class _SyncToolCallsExceptionFlaky(_SyncToolCalls):
 class _SyncClient:
     def __init__(self) -> None:
         self.sessions = _SyncSessions()
+        self.tool_calls = _SyncToolCalls()
+        self.wait = _SyncWait()
+
+
+class _SyncSessionsDeleteNotFound(_SyncSessions):
+    def delete(self, *, session_id: str) -> dict[str, Any]:
+        call = {"session_id": session_id}
+        self.delete_calls.append(call)
+        return {"status": "not_found", "sessionId": session_id}
+
+
+class _SyncClientDeleteNotFound:
+    def __init__(self) -> None:
+        self.sessions = _SyncSessionsDeleteNotFound()
         self.tool_calls = _SyncToolCalls()
         self.wait = _SyncWait()
 
@@ -252,6 +314,13 @@ class _AsyncToolCallsConflict(_AsyncToolCalls):
         return {"status": "conflict", "code": "in_flight", "requestId": request_id}
 
 
+class _AsyncToolCallsMissingStatus(_AsyncToolCalls):
+    async def respond(self, *, request_id: str, **kwargs: Any) -> dict[str, Any]:
+        call = {"request_id": request_id, **kwargs}
+        self.calls.append(call)
+        return {"requestId": request_id}
+
+
 class _AsyncToolCallsFlaky(_AsyncToolCalls):
     def __init__(self) -> None:
         super().__init__()
@@ -287,6 +356,20 @@ class _AsyncToolCallsExceptionFlaky(_AsyncToolCalls):
 class _AsyncClient:
     def __init__(self) -> None:
         self.sessions = _AsyncSessions()
+        self.tool_calls = _AsyncToolCalls()
+        self.wait = _AsyncWait()
+
+
+class _AsyncSessionsDeleteNotFound(_AsyncSessions):
+    async def delete(self, *, session_id: str) -> dict[str, Any]:
+        call = {"session_id": session_id}
+        self.delete_calls.append(call)
+        return {"status": "not_found", "sessionId": session_id}
+
+
+class _AsyncClientDeleteNotFound:
+    def __init__(self) -> None:
+        self.sessions = _AsyncSessionsDeleteNotFound()
         self.tool_calls = _AsyncToolCalls()
         self.wait = _AsyncWait()
 
@@ -423,18 +506,42 @@ def _tool_call_signal(
     )
 
 
+def _non_tool_request_signal(
+    request_id: int | str = "ignored-1",
+    *,
+    session_id: str | None = None,
+) -> AppServerSignal:
+    return AppServerSignal(
+        event_type="app_server.request.item.file_change.request_approval",
+        method="item/fileChange/requestApproval",
+        signal_type="request",
+        received_at=None,
+        context={"threadId": session_id} if session_id else {},
+        params={},
+        session={"id": session_id} if session_id else None,
+        request_id=request_id,
+    )
+
+
 def _sync_session_with_skill(
     client: Any,
     *,
     name: str,
     handler: Any,
-    description: str,
+    description: str | None = None,
     input_schema: dict[str, Any] | None = None,
+    output_schema: dict[str, Any] | None = None,
 ) -> Any:
     facade = RemoteSkillsFacade(client)
 
     def register(skills: Any) -> None:
-        skills.register(name, handler, description=description, input_schema=input_schema)
+        skills.register(
+            name,
+            handler,
+            description=description,
+            input_schema=input_schema,
+            output_schema=output_schema,
+        )
 
     _, session = facade.create_session(register=register, cwd=".")
     return session
@@ -445,13 +552,20 @@ async def _async_session_with_skill(
     *,
     name: str,
     handler: Any,
-    description: str,
+    description: str | None = None,
     input_schema: dict[str, Any] | None = None,
+    output_schema: dict[str, Any] | None = None,
 ) -> Any:
     facade = AsyncRemoteSkillsFacade(client)
 
     def register(skills: Any) -> None:
-        skills.register(name, handler, description=description, input_schema=input_schema)
+        skills.register(
+            name,
+            handler,
+            description=description,
+            input_schema=input_schema,
+            output_schema=output_schema,
+        )
 
     _, session = await facade.create_session(register=register, cwd=".")
     return session
@@ -568,6 +682,285 @@ def test_sync_remote_skills_preserves_explicit_schema_descriptions() -> None:
     assert ticket_id.get("description") == "Explicit ticket description."
 
 
+def test_sync_remote_skills_does_not_inject_missing_properties_into_explicit_schema() -> None:
+    client = _SyncClient()
+
+    def issue_create(title: str, summary: str) -> str:
+        """
+        Create one issue.
+
+        Args:
+            title: Issue title.
+            summary: Issue summary.
+        """
+
+        return "ok"
+
+    session = _sync_session_with_skill(
+        client,
+        name="issue_create",
+        handler=issue_create,
+        input_schema={
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
+            "additionalProperties": False,
+        },
+    )
+
+    schema = session.dynamic_tools()[0]["inputSchema"]
+    properties = schema.get("properties")
+    assert isinstance(properties, dict)
+    assert "summary" not in properties
+
+
+def test_sync_remote_skills_infers_schema_from_signature_and_docstrings_when_schema_omitted() -> None:
+    client = _SyncClient()
+
+    def backlog_add(
+        title: str,
+        summary: str,
+        priority: Literal["low", "med", "high"] = "med",
+        owner_hint: str | None = None,
+    ) -> str:
+        """
+        Save a backlog item.
+
+        Args:
+            title: Short issue title.
+            summary: One-paragraph summary.
+            priority: Risk priority.
+            owner_hint: Suggested owner.
+        """
+
+        return "saved"
+
+    session = _sync_session_with_skill(client, name="backlog_add", handler=backlog_add)
+
+    schema = session.dynamic_tools()[0]["inputSchema"]
+    assert isinstance(schema, dict)
+    assert schema.get("type") == "object"
+    assert schema.get("additionalProperties") is False
+    assert schema.get("required") == ["title", "summary"]
+    assert "Save a backlog item." in str(schema.get("description"))
+
+    properties = schema.get("properties")
+    assert isinstance(properties, dict)
+    title = properties.get("title")
+    assert isinstance(title, dict)
+    assert title.get("type") == "string"
+    assert title.get("description") == "Short issue title."
+    summary = properties.get("summary")
+    assert isinstance(summary, dict)
+    assert summary.get("description") == "One-paragraph summary."
+    priority = properties.get("priority")
+    assert isinstance(priority, dict)
+    assert priority.get("type") == "string"
+    assert priority.get("enum") == ["low", "med", "high"]
+    owner_hint = properties.get("owner_hint")
+    assert isinstance(owner_hint, dict)
+    assert owner_hint.get("type") == "string"
+    assert owner_hint.get("nullable") is True
+
+
+def test_sync_remote_skills_expands_custom_object_parameters() -> None:
+    client = _SyncClient()
+
+    def backlog_add(item: _BacklogItemSchema) -> str:
+        """Store one backlog item."""
+
+        return item.title
+
+    session = _sync_session_with_skill(client, name="backlog_add", handler=backlog_add)
+    schema = session.dynamic_tools()[0]["inputSchema"]
+    properties = schema.get("properties")
+    assert isinstance(properties, dict)
+    item = properties.get("item")
+    assert isinstance(item, dict)
+    assert item.get("type") == "object"
+    assert item.get("required") == ["title", "owner"]
+    assert item.get("additionalProperties") is False
+
+    item_properties = item.get("properties")
+    assert isinstance(item_properties, dict)
+    owner = item_properties.get("owner")
+    assert isinstance(owner, dict)
+    assert owner.get("type") == "object"
+    assert owner.get("required") == ["name"]
+    owner_properties = owner.get("properties")
+    assert isinstance(owner_properties, dict)
+    assert owner_properties.get("team", {}).get("enum") == ["platform", "api"]
+
+
+def test_sync_remote_skills_expands_class_annotations_only_custom_object() -> None:
+    client = _SyncClient()
+
+    def backlog_add(item: _ClassAnnotationsOnlySchema) -> str:
+        """Store one backlog item."""
+
+        return item.title
+
+    session = _sync_session_with_skill(client, name="backlog_add", handler=backlog_add)
+    schema = session.dynamic_tools()[0]["inputSchema"]
+    properties = schema.get("properties")
+    assert isinstance(properties, dict)
+    item = properties.get("item")
+    assert isinstance(item, dict)
+    assert item.get("type") == "object"
+    assert item.get("required") == ["title", "owner", "estimate"]
+    assert item.get("additionalProperties") is False
+
+    item_properties = item.get("properties")
+    assert isinstance(item_properties, dict)
+    owner = item_properties.get("owner")
+    assert isinstance(owner, dict)
+    assert owner.get("type") == "object"
+    owner_properties = owner.get("properties")
+    assert isinstance(owner_properties, dict)
+    assert owner_properties.get("name", {}).get("type") == "string"
+
+
+def test_sync_remote_skills_resolves_nested_forward_ref_annotations() -> None:
+    client = _SyncClient()
+
+    def backlog_add(item: _NestedForwardRefSchema) -> str:
+        """Store one backlog item."""
+
+        return item.owner.name
+
+    session = _sync_session_with_skill(client, name="backlog_add", handler=backlog_add)
+    schema = session.dynamic_tools()[0]["inputSchema"]
+    properties = schema.get("properties")
+    assert isinstance(properties, dict)
+    item = properties.get("item")
+    assert isinstance(item, dict)
+    item_properties = item.get("properties")
+    assert isinstance(item_properties, dict)
+    owner = item_properties.get("owner")
+    assert isinstance(owner, dict)
+    owner_properties = owner.get("properties")
+    assert isinstance(owner_properties, dict)
+    assert owner_properties.get("name", {}).get("type") == "string"
+
+
+def test_sync_remote_skills_infers_output_contract_into_instruction_catalog() -> None:
+    client = _SyncClient()
+
+    def backlog_add(title: str) -> _BacklogResultSchema:
+        """Store one backlog item.
+
+        Args:
+            title: Title for the new issue.
+        Returns:
+            _BacklogResultSchema: Tool output with created issue id and status.
+        """
+
+        return {"issue_id": f"ISSUE-{len(title)}", "status": "queued"}
+
+    session = _sync_session_with_skill(client, name="backlog_add", handler=backlog_add)
+    instruction = session.instruction_text()
+    assert "output_schema:" in instruction
+    assert '"issue_id"' in instruction
+    assert "output_description: Tool output with created issue id and status." in instruction
+
+    dynamic_tools = session.dynamic_tools()
+    assert isinstance(dynamic_tools, list)
+    assert dynamic_tools and "outputSchema" not in dynamic_tools[0]
+
+
+def test_sync_remote_skills_expands_typed_dict_required_and_not_required_annotations() -> None:
+    client = _SyncClient()
+
+    def backlog_add(item: _TypedDictWithRequiredOptionalSchema) -> str:
+        """Store one backlog item."""
+
+        return item["issue_id"]
+
+    session = _sync_session_with_skill(client, name="backlog_add", handler=backlog_add)
+    schema = session.dynamic_tools()[0]["inputSchema"]
+    properties = schema.get("properties")
+    assert isinstance(properties, dict)
+    item = properties.get("item")
+    assert isinstance(item, dict)
+    assert item.get("required") == ["issue_id"]
+    item_properties = item.get("properties")
+    assert isinstance(item_properties, dict)
+    assert item_properties.get("issue_id", {}).get("type") == "string"
+    assert item_properties.get("summary", {}).get("type") == "string"
+
+
+def test_sync_remote_skills_infers_output_schema_for_typed_dict_required_optional() -> None:
+    client = _SyncClient()
+
+    def backlog_add(title: str) -> _TypedDictWithRequiredOptionalSchema:
+        """Store one backlog item.
+
+        Returns:
+            _TypedDictWithRequiredOptionalSchema: Created backlog record.
+        """
+
+        return {"issue_id": f"ISSUE-{len(title)}"}
+
+    session = _sync_session_with_skill(client, name="backlog_add", handler=backlog_add)
+    instruction = session.instruction_text()
+    assert "output_schema:" in instruction
+    assert '"issue_id"' in instruction
+    assert '"summary"' in instruction
+    assert '"required": ["issue_id"]' in instruction
+
+
+def test_sync_remote_skills_does_not_merge_return_contract_into_input_schema() -> None:
+    client = _SyncClient()
+
+    def backlog_add(title: str) -> _BacklogResultSchema:
+        """Store one backlog item.
+
+        Args:
+            title: Title for the new issue.
+        Returns:
+            _BacklogResultSchema: Tool output with created issue id and status.
+        """
+
+        return {"issue_id": f"ISSUE-{len(title)}", "status": "queued"}
+
+    session = _sync_session_with_skill(client, name="backlog_add", handler=backlog_add)
+    schema = session.dynamic_tools()[0]["inputSchema"]
+    assert isinstance(schema, dict)
+    schema_text = str(schema)
+    assert "Tool output with created issue id and status." not in schema_text
+    assert "issue_id" not in schema_text
+    assert "status" not in schema_text
+
+    instruction = session.instruction_text()
+    assert "output_schema:" in instruction
+    assert '"issue_id"' in instruction
+    assert "output_description: Tool output with created issue id and status." in instruction
+
+
+def test_sync_remote_skills_infers_description_and_falls_back_when_missing() -> None:
+    client = _SyncClient()
+
+    def summarize_repo(path: str) -> str:
+        """Summarize repository structure."""
+
+        return path
+
+    described = _sync_session_with_skill(client, name="summarize_repo", handler=summarize_repo)
+    dynamic_tools = described.dynamic_tools()
+    assert isinstance(dynamic_tools, list)
+    assert dynamic_tools and dynamic_tools[0]["description"] == "Summarize repository structure."
+
+    client_no_doc = _SyncClient()
+
+    def ping() -> str:
+        return "pong"
+
+    fallback = _sync_session_with_skill(client_no_doc, name="ping", handler=ping)
+    fallback_tools = fallback.dynamic_tools()
+    assert isinstance(fallback_tools, list)
+    assert fallback_tools and fallback_tools[0]["description"] == "Remote skill ping"
+
+
 def test_sync_remote_skills_create_session_registers_tools_on_create() -> None:
     client = _SyncClient()
     facade = RemoteSkillsFacade(client)
@@ -629,6 +1022,23 @@ def test_sync_remote_skills_close_session_clears_and_deletes() -> None:
     assert client.sessions.resume_calls == []
     assert client.sessions.delete_calls and client.sessions.delete_calls[0]["session_id"] == skills.session_id
     assert facade.session(skills.session_id).list() == []
+
+
+def test_sync_remote_skills_close_session_not_found_reports_deleted_false() -> None:
+    client = _SyncClientDeleteNotFound()
+    facade = RemoteSkillsFacade(client)
+    _, skills = facade.create_session(
+        register=lambda draft: draft.register("ping", lambda: "pong", description="Health check"),
+        cwd=".",
+    )
+
+    result = facade.close_session(skills.session_id, delete_session=True)
+
+    assert result["sessionId"] == skills.session_id
+    assert result["deleted"] is False
+    delete_response = result.get("deleteResponse")
+    assert isinstance(delete_response, dict)
+    assert delete_response.get("status") == "not_found"
 
 
 def test_sync_remote_skills_lifecycle_deletes_by_default() -> None:
@@ -802,6 +1212,26 @@ def test_sync_remote_skills_marks_dispatch_failed_when_response_is_server_error(
     assert "status=error" in dispatched.error
 
 
+def test_sync_remote_skills_marks_dispatch_failed_when_response_status_missing() -> None:
+    client = _SyncClient()
+    client.tool_calls = _SyncToolCallsMissingStatus()
+    session = _sync_session_with_skill(
+        client,
+        name="lookup_ticket",
+        handler=lambda ticket_id: {"ticketId": ticket_id, "status": "open"},
+        description="Lookup ticket state by id",
+    )
+
+    dispatched = session.respond_to_signal(
+        _tool_call_signal("lookup_ticket", {"ticket_id": "ABC-123"}, request_id=560)
+    )
+
+    assert dispatched is not None
+    assert dispatched.handled is False
+    assert dispatched.submission_status == "malformed"
+    assert dispatched.error is not None
+
+
 def test_sync_remote_skills_retries_response_submission_and_succeeds() -> None:
     client = _SyncClient()
     client.tool_calls = _SyncToolCallsFlaky()
@@ -968,6 +1398,26 @@ def test_sync_remote_skills_send_and_handle_returns_dispatches_and_status() -> N
     assert client.tool_calls.calls and client.tool_calls.calls[0]["request_id"] == "1"
 
 
+def test_sync_remote_skills_send_and_handle_accepts_terminal_status_string() -> None:
+    client = _SyncClientSendAndHandle()
+    session = _sync_session_with_skill(
+        client,
+        name="ping",
+        handler=lambda: "pong",
+        description="Health check",
+    )
+
+    result = session.send_and_handle(
+        "run ping",
+        inject_skills=False,
+        timeout_seconds=2,
+        interval_seconds=0.01,
+        terminal_statuses="completed",
+    )
+
+    assert result.status == "completed"
+
+
 def test_sync_remote_skills_dispatch_mode_guard_requires_reset() -> None:
     client = _SyncClient()
     session = _sync_session_with_skill(
@@ -989,6 +1439,68 @@ def test_sync_remote_skills_dispatch_mode_guard_requires_reset() -> None:
     session.reset_dispatch_mode()
     drained = session.drain_pending_calls()
     assert drained and drained[0].tool == "ping"
+
+
+def test_sync_remote_skills_non_tool_signal_does_not_lock_dispatch_mode() -> None:
+    client = _SyncClient()
+    session = _sync_session_with_skill(
+        client,
+        name="ping",
+        handler=lambda: "pong",
+        description="Health check",
+    )
+    client.sessions.tool_calls_payload = {
+        "data": [{"requestId": "31", "tool": "ping", "arguments": {}}]
+    }
+
+    ignored = session.respond_to_signal(
+        _non_tool_request_signal(session_id=session.session_id),
+    )
+    assert ignored is None
+
+    drained = session.drain_pending_calls()
+    assert drained and drained[0].tool == "ping"
+
+
+def test_sync_remote_skills_noop_drain_does_not_lock_dispatch_mode() -> None:
+    client = _SyncClient()
+    session = _sync_session_with_skill(
+        client,
+        name="ping",
+        handler=lambda: "pong",
+        description="Health check",
+    )
+
+    assert session.drain_pending_calls() == []
+    dispatched = session.respond_to_signal(
+        _tool_call_signal("ping", {}, request_id="noop-drain-1", session_id=session.session_id)
+    )
+    assert dispatched is not None
+    assert dispatched.handled is True
+
+
+def test_sync_remote_skills_overflow_cache_keeps_latest_duplicate_protection() -> None:
+    client = _SyncClient()
+    session = _sync_session_with_skill(
+        client,
+        name="ping",
+        handler=lambda: "pong",
+        description="Health check",
+    )
+    session._registry.handled_request_ids = {f"old-{index}" for index in range(4096)}
+
+    first = session.respond_to_signal(
+        _tool_call_signal("ping", {}, request_id="overflow-1", session_id=session.session_id)
+    )
+    second = session.respond_to_signal(
+        _tool_call_signal("ping", {}, request_id="overflow-1", session_id=session.session_id)
+    )
+
+    assert first is not None and first.handled is True
+    assert second is not None
+    assert second.submission_status == "local_duplicate"
+    assert second.submission_idempotent is True
+    assert len(client.tool_calls.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -1054,6 +1566,98 @@ async def test_async_remote_skills_create_session_registers_tools_on_create() ->
 
 
 @pytest.mark.asyncio
+async def test_async_remote_skills_infers_schema_when_input_schema_omitted() -> None:
+    client = _AsyncClient()
+    facade = AsyncRemoteSkillsFacade(client)
+
+    def register(skills: Any) -> None:
+        def lookup_ticket(ticket_id: str, include_closed: bool = False) -> dict[str, str]:
+            """
+            Lookup ticket status by id.
+
+            Args:
+                ticket_id: Stable ticket identifier.
+                include_closed: Include closed tickets when true.
+            """
+
+            return {"ticketId": ticket_id, "status": "open"}
+
+        skills.register("lookup_ticket", lookup_ticket, description="Lookup ticket state by id")
+
+    await facade.create_session(register=register, cwd=".")
+    dynamic_tools = client.sessions.create_calls[0].get("dynamic_tools")
+    assert isinstance(dynamic_tools, list)
+    assert dynamic_tools and dynamic_tools[0]["name"] == "lookup_ticket"
+
+    schema = dynamic_tools[0]["inputSchema"]
+    assert isinstance(schema, dict)
+    assert schema.get("required") == ["ticket_id"]
+    properties = schema.get("properties")
+    assert isinstance(properties, dict)
+    ticket_id = properties.get("ticket_id")
+    assert isinstance(ticket_id, dict)
+    assert ticket_id.get("type") == "string"
+    assert ticket_id.get("description") == "Stable ticket identifier."
+    include_closed = properties.get("include_closed")
+    assert isinstance(include_closed, dict)
+    assert include_closed.get("type") == "boolean"
+    assert include_closed.get("description") == "Include closed tickets when true."
+
+
+@pytest.mark.asyncio
+async def test_async_remote_skills_infers_description_from_docstring() -> None:
+    client = _AsyncClient()
+    session = await _async_session_with_skill(
+        client,
+        name="lookup_ticket",
+        handler=lambda ticket_id: ticket_id,
+    )
+    tools = session.dynamic_tools()
+    assert isinstance(tools, list)
+    assert tools and tools[0]["description"] == "Remote skill lookup_ticket"
+
+    def summarize_diff(diff_text: str) -> str:
+        """Summarize a unified diff."""
+
+        return diff_text
+
+    session_with_doc = await _async_session_with_skill(
+        client,
+        name="summarize_diff",
+        handler=summarize_diff,
+    )
+    tools_with_doc = session_with_doc.dynamic_tools()
+    assert isinstance(tools_with_doc, list)
+    assert tools_with_doc and tools_with_doc[0]["description"] == "Summarize a unified diff."
+
+
+@pytest.mark.asyncio
+async def test_async_remote_skills_accepts_explicit_output_schema_override() -> None:
+    client = _AsyncClient()
+
+    async def lookup_ticket(ticket_id: str) -> dict[str, str]:
+        """Lookup a ticket and return summary."""
+
+        return {"ticketId": ticket_id, "status": "open"}
+
+    session = await _async_session_with_skill(
+        client,
+        name="lookup_ticket",
+        handler=lookup_ticket,
+        output_schema={
+            "type": "object",
+            "properties": {"ticketId": {"type": "string"}, "status": {"type": "string"}},
+            "required": ["ticketId", "status"],
+            "additionalProperties": False,
+        },
+    )
+
+    instruction = session.instruction_text()
+    assert "output_schema:" in instruction
+    assert '"ticketId"' in instruction
+
+
+@pytest.mark.asyncio
 async def test_async_remote_skills_create_session_supports_async_register_callback() -> None:
     client = _AsyncClient()
     facade = AsyncRemoteSkillsFacade(client)
@@ -1099,6 +1703,24 @@ async def test_async_remote_skills_close_session_clears_and_deletes() -> None:
     assert client.sessions.resume_calls == []
     assert client.sessions.delete_calls and client.sessions.delete_calls[0]["session_id"] == skills.session_id
     assert facade.session(skills.session_id).list() == []
+
+
+@pytest.mark.asyncio
+async def test_async_remote_skills_close_session_not_found_reports_deleted_false() -> None:
+    client = _AsyncClientDeleteNotFound()
+    facade = AsyncRemoteSkillsFacade(client)
+    _, skills = await facade.create_session(
+        register=lambda draft: draft.register("ping", lambda: "pong", description="Health check"),
+        cwd=".",
+    )
+
+    result = await facade.close_session(skills.session_id, delete_session=True)
+
+    assert result["sessionId"] == skills.session_id
+    assert result["deleted"] is False
+    delete_response = result.get("deleteResponse")
+    assert isinstance(delete_response, dict)
+    assert delete_response.get("status") == "not_found"
 
 
 @pytest.mark.asyncio
@@ -1185,6 +1807,27 @@ async def test_async_remote_skills_send_and_handle_returns_dispatches_and_status
 
 
 @pytest.mark.asyncio
+async def test_async_remote_skills_send_and_handle_accepts_terminal_status_string() -> None:
+    client = _AsyncClientSendAndHandle()
+    session = await _async_session_with_skill(
+        client,
+        name="ping",
+        handler=lambda: "pong",
+        description="Health check",
+    )
+
+    result = await session.send_and_handle(
+        "run ping",
+        inject_skills=False,
+        timeout_seconds=2,
+        interval_seconds=0.01,
+        terminal_statuses="completed",
+    )
+
+    assert result.status == "completed"
+
+
+@pytest.mark.asyncio
 async def test_async_remote_skills_dispatch_mode_guard_requires_reset() -> None:
     client = _AsyncClient()
     session = await _async_session_with_skill(
@@ -1209,6 +1852,46 @@ async def test_async_remote_skills_dispatch_mode_guard_requires_reset() -> None:
 
 
 @pytest.mark.asyncio
+async def test_async_remote_skills_non_tool_signal_does_not_lock_dispatch_mode() -> None:
+    client = _AsyncClient()
+    session = await _async_session_with_skill(
+        client,
+        name="ping",
+        handler=lambda: "pong",
+        description="Health check",
+    )
+    client.sessions.tool_calls_payload = {
+        "data": [{"requestId": "41", "tool": "ping", "arguments": {}}]
+    }
+
+    ignored = await session.respond_to_signal(
+        _non_tool_request_signal(session_id=session.session_id),
+    )
+    assert ignored is None
+
+    drained = await session.drain_pending_calls()
+    assert drained and drained[0].tool == "ping"
+
+
+@pytest.mark.asyncio
+async def test_async_remote_skills_noop_drain_does_not_lock_dispatch_mode() -> None:
+    client = _AsyncClient()
+    session = await _async_session_with_skill(
+        client,
+        name="ping",
+        handler=lambda: "pong",
+        description="Health check",
+    )
+
+    assert await session.drain_pending_calls() == []
+    dispatched = await session.respond_to_signal(
+        _tool_call_signal("ping", {}, request_id="noop-drain-2", session_id=session.session_id)
+    )
+    assert dispatched is not None
+    assert dispatched.handled is True
+
+
+@pytest.mark.asyncio
 async def test_async_remote_skills_treats_conflict_as_idempotent_success() -> None:
     client = _AsyncClient()
     client.tool_calls = _AsyncToolCallsConflict()
@@ -1228,6 +1911,27 @@ async def test_async_remote_skills_treats_conflict_as_idempotent_success() -> No
     assert dispatched.submission_status == "conflict"
     assert dispatched.submission_code == "in_flight"
     assert dispatched.submission_idempotent is True
+
+
+@pytest.mark.asyncio
+async def test_async_remote_skills_marks_dispatch_failed_when_response_status_missing() -> None:
+    client = _AsyncClient()
+    client.tool_calls = _AsyncToolCallsMissingStatus()
+    session = await _async_session_with_skill(
+        client,
+        name="ping",
+        handler=lambda: "pong",
+        description="Health check",
+    )
+
+    dispatched = await session.respond_to_signal(
+        _tool_call_signal("ping", {}, request_id="ac-missing-status", session_id=session.session_id)
+    )
+
+    assert dispatched is not None
+    assert dispatched.handled is False
+    assert dispatched.submission_status == "malformed"
+    assert dispatched.error is not None
 
 
 @pytest.mark.asyncio

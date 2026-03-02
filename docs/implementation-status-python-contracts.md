@@ -17,14 +17,18 @@ Implemented core capabilities:
 - protocol-oriented dependency injection boundaries
 - deterministic plugin lifecycle support
 - generic wait helpers for sync/async workflows
+- session wrapper status handling aligned with API for system-owned sessions (`403`) on approvals/tool-input/controls/settings/resume routes
+- turn-control and suggest-request wrappers include operational non-2xx status handling aligned to API contracts
 
 ## Remote tool and orchestration support
 
 Implemented:
 
 - dynamic tool-call wrappers (`sessions.tool_calls`, `tool_calls.respond`)
-- remote-skill session registry helpers
-- catalog preparation/runtime sync helpers
+- create-time remote-skill catalog registration helpers (`remote_skills.create_session`, `remote_skills.lifecycle`)
+- bound-session dispatch helpers (`respond_to_signal`, `respond_to_pending_call`, `drain_pending_calls`, `send_and_handle`)
+- signature/docstring-driven remote-skill input schema enrichment, including structured object-type expansion support
+- inferred return-contract instruction metadata (`output_schema`, `output_description`) for remote-skill prompt grounding
 - pending-call drain fallback for websocket delay windows
 
 ## Typed model status

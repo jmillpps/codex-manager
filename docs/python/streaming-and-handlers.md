@@ -2,9 +2,7 @@
 
 ## Purpose
 
-This is the one-level stream and handler guide for the Python client.
-
-It explains how to consume codex-manager websocket events, register handler decorators, and connect stream events to automation workflows.
+This guide explains how to consume codex-manager websocket events, register handler decorators, and connect stream events to automation workflows.
 
 ## Stream entrypoints
 
@@ -16,6 +14,17 @@ Websocket endpoint:
 - `/api/stream`
 
 By default, the SDK uses a deterministic registration-order event router with handler isolation.
+
+Connection behavior:
+
+- SDK opens `/api/stream?threadId=<id>` when `thread_id` is provided
+- SDK also sends a subscribe command for the same thread after connect
+- SDK emits periodic websocket ping commands and tolerates reconnect windows automatically
+
+Frame classes:
+
+- control frames: `ready`, `pong`, `error`
+- normal event frames: envelope with `type`, `threadId`, and `payload`
 
 ## Core decorator APIs
 
@@ -29,6 +38,13 @@ App-server specific routing:
 - `on_app_server(normalized_method)`
 - `on_app_server_request(normalized_method)`
 - `on_turn_started()` (alias for `app_server.item.started`)
+
+Handler input types:
+
+- `on_event(...)` / `on_event_prefix(...)` / `on_turn_started()` receive `StreamEvent`
+  (`type`, `thread_id`, `payload`)
+- `on_app_server(...)` / `on_app_server_request(...)` receive `AppServerSignal`
+  (`method`, `signal_type`, `context`, `params`, `request_id`)
 
 ## Minimal async listener
 
@@ -62,9 +78,9 @@ asyncio.run(main())
 from codex_manager import CodexManager
 
 with CodexManager.from_profile("local") as cm:
-    @cm.on_turn_started()
-    def on_turn_started(event, _ctx):
-        print("turn started", event.turn_id)
+    @cm.on_app_server("item.started")
+    def on_turn_started(signal, _ctx):
+        print("turn started", signal.context.get("turnId"))
 
     cm.stream.run_forever(thread_id="<session-id>")
 ```
@@ -73,20 +89,21 @@ with CodexManager.from_profile("local") as cm:
 
 Tool-call requests are emitted as `app_server.request.item.tool.call`.
 
-Use remote-skill session helpers to dispatch and respond:
+Define skills at session creation, then use the bound session helper to dispatch and respond:
 
 ```python
 import asyncio
 from codex_manager import AsyncCodexManager
 
 async def main() -> None:
-    session_id = "<session-id>"
     async with AsyncCodexManager.from_profile("local") as cm:
-        skills = cm.remote_skills.session(session_id)
+        def register(skills):
+            @skills.skill(name="uppercase")
+            async def uppercase(text: str) -> str:
+                return text.upper()
 
-        @skills.skill(description="Uppercase text")
-        async def uppercase(text: str) -> str:
-            return text.upper()
+        created, skills = await cm.remote_skills.create_session(register=register, cwd=".")
+        session_id = created["session"]["sessionId"]
 
         @cm.on_app_server_request("item.tool.call")
         async def on_dynamic_tool_call(signal, _ctx):
@@ -149,8 +166,9 @@ cm.use_middleware(AuditMiddleware())
 - avoid heavy blocking work inside handlers; queue or offload expensive work
 - for long-running async listeners, use `stop_event` for controlled shutdown
 - combine realtime handlers with polling fallback when workflow reliability requires it
+- avoid binding automation logic to control frames (`ready`, `pong`) unless you explicitly need transport diagnostics
 
-## Read Next (Level 3)
+## Next References
 
 - Event routing and matcher semantics: [`streaming-event-routing-reference.md`](./streaming-event-routing-reference.md)
 - Reconnect/backpressure reliability patterns: [`streaming-reliability-patterns.md`](./streaming-reliability-patterns.md)

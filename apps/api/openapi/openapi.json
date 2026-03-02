@@ -2006,6 +2006,16 @@
           "200": {
             "description": "Pending approvals"
           },
+          "403": {
+            "description": "System-owned session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemSessionError"
+                }
+              }
+            }
+          },
           "410": {
             "description": "Session deleted"
           }
@@ -2030,6 +2040,16 @@
         "responses": {
           "200": {
             "description": "Pending tool-input requests"
+          },
+          "403": {
+            "description": "System-owned session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemSessionError"
+                }
+              }
+            }
           },
           "410": {
             "description": "Session deleted"
@@ -2097,6 +2117,16 @@
         "responses": {
           "200": {
             "description": "Session controls"
+          },
+          "403": {
+            "description": "System-owned session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemSessionError"
+                }
+              }
+            }
           },
           "404": {
             "description": "Session not found"
@@ -2200,6 +2230,16 @@
           },
           "400": {
             "description": "Invalid request"
+          },
+          "403": {
+            "description": "System-owned session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemSessionError"
+                }
+              }
+            }
           },
           "404": {
             "description": "Session not found"
@@ -2518,6 +2558,16 @@
         "responses": {
           "200": {
             "description": "Session resumed"
+          },
+          "403": {
+            "description": "System-owned session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemSessionError"
+                }
+              }
+            }
           },
           "410": {
             "description": "Session deleted"
@@ -3078,6 +3128,16 @@
         "responses": {
           "200": {
             "description": "Turn interrupted"
+          },
+          "403": {
+            "description": "System session forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemSessionError"
+                }
+              }
+            }
           },
           "409": {
             "description": "No active turn"

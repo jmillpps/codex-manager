@@ -129,6 +129,12 @@ Pending requests are also forwarded on websocket as:
 - `tool_call_requested`
 - `tool_call_resolved`
 
+In codex-manager, the same server request is also emitted through pass-through event families for extension routing:
+
+- `app_server.request.item.tool.call`
+
+Equivalent pass-through + pending-event pairing exists for approval and tool-input request methods.
+
 ## Related docs
 
 - Protocol overview and transport: [`overview.md`](./overview.md)

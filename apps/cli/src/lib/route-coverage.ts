@@ -44,28 +44,98 @@ export const CLI_ROUTE_BINDINGS: Array<CliRouteBinding> = [
   { method: "POST", path: "/api/sessions", command: "sessions create" },
   { method: "DELETE", path: "/api/sessions/:sessionId", command: "sessions delete" },
   { method: "GET", path: "/api/sessions/:sessionId", command: "sessions get" },
-  { method: "POST", path: "/api/sessions/:sessionId/approval-policy", command: "sessions approval-policy set" },
-  { method: "GET", path: "/api/sessions/:sessionId/approvals", command: "sessions approvals list" },
+  {
+    method: "POST",
+    path: "/api/sessions/:sessionId/approval-policy",
+    command: "sessions approval-policy set",
+    allowStatuses: [200, 403, 404, 410]
+  },
+  {
+    method: "GET",
+    path: "/api/sessions/:sessionId/approvals",
+    command: "sessions approvals list",
+    allowStatuses: [200, 403, 410]
+  },
   { method: "POST", path: "/api/sessions/:sessionId/archive", command: "sessions archive" },
   { method: "POST", path: "/api/sessions/:sessionId/background-terminals/clean", command: "sessions background-terminals clean" },
   { method: "POST", path: "/api/sessions/:sessionId/compact", command: "sessions compact" },
   { method: "POST", path: "/api/sessions/:sessionId/fork", command: "sessions fork" },
-  { method: "POST", path: "/api/sessions/:sessionId/interrupt", command: "sessions interrupt" },
-  { method: "POST", path: "/api/sessions/:sessionId/messages", command: "sessions send" },
+  {
+    method: "POST",
+    path: "/api/sessions/:sessionId/interrupt",
+    command: "sessions interrupt",
+    allowStatuses: [200, 403, 409, 410]
+  },
+  {
+    method: "POST",
+    path: "/api/sessions/:sessionId/messages",
+    command: "sessions send",
+    allowStatuses: [202, 400, 403, 404, 410]
+  },
   { method: "POST", path: "/api/sessions/:sessionId/project", command: "sessions project set" },
   { method: "POST", path: "/api/sessions/:sessionId/rename", command: "sessions rename" },
-  { method: "POST", path: "/api/sessions/:sessionId/resume", command: "sessions resume" },
+  {
+    method: "POST",
+    path: "/api/sessions/:sessionId/resume",
+    command: "sessions resume",
+    allowStatuses: [200, 403, 410]
+  },
   { method: "POST", path: "/api/sessions/:sessionId/review", command: "sessions review start" },
   { method: "POST", path: "/api/sessions/:sessionId/rollback", command: "sessions rollback" },
-  { method: "GET", path: "/api/sessions/:sessionId/settings", command: "sessions settings get" },
-  { method: "POST", path: "/api/sessions/:sessionId/settings", command: "sessions settings set" },
-  { method: "DELETE", path: "/api/sessions/:sessionId/settings/:key", command: "sessions settings unset" },
-  { method: "GET", path: "/api/sessions/:sessionId/session-controls", command: "sessions controls get" },
-  { method: "POST", path: "/api/sessions/:sessionId/session-controls", command: "sessions controls apply" },
-  { method: "POST", path: "/api/sessions/:sessionId/suggested-request", command: "sessions suggest-request run" },
-  { method: "POST", path: "/api/sessions/:sessionId/suggested-request/jobs", command: "sessions suggest-request enqueue" },
-  { method: "POST", path: "/api/sessions/:sessionId/suggested-request/upsert", command: "sessions suggest-request upsert" },
-  { method: "GET", path: "/api/sessions/:sessionId/tool-input", command: "sessions tool-input list" },
+  {
+    method: "GET",
+    path: "/api/sessions/:sessionId/settings",
+    command: "sessions settings get",
+    allowStatuses: [200, 403, 404, 410]
+  },
+  {
+    method: "POST",
+    path: "/api/sessions/:sessionId/settings",
+    command: "sessions settings set",
+    allowStatuses: [200, 400, 403, 404, 410, 423]
+  },
+  {
+    method: "DELETE",
+    path: "/api/sessions/:sessionId/settings/:key",
+    command: "sessions settings unset",
+    allowStatuses: [200, 403, 404, 410, 423]
+  },
+  {
+    method: "GET",
+    path: "/api/sessions/:sessionId/session-controls",
+    command: "sessions controls get",
+    allowStatuses: [200, 403, 404, 410]
+  },
+  {
+    method: "POST",
+    path: "/api/sessions/:sessionId/session-controls",
+    command: "sessions controls apply",
+    allowStatuses: [200, 400, 403, 404, 410, 423]
+  },
+  {
+    method: "POST",
+    path: "/api/sessions/:sessionId/suggested-request",
+    command: "sessions suggest-request run",
+    allowStatuses: [200, 202, 400, 403, 404, 409, 410, 429]
+  },
+  {
+    method: "POST",
+    path: "/api/sessions/:sessionId/suggested-request/jobs",
+    command: "sessions suggest-request enqueue",
+    allowStatuses: [202, 400, 403, 404, 409, 410, 429]
+  },
+  {
+    method: "POST",
+    path: "/api/sessions/:sessionId/suggested-request/upsert",
+    command: "sessions suggest-request upsert",
+    allowStatuses: [200, 400, 403, 404, 410]
+  },
+  {
+    method: "GET",
+    path: "/api/sessions/:sessionId/tool-input",
+    command: "sessions tool-input list",
+    allowStatuses: [200, 403, 410]
+  },
   {
     method: "GET",
     path: "/api/sessions/:sessionId/tool-calls",

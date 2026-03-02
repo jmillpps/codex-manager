@@ -46,6 +46,12 @@ Dispatch order is deterministic by priority/module/registration index.
 
 Normalization converts app-server method path segments into snake_case dot names.
 
+Dispatch scope notes:
+
+- app-server pass-through events are emitted for normal user sessions
+- pass-through events are suppressed for system-owned and purged/deleted sessions
+- for supported interactive request methods, pass-through request events are emitted and codex-manager also emits specialized websocket pending-decision events
+
 ## Handler output expectations
 
 Handlers may return enqueue outputs, action requests, diagnostics, or no output.

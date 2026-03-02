@@ -20,6 +20,8 @@ Checks:
 
 - `OPENAI_API_KEY` in API process environment
 - `CODEX_HOME/auth.json` presence when using Codex auth state
+- if `CODEX_HOME/auth.json` is missing, verify whether `~/.codex/auth.json` exists and restart API (startup performs bootstrap copy when `CODEX_HOME` is set)
+- complete login via account endpoints (`/api/account/login/start`) if no credential source is available
 - restart API after env changes
 
 ## Runtime supervision failures

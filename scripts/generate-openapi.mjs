@@ -921,6 +921,7 @@ const openApiDocument = {
         parameters: [pathParam("sessionId", "Session id")],
         responses: responses([
           [200, "Pending approvals"],
+          [403, jsonResponse("System-owned session", schemaRef("SystemSessionError"))],
           [410, "Session deleted"]
         ])
       }
@@ -932,6 +933,7 @@ const openApiDocument = {
         parameters: [pathParam("sessionId", "Session id")],
         responses: responses([
           [200, "Pending tool-input requests"],
+          [403, jsonResponse("System-owned session", schemaRef("SystemSessionError"))],
           [410, "Session deleted"]
         ])
       }
@@ -955,6 +957,7 @@ const openApiDocument = {
         parameters: [pathParam("sessionId", "Session id")],
         responses: responses([
           [200, "Session controls"],
+          [403, jsonResponse("System-owned session", schemaRef("SystemSessionError"))],
           [404, "Session not found"],
           [410, "Session deleted"]
         ])
@@ -986,6 +989,7 @@ const openApiDocument = {
         responses: responses([
           [200, "Session controls applied"],
           [400, "Invalid request"],
+          [403, jsonResponse("System-owned session", schemaRef("SystemSessionError"))],
           [404, "Session not found"],
           [410, "Session deleted"],
           [423, "Default controls locked"]
@@ -1051,6 +1055,7 @@ const openApiDocument = {
         requestBody: requestBody(schemaRef("ResumeSessionRequest"), false),
         responses: responses([
           [200, "Session resumed"],
+          [403, jsonResponse("System-owned session", schemaRef("SystemSessionError"))],
           [410, "Session deleted"]
         ])
       }
@@ -1181,6 +1186,7 @@ const openApiDocument = {
         ),
         responses: responses([
           [200, "Turn interrupted"],
+          [403, jsonResponse("System session forbidden", schemaRef("SystemSessionError"))],
           [409, "No active turn"],
           [410, "Session deleted"]
         ])

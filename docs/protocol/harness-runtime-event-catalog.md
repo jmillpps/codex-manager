@@ -1,4 +1,4 @@
-# Harness Deep Dive: Runtime Event Catalog
+# Harness Runtime: Event Catalog
 
 ## Purpose
 
@@ -18,6 +18,12 @@ Use with [`harness-runtime-events.md`](./harness-runtime-events.md) when buildin
 
 - notification family: `app_server.<normalized_method>`
 - request family: `app_server.request.<normalized_method>`
+
+Emission scope notes:
+
+- pass-through events are not emitted for purged/deleted sessions
+- pass-through events are not emitted for system-owned sessions
+- request pass-through is emitted before specialized interactive-request handling for normal user sessions
 
 Normalization:
 
@@ -44,6 +50,24 @@ Examples commonly used by repository workflows:
 - `item/started` -> `app_server.item.started`
 - `item/tool/call` -> `app_server.request.item.tool.call`
 - `item/fileChange/requestApproval` -> `app_server.request.item.file_change.request_approval`
+
+Interactive request mapping for user sessions:
+
+- `item/commandExecution/requestApproval` and `item/fileChange/requestApproval`:
+  - pass-through signal: `app_server.request.item.*.request_approval`
+  - websocket pending event: `approval`
+- `item/tool/requestUserInput`:
+  - pass-through signal: `app_server.request.item.tool.request_user_input`
+  - websocket pending event: `tool_user_input_requested`
+- `item/tool/call`:
+  - pass-through signal: `app_server.request.item.tool.call`
+  - websocket pending event: `tool_call_requested`
+
+Unsupported server-request methods (user sessions):
+
+- pass-through signal is still emitted
+- websocket `server_request` event is emitted
+- runtime responds `-32601` unsupported method
 
 ## Core Harness Event Payload Highlights
 
